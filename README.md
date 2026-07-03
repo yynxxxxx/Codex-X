@@ -92,6 +92,10 @@ Exploits official config mechanism. No binary mod, no MITM, no process tampering
 
 MIT
 
+## 致谢 / Thanks
+
+感谢 [LINUX DO 论坛](https://linux.do/) 社区的关注、反馈与支持。
+
 ## Star History
 
 <p align="center">
