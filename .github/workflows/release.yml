@@ -105,6 +105,41 @@ jobs:
           EOF
           powershell -NoProfile -Command "Compress-Archive -Path 'apps/desktop/src-tauri/portable/Codex-X_${version}_windows_x64_portable/*' -DestinationPath 'apps/desktop/src-tauri/Codex-X_${version}_windows_x64_portable.zip' -Force"
 
+      - name: Normalize release asset names
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          case "${{ matrix.name }}" in
+            "macOS Apple Silicon")
+              target="apps/desktop/src-tauri/target/release/bundle/dmg/Codex-X_${version}_macos_apple_silicon_aarch64.dmg"
+              src=$(find apps/desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' | head -n 1)
+              test -n "$src"
+              mv "$src" "$target"
+              ;;
+            "macOS Intel")
+              target="apps/desktop/src-tauri/target/release/bundle/dmg/Codex-X_${version}_macos_intel_x64.dmg"
+              src=$(find apps/desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' | head -n 1)
+              test -n "$src"
+              mv "$src" "$target"
+              ;;
+            "Windows")
+              target="apps/desktop/src-tauri/target/release/bundle/msi/Codex-X_${version}_windows_x64.msi"
+              src=$(find apps/desktop/src-tauri/target/release/bundle/msi -maxdepth 1 -type f -name '*.msi' | head -n 1)
+              test -n "$src"
+              mv "$src" "$target"
+              ;;
+            "Linux")
+              deb_target="apps/desktop/src-tauri/target/release/bundle/deb/Codex-X_${version}_linux_x64.deb"
+              rpm_target="apps/desktop/src-tauri/target/release/bundle/rpm/Codex-X_${version}_linux_x64.rpm"
+              deb_src=$(find apps/desktop/src-tauri/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' | head -n 1)
+              rpm_src=$(find apps/desktop/src-tauri/target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' | head -n 1)
+              test -n "$deb_src"
+              test -n "$rpm_src"
+              mv "$deb_src" "$deb_target"
+              mv "$rpm_src" "$rpm_target"
+              ;;
+          esac
+
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
         with:
