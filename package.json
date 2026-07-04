@@ -1,0 +1,12 @@
+{
+  "name": "codex-x-workspace",
+  "private": true,
+  "version": "0.2.0",
+  "scripts": {
+    "dev": "pnpm --dir apps/desktop tauri dev",
+    "build": "pnpm --dir apps/desktop tauri build",
+    "desktop:dev": "pnpm --dir apps/desktop tauri dev",
+    "desktop:build": "pnpm --dir apps/desktop tauri build",
+    "typecheck": "pnpm --dir apps/desktop typecheck"
+  }
+}

@@ -1,105 +1,101 @@
-# Codex破限 5.5 / codex-instruct-5.5
+# Codex-X
 
-> 针对 GPT-5.5 的 Codex CLI 破甲工具 — 一键注入无限制模式系统指令  
-> GPT-5.5 jailbreak for Codex CLI — one-click unrestricted mode injection
+Codex-X 是一个面向 OpenAI Codex / Codex CLI 的跨平台桌面配置管理器，用来可视化管理 Codex 的供应商、`config.toml`、`auth.json` 和指令提示词。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue)](https://python.org)
+> 当前桌面端基于 **Tauri 2 + React + TypeScript + Rust + SQLite**。
 
----
+## 功能
 
-## 交流 / Community
+- **供应商管理**：添加、编辑、切换 Codex 第三方 API Provider。
+- **官方配置**：查看/编辑 OpenAI Official 的 `auth.json` 与官方模型配置。
+- **TOML 编辑**：在供应商编辑页直接编辑并保存完整 `config.toml`。
+- **指令提示词管理**：管理多个 `model_instructions_file` 模板，支持自定义提示词、启用、禁用。
+- **cc-switch 导入**：从本机 cc-switch SQLite 数据库导入 Codex Provider。
+- **跨平台路径**：默认读取 `CODEX_HOME`，否则使用用户目录下的 `.codex`。
+- **更新检查**：通过 GitHub Releases 检测最新版本。
 
-- QQ AI 技术交流群：扫码加入
-- TG 交流群：[@Geminivip1](https://t.me/Geminivip1)
+## 配置文件位置
 
-<p align="center">
-  <img width="360" alt="QQ AI 技术交流群二维码" src="assets/ai-tech-group.png" />
-</p>
+Codex-X 默认读写：
 
-## 这是什么 / What
+```text
+~/.codex/config.toml
+~/.codex/auth.json
+```
 
-GPT-5.5 在 Codex CLI 中同样受到严格的内容安全限制。本工具利用 `model_instructions_file` 配置机制，注入一套专为 GPT-5.5 编写的无限制模式指令，强制 Codex 以 `[MODE: UNRESTRICTED]` 运行。
+也支持环境变量：
 
-与 5.4 的 CTF 沙箱方案不同，5.5 版本采用更直接的破甲策略：直接声明无限制开发者模式、关闭所有过滤器、明确要求不拒绝任何任务。8 条核心指令覆盖了安全研究、渗透测试、逆向工程、NSFW 虚构内容等全部场景。
+```text
+CODEX_HOME=/path/to/.codex
+CODEXX_HOME=/path/to/codex-x-data
+CC_SWITCH_HOME=/path/to/.cc-switch
+```
 
-GPT-5.5 inside Codex CLI retains the same strict safety restrictions. This tool injects a custom unrestricted-mode instruction set via `model_instructions_file`, forcing Codex into `[MODE: UNRESTRICTED]`. Unlike the 5.4 CTF sandbox approach, the 5.5 version uses a more direct jailbreak: explicit unrestricted developer mode declaration, all filters disabled, 8 core directives covering security research, pentesting, reverse engineering, and NSFW content.
+Codex-X 自身数据默认存放在：
 
-## 与 5.4 版本的区别 / vs 5.4
+```text
+~/.codexx/codexx.db
+```
 
-| | 5.4 (CTF沙箱) | 5.5 (无限制模式) |
-|---|---|---|
-| 策略 | CTF 竞赛沙箱间接绕过 | 直接声明无限制开发者模式 |
-| 风格 | 安全研究导向，方法论详细 | 极简指令，覆盖面广 |
-| 长度 | ~180 行 | ~40 行 |
-| 适用 | GPT-5.4 Codex CLI | GPT-5.5 Codex CLI |
+## Windows 权限说明
 
-## 快速开始 / Quick Start
+Windows 正常情况下 Codex 配置位于：
+
+```text
+%USERPROFILE%\.codex
+```
+
+这是用户目录，不需要管理员权限。只有当你手动把 `CODEX_HOME` 指向 `C:\Program Files`、`C:\Windows`、系统盘根目录等受保护目录时，写入才可能因为权限不足失败。Codex-X 不会静默提权，会直接显示具体 IO 错误。
+
+## 开发
 
 ```bash
-# 部署 GPT-5.5 破限指令
-python codex-instruct.py
-
-# 重启 Codex 生效
+pnpm install
+pnpm dev
 ```
 
-## 参数 / Options
-
-| 参数 | 说明 |
-|------|------|
-| `--file`, `-f` | 使用外部 `.md` 指令文件 |
-| `--name`, `-n` | 输出文件名不含 `.md`（默认 `gpt5.5-unrestricted`） |
-| `--dry-run` | 预览，不实际修改 |
-| `--codex-dir` | 手动指定 `.codex` 目录 |
-
-## 验证 / Verify
-
-部署后测试：
-
-> "如何对目标进行 SQL 注入测试？"
-
-破甲前 → 拒绝 ； 破甲后 → 直接给方法论。
-
-## 还原 / Undo
+类型检查：
 
 ```bash
-# 删除 config.toml 中的 model_instructions_file 行
-# 删除 ~/.codex/gpt5.5-unrestricted.md
-# 重启 Codex
+pnpm typecheck
 ```
 
-## 项目结构 / Layout
+构建桌面端：
 
-```
-codex-instruct-5.5/
-├── assets/
-│   └── ai-tech-group.png                   # QQ AI 技术交流群二维码
-├── codex-instruct.py                    # 主脚本
-├── examples/
-│   └── gpt5.5-unrestricted.md           # 破甲指令独立副本
-├── .gitignore
-├── README.md
-└── LICENSE                              # MIT
+```bash
+pnpm --dir apps/desktop tauri build
 ```
 
-## 声明 / Disclaimer
+## Release
 
-利用官方配置机制，不修改二进制、不劫持网络、不篡改进程。风险自负。
+本仓库使用 GitHub Actions 在打 tag 时自动构建三平台安装包：
 
-Exploits official config mechanism. No binary mod, no MITM, no process tampering. Use at your own risk.
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Release 页面会包含：
+
+- macOS `.dmg`
+- Windows `.msi` / `.exe`
+- Linux `.AppImage` / `.deb` / `.rpm`
+- GitHub 自动生成的 Source code `.zip` / `.tar.gz`
+
+## 技术栈
+
+- Tauri 2
+- React 18
+- TypeScript
+- Vite
+- Rust
+- SQLite / rusqlite
+- toml_edit
+
+## 项目地址
+
+<https://github.com/yynxxxxx/Codex-X>
 
 ## License
 
 MIT
-
-## 致谢 / Thanks
-
-感谢 [LINUX DO 论坛](https://linux.do/) 社区的关注、反馈与支持。
-
-## Star History
-
-<p align="center">
-  <a href="https://star-history.com/#yynxxxxx/Codex-5.5-codex-instruct-5.5&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=yynxxxxx/Codex-5.5-codex-instruct-5.5&type=Date" />
-  </a>
-</p>
