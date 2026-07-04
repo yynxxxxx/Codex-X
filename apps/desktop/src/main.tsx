@@ -1218,7 +1218,7 @@ function App() {
   ];
 
   return (
-    <main className="app-shell">
+    <main className={cx("app-shell", isMacRuntime && "mac-shell")}>
       {isMacRuntime && <div className="window-drag-strip" data-tauri-drag-region />}
       <div className="orb orb-a" />
       <div className="orb orb-b" />

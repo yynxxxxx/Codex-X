@@ -15,12 +15,16 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .58; }
 
 .app-shell {
+  --shell-pad-x: 18px;
+  --shell-pad-bottom: 18px;
+  --shell-pad-top: 18px;
+  --shell-vertical-pad: calc(var(--shell-pad-top) + var(--shell-pad-bottom));
   position: relative;
   min-height: 100vh;
   display: grid;
   grid-template-columns: 260px 1fr;
   gap: 18px;
-  padding: 18px;
+  padding: var(--shell-pad-top) var(--shell-pad-x) var(--shell-pad-bottom);
   background:
     radial-gradient(circle at 12% 10%, rgba(110, 92, 255, .24), transparent 28%),
     radial-gradient(circle at 85% 22%, rgba(22, 193, 255, .18), transparent 34%),
@@ -43,7 +47,7 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   padding: 22px;
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - 36px);
+  min-height: calc(100vh - var(--shell-vertical-pad));
 }
 .brand { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
 .brand-mark {
@@ -673,13 +677,17 @@ html, body, #root {
   min-height: 720px;
   overflow: hidden;
 }
+.app-shell.mac-shell {
+  --mac-titlebar-safe: 44px;
+  --shell-pad-top: calc(18px + var(--mac-titlebar-safe));
+}
 .sidebar {
   min-height: auto;
-  height: calc(100vh - 36px);
+  height: calc(100vh - var(--shell-vertical-pad));
   overflow: hidden;
 }
 .content {
-  height: calc(100vh - 36px);
+  height: calc(100vh - var(--shell-vertical-pad));
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
@@ -715,7 +723,7 @@ html, body, #root {
 .provider-panel,
 .code-panel {
   height: auto;
-  min-height: calc(100vh - 36px);
+  min-height: calc(100vh - var(--shell-vertical-pad));
   overflow: visible;
 }
 .provider-row-list {
@@ -727,7 +735,7 @@ html, body, #root {
   overflow: visible;
 }
 .code-panel {
-  min-height: calc(100vh - 36px);
+  min-height: calc(100vh - var(--shell-vertical-pad));
 }
 .toml-preview {
   min-height: 520px;
@@ -1056,7 +1064,7 @@ html, body, #root {
 }
 
 .instruction-panel {
-  min-height: calc(100vh - 36px);
+  min-height: calc(100vh - var(--shell-vertical-pad));
 }
 .instruction-row-list {
   display: flex;
@@ -1445,7 +1453,7 @@ html, body, #root {
 
 /* Session management page. */
 .sessions-panel {
-  min-height: calc(100vh - 36px);
+  min-height: calc(100vh - var(--shell-vertical-pad));
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -1711,7 +1719,7 @@ html, body, #root {
   top: 0;
   left: 0;
   right: 0;
-  height: 30px;
+  height: 44px;
   background: linear-gradient(90deg, rgba(16,18,43,.98), rgba(4,19,31,.98));
   -webkit-app-region: drag;
 }
