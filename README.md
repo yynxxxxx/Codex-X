@@ -157,3 +157,15 @@ pnpm --dir apps/desktop tauri build
 ## License
 
 MIT © yynxxxxx
+
+
+## macOS 安装说明
+
+如果你在未签名/未公证的 DMG 中看到“软件已损坏”提示，这是 macOS Gatekeeper 的正常行为。
+
+- 最佳方式：使用 Apple Developer ID 签名并 notarize
+- 仅本地测试：可手动移除 quarantine 属性
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Codex-X.app
+```

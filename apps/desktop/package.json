@@ -1,6 +1,6 @@
 {
   "name": "codex-x",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Codex Switch & Instruct desktop manager",
   "type": "module",
