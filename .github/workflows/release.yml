@@ -9,20 +9,37 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
-    name: Build ${{ matrix.platform }}
+    name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
+          - name: macOS
+            platform: macos-latest
             args: --bundles dmg
-          - platform: ubuntu-22.04
+            artifact: codex-x-macos
+            paths: |
+              apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+          - name: Linux
+            platform: ubuntu-22.04
             args: --bundles deb,rpm
-          - platform: windows-latest
+            artifact: codex-x-linux
+            paths: |
+              apps/desktop/src-tauri/target/release/bundle/deb/*.deb
+              apps/desktop/src-tauri/target/release/bundle/rpm/*.rpm
+          - name: Windows
+            platform: windows-latest
             args: --bundles msi
+            artifact: codex-x-windows
+            paths: |
+              apps/desktop/src-tauri/target/release/bundle/msi/*.msi
 
     steps:
       - name: Checkout
@@ -61,9 +78,35 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build Tauri bundles
+        run: pnpm --dir apps/desktop tauri build ${{ matrix.args }}
+
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.paths }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
       - name: Prepare release notes
         id: release_notes
-        shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -80,21 +123,20 @@ jobs:
           body = match.group(1).strip() if match else ""
           if not body:
               body = "Codex-X desktop release."
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write("body<<EOF\n")
+          with open("release-body.md", "w", encoding="utf-8") as fh:
               fh.write(body + "\n")
-              fh.write("EOF\n")
           PY
 
-      - name: Build and upload Tauri bundles
-        uses: tauri-apps/tauri-action@v0
+      - name: Publish release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: apps/desktop
-          tagName: ${{ github.ref_name }}
-          releaseName: Codex-X ${{ github.ref_name }}
-          releaseBody: ${{ steps.release_notes.outputs.body }}
-          releaseDraft: false
-          prerelease: false
-          args: ${{ matrix.args }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          title="Codex-X ${tag}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes-file release-body.md --latest
+          else
+            gh release create "$tag" --title "$title" --notes-file release-body.md --latest
+          fi
+          gh release upload "$tag" release-assets/* --clobber

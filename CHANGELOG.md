@@ -2,6 +2,12 @@
 
 All notable changes to Codex-X will be documented here.
 
+## [v0.2.9] - 2026-07-04
+
+- 修复 GitHub Actions Release 发布流程：不再由三平台矩阵并发创建 Release，改为先上传构建产物，再由单独发布任务统一创建/更新 Release。
+- 修复 `Resource not accessible by integration` 导致 Release 创建失败的问题。
+- Release 仍会从 `CHANGELOG.md` 自动读取当前 tag 的更新日志，并上传 macOS / Windows / Linux 安装包。
+
 ## [v0.2.8] - 2026-07-04
 
 - 更新页进一步产品化：去掉资源/仓库调试信息，将“有更新”改为更明显的绿色标签。
