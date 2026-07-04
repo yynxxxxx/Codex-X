@@ -2,7 +2,7 @@
 name = "codex-x"
 version = "0.2.0"
 description = "Codex Switch & Instruct desktop manager"
-authors = ["Codex-X Contributors"]
+authors = ["yynxxxxx"]
 license = "MIT"
 edition = "2021"
 rust-version = "1.85.0"

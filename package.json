@@ -8,5 +8,6 @@
     "desktop:dev": "pnpm --dir apps/desktop tauri dev",
     "desktop:build": "pnpm --dir apps/desktop tauri build",
     "typecheck": "pnpm --dir apps/desktop typecheck"
-  }
+  },
+  "author": "yynxxxxx"
 }
