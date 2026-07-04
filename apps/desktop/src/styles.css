@@ -9,7 +9,7 @@
 
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; }
-body { overflow: hidden; }
+body { overflow: hidden; background: #070a13; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .58; }
@@ -1450,6 +1450,13 @@ html, body, #root {
   flex-direction: column;
   gap: 16px;
 }
+.panel.glass.sessions-panel {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  padding: 0;
+}
 .session-status-card {
   display: grid;
   grid-template-columns: 52px 1fr auto;
@@ -1514,11 +1521,12 @@ html, body, #root {
   font-weight: 850;
 }
 .session-list-card {
-  padding: 16px;
+  padding: 18px;
   border-radius: 24px;
-  background: rgba(4,10,24,.34);
-  border: 1px solid rgba(255,255,255,.08);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+  background: linear-gradient(180deg, rgba(6, 12, 27, .78), rgba(4,10,24,.58));
+  border: 1px solid rgba(124,168,255,.16);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.055), 0 18px 46px rgba(0,0,0,.20);
+  overflow: hidden;
 }
 .session-list-head {
   display: flex;
@@ -1547,7 +1555,7 @@ html, body, #root {
   gap: 10px;
   max-height: 350px;
   overflow: auto;
-  padding-right: 4px;
+  padding: 0 4px 2px 0;
 }
 .session-list::-webkit-scrollbar {
   width: 8px;
@@ -1694,4 +1702,16 @@ html, body, #root {
     grid-template-columns: repeat(4, minmax(0, 1fr));
     padding-left: 54px;
   }
+}
+
+/* macOS overlay titlebar: keep top chrome visually integrated with the app theme. */
+.window-drag-strip {
+  position: fixed;
+  z-index: 4;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  background: linear-gradient(90deg, rgba(16,18,43,.98), rgba(4,19,31,.98));
+  -webkit-app-region: drag;
 }

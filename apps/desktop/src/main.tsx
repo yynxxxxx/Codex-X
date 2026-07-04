@@ -719,6 +719,7 @@ function App() {
   const initialLang = (localStorage.getItem(LANG_KEY) as Lang | null) || "zh";
   const [lang, setLang] = React.useState<Lang>(initialLang === "en" ? "en" : "zh");
   const t = dict[lang];
+  const isMacRuntime = navigator.userAgent.toLowerCase().includes("mac");
   const [tab, setTab] = React.useState<Tab>("dashboard");
   const [providerMode, setProviderMode] = React.useState<ProviderMode>("list");
   const [instructionMode, setInstructionMode] = React.useState<InstructionMode>("list");
@@ -1218,6 +1219,7 @@ function App() {
 
   return (
     <main className="app-shell">
+      {isMacRuntime && <div className="window-drag-strip" data-tauri-drag-region />}
       <div className="orb orb-a" />
       <div className="orb orb-b" />
 
