@@ -7,6 +7,7 @@ All notable changes to Codex-X will be documented here.
 - 简化更新检查页展示。
 - “打开下载页”改为打开 GitHub Releases 页面。
 - 更新弹窗保持简洁，仅提示版本差异。
+- 首次启动自动检查更新并弹窗提醒。
 
 ## [v0.2.5] - 2026-07-04
 

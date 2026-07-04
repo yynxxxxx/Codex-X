@@ -61,6 +61,31 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Prepare release notes
+        id: release_notes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(
+              rf"^## \[{re.escape(tag)}\].*?\n(.*?)(?=^## \[|\Z)",
+              text,
+              flags=re.S | re.M,
+          )
+          body = match.group(1).strip() if match else ""
+          if not body:
+              body = "Codex-X desktop release."
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("body<<EOF\n")
+              fh.write(body + "\n")
+              fh.write("EOF\n")
+          PY
+
       - name: Build and upload Tauri bundles
         uses: tauri-apps/tauri-action@v0
         env:
@@ -69,16 +94,7 @@ jobs:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
           releaseName: Codex-X ${{ github.ref_name }}
-          releaseBody: |
-            Codex-X desktop release.
-
-            See `CHANGELOG.md` for highlights.
-
-            - macOS: `.dmg`
-            - Windows: `.msi`
-            - Linux: `.deb` / `.rpm`
-
-            GitHub 会自动附带 Source code (zip/tar.gz)。
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
