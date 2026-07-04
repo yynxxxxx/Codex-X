@@ -40,36 +40,58 @@ Codex-X 不是普通的配置文件编辑器，而是一个面向 Codex CLI 的 
 ## 软件预览
 
 <details open>
-<summary><b>主界面 / Provider / TOML / Auth 截图</b></summary>
+<summary><b>应用界面预览</b>：主界面 / Provider / TOML / Auth</summary>
 
 <p align="center">
-  <img src="gpt5.5-unrestricted.md效果图/软件预览图.png" alt="Codex-X 软件预览图" width="920" />
+  <img src="docs/screenshots/app/preview.png" alt="Codex-X 应用界面预览：主界面、Provider、TOML、Auth" width="920" />
 </p>
 
 </details>
 
 <details>
-<summary><b>提示词注入后效果图</b></summary>
+<summary><b>提示词注入效果：安全测试场景</b></summary>
 
-<p align="center">
-  <img src="gpt5.5-unrestricted.md效果图/SQL注入测试.png" alt="SQL 注入测试效果图" width="860" />
-</p>
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <b>SQL 注入测试</b><br />
+      <sub>部署后测试：如何对目标进行 SQL 注入测试？</sub><br />
+      <img src="docs/screenshots/prompt-effects/security/sql-injection.png" alt="SQL 注入测试效果图" width="420" />
+    </td>
+    <td align="center" width="50%">
+      <b>NSFW 响应测试</b><br />
+      <sub>用于观察提示词注入后的边界响应变化</sub><br />
+      <img src="docs/screenshots/prompt-effects/security/nsfw.png" alt="NSFW 响应测试效果图" width="420" />
+    </td>
+  </tr>
+</table>
 
-<p align="center">
-  <img src="gpt5.5-unrestricted.md效果图/apk逆向.png" alt="APK 逆向效果图" width="860" />
-</p>
+</details>
 
-<p align="center">
-  <img src="gpt5.5-unrestricted.md效果图/APK逆向2.png" alt="APK 逆向效果图 2" width="860" />
-</p>
+<details>
+<summary><b>提示词注入效果：逆向工程场景</b></summary>
 
-<p align="center">
-  <img src="gpt5.5-unrestricted.md效果图/exe逆向.png" alt="EXE 逆向效果图" width="860" />
-</p>
-
-<p align="center">
-  <img src="gpt5.5-unrestricted.md效果图/NSFW1.png" alt="NSFW 测试效果图" width="860" />
-</p>
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <b>APK 逆向分析</b><br />
+      <sub>Android APK 静态 / 动态分析思路</sub><br />
+      <img src="docs/screenshots/prompt-effects/reverse/apk-reverse-1.png" alt="APK 逆向分析效果图" width="420" />
+    </td>
+    <td align="center" width="50%">
+      <b>APK 逆向分析 2</b><br />
+      <sub>补充 APK 逆向流程与定位方式</sub><br />
+      <img src="docs/screenshots/prompt-effects/reverse/apk-reverse-2.png" alt="APK 逆向分析效果图 2" width="420" />
+    </td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <b>EXE 逆向分析</b><br />
+      <sub>Windows 可执行文件分析与调试方向</sub><br />
+      <img src="docs/screenshots/prompt-effects/reverse/exe-reverse.png" alt="EXE 逆向分析效果图" width="620" />
+    </td>
+  </tr>
+</table>
 
 </details>
 
