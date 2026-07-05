@@ -568,6 +568,10 @@ fn normalize_prompt_filename(input: &str, fallback: &str) -> String {
     format!("{}.md", if out.is_empty() { "custom-prompt" } else { out })
 }
 
+fn canonical_prompt_content(input: &str) -> String {
+    input.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
+}
+
 fn list_saved_prompts_inner() -> Result<Vec<SavedPrompt>> {
     let conn = open_db()?;
     let mut stmt = conn
@@ -587,9 +591,10 @@ fn list_saved_prompts_inner() -> Result<Vec<SavedPrompt>> {
     for row in rows {
         let prompt = row.map_err(|e| CodexxError::Database(e.to_string()))?;
         let filename_key = prompt.filename.to_ascii_lowercase();
+        let content_key = canonical_prompt_content(&prompt.content);
         let duplicate_index = prompts.iter().position(|existing: &SavedPrompt| {
             existing.filename.to_ascii_lowercase() == filename_key
-                || (existing.content == prompt.content
+                || (canonical_prompt_content(&existing.content) == content_key
                     && (existing.id.starts_with("external-") || prompt.id.starts_with("external-")))
         });
         if let Some(index) = duplicate_index {
@@ -645,7 +650,36 @@ fn delete_prompt_inner(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn find_saved_prompt_by_filename(filename: &str) -> Result<Option<SavedPrompt>> {
+fn find_saved_prompt_by_content(content: &str) -> Result<Option<SavedPrompt>> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT id, title, filename, content FROM prompts ORDER BY CASE WHEN id LIKE 'external-%' THEN 1 ELSE 0 END, updated_at DESC, created_at DESC")
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(SavedPrompt {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                filename: row.get(2)?,
+                content: row.get(3)?,
+            })
+        })
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    let target = canonical_prompt_content(content);
+    for row in rows {
+        let prompt = row.map_err(|e| CodexxError::Database(e.to_string()))?;
+        if canonical_prompt_content(&prompt.content) == target {
+            return Ok(Some(prompt));
+        }
+    }
+    Ok(None)
+}
+
+fn find_saved_prompt_by_current_file(filename: &str, content: &str) -> Result<Option<SavedPrompt>> {
+    if let Some(prompt) = find_saved_prompt_by_content(content)? {
+        return Ok(Some(prompt));
+    }
+    let normalized_filename = normalize_prompt_filename(filename, "external-prompt");
     let conn = open_db()?;
     let mut stmt = conn
         .prepare(
@@ -655,7 +689,7 @@ fn find_saved_prompt_by_filename(filename: &str) -> Result<Option<SavedPrompt>> 
              LIMIT 1",
         )
         .map_err(|e| CodexxError::Database(e.to_string()))?;
-    match stmt.query_row([filename], |row| {
+    match stmt.query_row([normalized_filename], |row| {
         Ok(SavedPrompt {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -663,31 +697,12 @@ fn find_saved_prompt_by_filename(filename: &str) -> Result<Option<SavedPrompt>> 
             content: row.get(3)?,
         })
     }) {
-        Ok(prompt) => Ok(Some(prompt)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(CodexxError::Database(e.to_string())),
-    }
-}
-
-fn find_saved_prompt_by_content(content: &str) -> Result<Option<SavedPrompt>> {
-    let conn = open_db()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, title, filename, content FROM prompts
-             WHERE content = ?1
-             ORDER BY CASE WHEN id LIKE 'external-%' THEN 1 ELSE 0 END, updated_at DESC, created_at DESC
-             LIMIT 1",
-        )
-        .map_err(|e| CodexxError::Database(e.to_string()))?;
-    match stmt.query_row([content], |row| {
-        Ok(SavedPrompt {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            filename: row.get(2)?,
-            content: row.get(3)?,
-        })
-    }) {
-        Ok(prompt) => Ok(Some(prompt)),
+        Ok(mut prompt) => {
+            if canonical_prompt_content(&prompt.content) != canonical_prompt_content(content) {
+                prompt.content = content.to_string();
+            }
+            Ok(Some(prompt))
+        }
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(CodexxError::Database(e.to_string())),
     }
@@ -856,15 +871,14 @@ fn builtin_prompt_content(
     template_id: &str,
 ) -> Result<(&'static str, &'static str, String, String)> {
     let (id, filename, relative, bundled) = builtin_prompt_meta(template_id)?;
-    let _ = refresh_builtin_prompt_inner(id);
     if let Some((content, _checked_at)) = cached_builtin_prompt(id)? {
-        return Ok((filename, relative, content, "github/cache".to_string()));
+        return Ok((filename, relative, content, "本地缓存".to_string()));
     }
     Ok((
         filename,
         relative,
         bundled.to_string(),
-        "bundled".to_string(),
+        "打包内置".to_string(),
     ))
 }
 
@@ -917,11 +931,7 @@ fn remember_current_instruction_prompt(codex_dir: &Path) -> Result<Option<SavedP
         .and_then(|v| v.to_str())
         .unwrap_or("external-prompt");
     let normalized_filename = normalize_prompt_filename(&file_name, "external-prompt");
-    let existing = find_saved_prompt_by_content(&content)?.or_else(|| {
-        find_saved_prompt_by_filename(&normalized_filename)
-            .ok()
-            .flatten()
-    });
+    let existing = find_saved_prompt_by_current_file(&file_name, &content)?;
     let (id, title, filename) = existing
         .map(|prompt| (prompt.id, prompt.title, prompt.filename))
         .unwrap_or_else(|| {

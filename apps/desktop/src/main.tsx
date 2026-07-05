@@ -260,6 +260,11 @@ const instructionTemplates: InstructionTemplate[] = [
   },
 ];
 
+const bootHints = {
+  zh: ["检测 Codex 环境", "加载本地配置", "同步界面状态", "准备进入 Codex-X"],
+  en: ["Checking Codex environment", "Loading local config", "Syncing UI state", "Preparing Codex-X"],
+};
+
 const defaultProviderForm: SavedProvider = {
   id: "magicai",
   providerName: "MagicAI",
@@ -818,6 +823,7 @@ function App() {
   const [loading, setLoading] = React.useState(false);
   const [bootVisible, setBootVisible] = React.useState(true);
   const [bootLeaving, setBootLeaving] = React.useState(false);
+  const [bootHintIndex, setBootHintIndex] = React.useState(0);
   const [toast, setToast] = React.useState<string>("");
   const [error, setError] = React.useState<string>("");
   const [providerForm, setProviderForm] = React.useState<SavedProvider>(defaultProviderForm);
@@ -866,6 +872,14 @@ function App() {
     }, leaveDelay);
     return () => window.clearTimeout(leaveTimer);
   }, [bootLeaving, bootVisible, state]);
+
+  React.useEffect(() => {
+    if (!bootVisible || bootLeaving) return undefined;
+    const timer = window.setInterval(() => {
+      setBootHintIndex((index) => (index + 1) % bootHints.zh.length);
+    }, 620);
+    return () => window.clearInterval(timer);
+  }, [bootLeaving, bootVisible]);
 
 
   const currentProvider = state?.providers.find((p) => p.isCurrent);
@@ -1319,9 +1333,14 @@ function App() {
   React.useEffect(() => {
     if (tab !== "instruction" || promptUpdateCheckedRef.current) return;
     promptUpdateCheckedRef.current = true;
+    const run = () => void refreshBuiltinPrompts({ quiet: true });
     const timer = window.setTimeout(() => {
-      void refreshBuiltinPrompts({ quiet: true });
-    }, 800);
+      if ("requestIdleCallback" in window) {
+        window.requestIdleCallback(run, { timeout: 2200 });
+      } else {
+        run();
+      }
+    }, 1600);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
@@ -1607,7 +1626,7 @@ function App() {
 
         <nav>
           {navItems.map(([id, label, icon]) => (
-            <button key={id} className={cx("nav-item", tab === id && "active")} onClick={() => setTab(id)}>
+            <button key={id} className={cx("nav-item", tab === id && "active")} onClick={() => React.startTransition(() => setTab(id))}>
               {icon}
               <span>{label}</span>
               {tab === id && <ChevronRight size={16} />}
@@ -1727,8 +1746,9 @@ function App() {
             <div className="boot-logo-wrap">
               <div className="boot-logo">Codex-X</div>
               <div className="boot-orbit" />
+              <div className="boot-orbit boot-orbit-secondary" />
             </div>
-            <p>{t.loadingConfig}</p>
+            <p className="boot-hint" key={bootHintIndex}>{bootHints[lang][bootHintIndex]}</p>
             <div className="boot-progress"><span /></div>
           </div>
         ) : (

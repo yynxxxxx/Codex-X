@@ -2047,6 +2047,16 @@ html, body, #root {
   border: 1px solid rgba(255,255,255,.28);
   box-shadow: 0 26px 70px rgba(20, 130, 255, .26), inset 0 1px 0 rgba(255,255,255,.38);
   animation: boot-logo-float 2.8s ease-in-out infinite;
+  overflow: hidden;
+}
+.boot-logo::after {
+  content: "";
+  position: absolute;
+  inset: -35% auto -35% -75%;
+  width: 46%;
+  transform: rotate(18deg);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent);
+  animation: boot-logo-shine 1.9s ease-in-out infinite;
 }
 .boot-orbit {
   position: absolute;
@@ -2056,6 +2066,17 @@ html, body, #root {
   border-top-color: rgba(89, 210, 255, .9);
   border-right-color: rgba(108, 134, 255, .55);
   animation: boot-orbit-spin 1.35s linear infinite;
+}
+.boot-orbit-secondary {
+  inset: 30px;
+  border-color: rgba(255,255,255,.12);
+  border-bottom-color: rgba(18,211,255,.68);
+  animation-duration: 2.15s;
+  animation-direction: reverse;
+}
+.boot-hint {
+  min-height: 24px;
+  animation: boot-hint-in .46s cubic-bezier(.2,.8,.2,1) both;
 }
 .boot-progress {
   width: min(320px, 68%);
@@ -2106,6 +2127,15 @@ html, body, #root {
 @keyframes boot-orbit-spin {
   to { transform: rotate(360deg); }
 }
+@keyframes boot-logo-shine {
+  0% { transform: translateX(0) rotate(18deg); opacity: 0; }
+  18% { opacity: .85; }
+  58%, 100% { transform: translateX(430%) rotate(18deg); opacity: 0; }
+}
+@keyframes boot-hint-in {
+  from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
 @keyframes boot-progress-run {
   0% { transform: translateX(-110%); }
   100% { transform: translateX(250%); }
@@ -2139,6 +2169,8 @@ html, body, #root {
   .boot-panel::before,
   .boot-logo,
   .boot-orbit,
+  .boot-logo::after,
+  .boot-hint,
   .boot-progress span,
   .startup-mask,
   .startup-card,
