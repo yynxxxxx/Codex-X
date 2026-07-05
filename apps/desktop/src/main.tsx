@@ -1008,8 +1008,15 @@ function App() {
   const handleActionResult = (result: ActionResult) => {
     setState(result.state);
     setToast(result.message);
-    invoke<BackupEntry[]>("list_backups").then(setBackups).catch(() => undefined);
-    invoke<SavedPrompt[]>("list_saved_prompts").then(setSavedPrompts).catch(() => undefined);
+    void Promise.all([
+      invoke<BackupEntry[]>("list_backups"),
+      invoke<SavedPrompt[]>("list_saved_prompts"),
+    ])
+      .then(([backupList, promptList]) => {
+        setBackups(backupList);
+        setSavedPrompts(promptList);
+      })
+      .catch(() => undefined);
   };
 
   const enableInstruction = () =>
@@ -1066,11 +1073,9 @@ function App() {
       async () => {
         const saved = await invoke<SavedPrompt>("save_prompt", { prompt: normalizedPromptForm() });
         const result = await invoke<ActionResult>("enable_saved_prompt", { configDir: configDir || null, id: saved.id });
-        const promptList = await invoke<SavedPrompt[]>("list_saved_prompts");
-        return { result, promptList };
+        return result;
       },
-      ({ result, promptList }) => {
-        setSavedPrompts(promptList);
+      (result) => {
         setInstructionMode("list");
         setEditingPromptId(null);
         handleActionResult(result);

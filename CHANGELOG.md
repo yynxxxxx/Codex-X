@@ -2,6 +2,13 @@
 
 All notable changes to Codex-X will be documented here.
 
+## [v0.2.21] - 2026-07-06
+
+- 进一步降低 UI 卡顿风险：将启动检测、Codex 状态读取、Provider/官方配置/备份/cc-switch 导入等剩余同步命令迁移到后台 worker。
+- 优化前端串行请求：提示词启用后的备份/提示词刷新改为并发，保存并启用自定义提示词时不再重复拉取列表。
+- 完善【技能和 MCP】导入已有：读取 cc-switch `mcp_servers` 数据库，按 `enabled_codex` 纳管并同步到 Codex `config.toml [mcp_servers]`。
+- 增强 Skills 检查更新：对带有 cc-switch 仓库元数据的 Skill 拉取 GitHub 仓库 ZIP 计算远程 hash，显示“有新版本 / 已是最新 / 远程检查失败”等状态。
+
 ## [v0.2.20] - 2026-07-06
 
 - 继续优化指令提示词页性能：提示词列表/状态读取、保存、导入、启用、禁用等后端操作改为后台 worker，避免切页或启用模板时阻塞 UI。

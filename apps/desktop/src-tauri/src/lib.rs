@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
@@ -1382,6 +1382,78 @@ fn build_skills_mcp_state_inner(config_dir: Option<String>) -> Result<SkillsMcpS
     })
 }
 
+fn import_ccswitch_mcp_servers_for_codex(
+    codex_dir: &Path,
+    imported_ids: &mut HashSet<String>,
+) -> Result<usize> {
+    let db = default_ccswitch_db_path()?;
+    if !db.exists() {
+        return Ok(0);
+    }
+    let conn = Connection::open_with_flags(
+        &db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| {
+        CodexxError::Database(format!(
+            "打开 cc-switch MCP 数据库失败 {}: {e}",
+            db.display()
+        ))
+    })?;
+    let mut stmt = match conn
+        .prepare("SELECT id, name, server_config, enabled_codex FROM mcp_servers ORDER BY name ASC, id ASC")
+        .or_else(|_| {
+            conn.prepare("SELECT id, name, server_config, 0 AS enabled_codex FROM mcp_servers ORDER BY name ASC, id ASC")
+        }) {
+        Ok(stmt) => stmt,
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.to_lowercase().contains("no such table") =>
+        {
+            return Ok(0);
+        }
+        Err(e) => return Err(CodexxError::Database(e.to_string())),
+    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        })
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+
+    let cfg = config_path(codex_dir);
+    let text = read_to_string_if_exists(&cfg)?;
+    let mut doc = parse_toml_document(&cfg, &text)?;
+    let live_enabled = list_mcp_from_config(codex_dir)?
+        .into_iter()
+        .map(|server| server.id)
+        .collect::<HashSet<_>>();
+    let mut imported = 0usize;
+    let mut changed_config = false;
+    for row in rows {
+        let (id, name, config_text, enabled_codex) =
+            row.map_err(|e| CodexxError::Database(e.to_string()))?;
+        let config: Value =
+            serde_json::from_str(&config_text).unwrap_or(Value::Object(Default::default()));
+        let enabled = enabled_codex || live_enabled.contains(&id);
+        save_managed_mcp(&id, &name, &config, enabled)?;
+        if enabled_codex && !live_enabled.contains(&id) {
+            doc["mcp_servers"][&id] = json_to_toml_item(&config);
+            changed_config = true;
+        }
+        if imported_ids.insert(id) {
+            imported += 1;
+        }
+    }
+    if changed_config {
+        write_text(&cfg, &doc.to_string())?;
+    }
+    Ok(imported)
+}
+
 fn import_existing_skills_mcp_inner(config_dir: Option<String>) -> Result<SkillsMcpActionResult> {
     let codex_dir = resolve_codex_dir(config_dir.clone())?;
     let skills_dir = codex_skills_dir(&codex_dir);
@@ -1411,10 +1483,14 @@ fn import_existing_skills_mcp_inner(config_dir: Option<String>) -> Result<Skills
     }
 
     let mut imported_mcp = 0usize;
+    let mut imported_mcp_ids = HashSet::new();
     for server in list_mcp_from_config(&codex_dir)? {
         save_managed_mcp(&server.id, &server.name, &server.config_json, true)?;
-        imported_mcp += 1;
+        if imported_mcp_ids.insert(server.id.clone()) {
+            imported_mcp += 1;
+        }
     }
+    imported_mcp += import_ccswitch_mcp_servers_for_codex(&codex_dir, &mut imported_mcp_ids)?;
     let state = build_skills_mcp_state_inner(config_dir)?;
     Ok(SkillsMcpActionResult {
         imported_skills,
@@ -1577,9 +1653,170 @@ fn install_skill_zip_inner(
     })
 }
 
+#[derive(Debug, Clone)]
+struct CcSwitchSkillMeta {
+    repo_owner: String,
+    repo_name: String,
+    repo_branch: String,
+    content_hash: Option<String>,
+}
+
+fn ccswitch_skill_meta_by_directory() -> Result<HashMap<String, CcSwitchSkillMeta>> {
+    let db = default_ccswitch_db_path()?;
+    if !db.exists() {
+        return Ok(HashMap::new());
+    }
+    let conn = Connection::open_with_flags(
+        &db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| {
+        CodexxError::Database(format!(
+            "打开 cc-switch Skills 数据库失败 {}: {e}",
+            db.display()
+        ))
+    })?;
+    let mut stmt = match conn.prepare(
+        "SELECT directory, repo_owner, repo_name, repo_branch, content_hash FROM skills
+         WHERE repo_owner IS NOT NULL AND repo_name IS NOT NULL",
+    ) {
+        Ok(stmt) => stmt,
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.to_lowercase().contains("no such table") =>
+        {
+            return Ok(HashMap::new());
+        }
+        Err(e) => return Err(CodexxError::Database(e.to_string())),
+    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+
+    let mut out = HashMap::new();
+    for row in rows {
+        let (directory, owner, repo, branch, content_hash) =
+            row.map_err(|e| CodexxError::Database(e.to_string()))?;
+        let (Some(repo_owner), Some(repo_name)) = (owner, repo) else {
+            continue;
+        };
+        out.insert(
+            directory.to_ascii_lowercase(),
+            CcSwitchSkillMeta {
+                repo_owner,
+                repo_name,
+                repo_branch: branch.unwrap_or_else(|| "main".to_string()),
+                content_hash,
+            },
+        );
+    }
+    Ok(out)
+}
+
+fn download_repo_skill_hashes(
+    owner: &str,
+    repo: &str,
+    branch: &str,
+) -> std::result::Result<HashMap<String, String>, String> {
+    use sha2::{Digest, Sha256};
+    const MAX_ZIP_BYTES: u64 = 100 * 1024 * 1024;
+    let url = format!("https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip");
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(18))
+        .build();
+    let response = agent
+        .get(&url)
+        .set("User-Agent", "Codex-X")
+        .call()
+        .map_err(|e| format!("下载 {owner}/{repo}@{branch} 失败: {e}"))?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_ZIP_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取 {owner}/{repo}@{branch} ZIP 失败: {e}"))?;
+    if bytes.len() as u64 > MAX_ZIP_BYTES {
+        return Err(format!("{owner}/{repo}@{branch} ZIP 超过 100MB"));
+    }
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|e| format!("解析 {owner}/{repo}@{branch} ZIP 失败: {e}"))?;
+    let mut files = Vec::<(String, Vec<u8>)>::new();
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("读取 ZIP 条目失败: {e}"))?;
+        if file.is_dir() {
+            continue;
+        }
+        let Some(path) = file.enclosed_name().map(|p| p.to_path_buf()) else {
+            continue;
+        };
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        if normalized
+            .split('/')
+            .any(|part| part.starts_with('.') && part != ".")
+        {
+            continue;
+        }
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)
+            .map_err(|e| format!("读取 ZIP 文件失败: {e}"))?;
+        files.push((normalized, data));
+    }
+
+    let mut prefixes = HashMap::<String, String>::new();
+    for (path, _) in &files {
+        if !path.ends_with("/SKILL.md") && path != "SKILL.md" {
+            continue;
+        }
+        let Some(prefix) = path.strip_suffix("/SKILL.md") else {
+            continue;
+        };
+        let Some(name) = prefix.rsplit('/').next() else {
+            continue;
+        };
+        prefixes.insert(name.to_ascii_lowercase(), prefix.to_string());
+    }
+
+    let mut hashes = HashMap::new();
+    for (skill_name, prefix) in prefixes {
+        let prefix_with_slash = format!("{prefix}/");
+        let mut scoped = files
+            .iter()
+            .filter_map(|(path, data)| {
+                path.strip_prefix(&prefix_with_slash)
+                    .map(|rel| (rel.to_string(), data.as_slice()))
+            })
+            .collect::<Vec<_>>();
+        scoped.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut hasher = Sha256::new();
+        for (rel, data) in scoped {
+            hasher.update(rel.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(data);
+            hasher.update(b"\0");
+        }
+        hashes.insert(skill_name, format!("{:x}", hasher.finalize()));
+    }
+    Ok(hashes)
+}
+
 fn check_skill_updates_inner(config_dir: Option<String>) -> Result<SkillsMcpState> {
     let mut next = build_skills_mcp_state_inner(config_dir)?;
     let conn = open_db()?;
+    let ccswitch_meta = ccswitch_skill_meta_by_directory().unwrap_or_default();
+    let mut remote_hash_cache = HashMap::<
+        (String, String, String),
+        std::result::Result<HashMap<String, String>, String>,
+    >::new();
     for skill in &mut next.skills {
         let old: Option<String> = conn
             .query_row(
@@ -1588,10 +1825,36 @@ fn check_skill_updates_inner(config_dir: Option<String>) -> Result<SkillsMcpStat
                 |row| row.get(0),
             )
             .ok();
-        skill.update_status = match (&old, &skill.content_hash) {
+        let local_status = match (&old, &skill.content_hash) {
             (Some(a), Some(b)) if a != b => "本地有变化".to_string(),
             (Some(_), Some(_)) => "已是最新".to_string(),
             _ => "已记录".to_string(),
+        };
+        let meta = ccswitch_meta.get(&skill.directory.to_ascii_lowercase());
+        skill.update_status = if let Some(meta) = meta {
+            let key = (
+                meta.repo_owner.clone(),
+                meta.repo_name.clone(),
+                meta.repo_branch.clone(),
+            );
+            let remote = remote_hash_cache
+                .entry(key.clone())
+                .or_insert_with(|| download_repo_skill_hashes(&key.0, &key.1, &key.2));
+            match remote {
+                Ok(remote_hashes) => {
+                    let remote_hash = remote_hashes.get(&skill.directory.to_ascii_lowercase());
+                    let local_hash = skill.content_hash.as_ref().or(meta.content_hash.as_ref());
+                    match (local_hash, remote_hash) {
+                        (Some(local), Some(remote)) if local != remote => "有新版本".to_string(),
+                        (Some(_), Some(_)) => "已是最新".to_string(),
+                        (_, Some(_)) => "已记录远程".to_string(),
+                        _ => "未找到远程目录".to_string(),
+                    }
+                }
+                Err(e) => format!("远程检查失败：{e}"),
+            }
+        } else {
+            local_status
         };
         save_managed_skill(skill)?;
     }
@@ -3197,8 +3460,10 @@ async fn check_skill_updates(config_dir: Option<String>) -> Result<SkillsMcpStat
 }
 
 #[tauri::command]
-fn get_startup_diagnostics(config_dir: Option<String>) -> Result<StartupDiagnostics> {
-    startup_diagnostics_inner(config_dir)
+async fn get_startup_diagnostics(config_dir: Option<String>) -> Result<StartupDiagnostics> {
+    tauri::async_runtime::spawn_blocking(move || startup_diagnostics_inner(config_dir))
+        .await
+        .map_err(|e| CodexxError::Config(format!("启动检测失败: {e}")))?
 }
 
 #[tauri::command]
@@ -3235,17 +3500,22 @@ async fn sync_selected_sessions_provider(
 }
 
 #[tauri::command]
-fn read_ccswitch_official_auth(db_path: Option<String>) -> Result<Option<OfficialAuthCandidate>> {
-    read_ccswitch_official_auth_inner(db_path)
+async fn read_ccswitch_official_auth(
+    db_path: Option<String>,
+) -> Result<Option<OfficialAuthCandidate>> {
+    tauri::async_runtime::spawn_blocking(move || read_ccswitch_official_auth_inner(db_path))
+        .await
+        .map_err(|e| CodexxError::Config(format!("读取 cc-switch 官方 Auth 失败: {e}")))?
 }
 
 #[tauri::command]
-fn import_ccswitch_codex_providers(db_path: Option<String>) -> Result<ImportResult> {
-    import_ccswitch_codex_providers_inner(db_path)
+async fn import_ccswitch_codex_providers(db_path: Option<String>) -> Result<ImportResult> {
+    tauri::async_runtime::spawn_blocking(move || import_ccswitch_codex_providers_inner(db_path))
+        .await
+        .map_err(|e| CodexxError::Config(format!("导入 cc-switch Provider 失败: {e}")))?
 }
 
-#[tauri::command]
-fn get_about_info(config_dir: Option<String>) -> Result<AboutInfo> {
+fn get_about_info_inner(config_dir: Option<String>) -> Result<AboutInfo> {
     let codex_dir = resolve_codex_dir(config_dir)?;
     Ok(AboutInfo {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -3254,6 +3524,13 @@ fn get_about_info(config_dir: Option<String>) -> Result<AboutInfo> {
         project_url: "https://github.com/yynxxxxx/Codex-X".to_string(),
         github_repo: "yynxxxxx/Codex-X".to_string(),
     })
+}
+
+#[tauri::command]
+async fn get_about_info(config_dir: Option<String>) -> Result<AboutInfo> {
+    tauri::async_runtime::spawn_blocking(move || get_about_info_inner(config_dir))
+        .await
+        .map_err(|e| CodexxError::Config(format!("读取关于信息失败: {e}")))?
 }
 
 #[tauri::command]
@@ -3358,12 +3635,13 @@ async fn enable_saved_prompt(config_dir: Option<String>, id: String) -> Result<A
 }
 
 #[tauri::command]
-fn list_saved_providers() -> Result<Vec<SavedProvider>> {
-    list_saved_providers_inner()
+async fn list_saved_providers() -> Result<Vec<SavedProvider>> {
+    tauri::async_runtime::spawn_blocking(list_saved_providers_inner)
+        .await
+        .map_err(|e| CodexxError::Config(format!("读取供应商列表失败: {e}")))?
 }
 
-#[tauri::command]
-fn save_provider(provider: SavedProvider) -> Result<SavedProvider> {
+fn save_provider_command_inner(provider: SavedProvider) -> Result<SavedProvider> {
     let normalized = SavedProvider {
         id: provider.id.trim().to_string(),
         provider_name: provider.provider_name.trim().to_string(),
@@ -3396,14 +3674,27 @@ fn save_provider(provider: SavedProvider) -> Result<SavedProvider> {
 }
 
 #[tauri::command]
-fn delete_saved_provider(id: String) -> Result<()> {
-    delete_provider_inner(id.trim())
+async fn save_provider(provider: SavedProvider) -> Result<SavedProvider> {
+    tauri::async_runtime::spawn_blocking(move || save_provider_command_inner(provider))
+        .await
+        .map_err(|e| CodexxError::Config(format!("保存供应商失败: {e}")))?
 }
 
 #[tauri::command]
-fn get_codex_state(config_dir: Option<String>) -> Result<CodexState> {
-    let codex_dir = resolve_codex_dir(config_dir)?;
-    build_state(codex_dir)
+async fn delete_saved_provider(id: String) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || delete_provider_inner(id.trim()))
+        .await
+        .map_err(|e| CodexxError::Config(format!("删除供应商失败: {e}")))?
+}
+
+#[tauri::command]
+async fn get_codex_state(config_dir: Option<String>) -> Result<CodexState> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let codex_dir = resolve_codex_dir(config_dir)?;
+        build_state(codex_dir)
+    })
+    .await
+    .map_err(|e| CodexxError::Config(format!("读取 Codex 状态失败: {e}")))?
 }
 
 fn apply_official_config(
@@ -3469,25 +3760,33 @@ fn apply_official_config(
 }
 
 #[tauri::command]
-fn switch_official_provider(config_dir: Option<String>) -> Result<ActionResult> {
-    apply_official_config(
-        config_dir,
-        None,
-        None,
-        "switch-official",
-        "已切换到 OpenAI Official",
-    )
+async fn switch_official_provider(config_dir: Option<String>) -> Result<ActionResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        apply_official_config(
+            config_dir,
+            None,
+            None,
+            "switch-official",
+            "已切换到 OpenAI Official",
+        )
+    })
+    .await
+    .map_err(|e| CodexxError::Config(format!("切换官方配置失败: {e}")))?
 }
 
 #[tauri::command]
-fn save_official_config(input: OfficialConfigInput) -> Result<ActionResult> {
-    apply_official_config(
-        input.config_dir,
-        input.model,
-        input.auth_json,
-        "save-official",
-        "已保存 OpenAI Official 配置",
-    )
+async fn save_official_config(input: OfficialConfigInput) -> Result<ActionResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        apply_official_config(
+            input.config_dir,
+            input.model,
+            input.auth_json,
+            "save-official",
+            "已保存 OpenAI Official 配置",
+        )
+    })
+    .await
+    .map_err(|e| CodexxError::Config(format!("保存官方配置失败: {e}")))?
 }
 
 fn enable_instruction_inner(config_dir: Option<String>, template_id: &str) -> Result<ActionResult> {
@@ -3585,8 +3884,7 @@ async fn disable_instruction(
         .map_err(|e| CodexxError::Config(format!("禁用指令提示词失败: {e}")))?
 }
 
-#[tauri::command]
-fn save_provider_toml_config(input: ProviderTomlInput) -> Result<ActionResult> {
+fn save_provider_toml_config_inner(input: ProviderTomlInput) -> Result<ActionResult> {
     let codex_dir = resolve_codex_dir(input.config_dir.clone())?;
     fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
     let cfg = config_path(&codex_dir);
@@ -3630,7 +3928,13 @@ fn save_provider_toml_config(input: ProviderTomlInput) -> Result<ActionResult> {
 }
 
 #[tauri::command]
-fn switch_provider(input: ProviderInput) -> Result<ActionResult> {
+async fn save_provider_toml_config(input: ProviderTomlInput) -> Result<ActionResult> {
+    tauri::async_runtime::spawn_blocking(move || save_provider_toml_config_inner(input))
+        .await
+        .map_err(|e| CodexxError::Config(format!("保存供应商 TOML 失败: {e}")))?
+}
+
+fn switch_provider_inner(input: ProviderInput) -> Result<ActionResult> {
     let codex_dir = resolve_codex_dir(input.config_dir.clone())?;
     fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
     let cfg = config_path(&codex_dir);
@@ -3694,12 +3998,20 @@ fn switch_provider(input: ProviderInput) -> Result<ActionResult> {
 }
 
 #[tauri::command]
-fn list_backups() -> Result<Vec<BackupEntry>> {
-    backups()
+async fn switch_provider(input: ProviderInput) -> Result<ActionResult> {
+    tauri::async_runtime::spawn_blocking(move || switch_provider_inner(input))
+        .await
+        .map_err(|e| CodexxError::Config(format!("切换供应商失败: {e}")))?
 }
 
 #[tauri::command]
-fn restore_backup(config_dir: Option<String>, backup_id: String) -> Result<ActionResult> {
+async fn list_backups() -> Result<Vec<BackupEntry>> {
+    tauri::async_runtime::spawn_blocking(backups)
+        .await
+        .map_err(|e| CodexxError::Config(format!("读取备份列表失败: {e}")))?
+}
+
+fn restore_backup_inner(config_dir: Option<String>, backup_id: String) -> Result<ActionResult> {
     let codex_dir = resolve_codex_dir(config_dir)?;
     let dir = backup_root()?.join(&backup_id);
     if !dir.exists() {
@@ -3734,6 +4046,13 @@ fn restore_backup(config_dir: Option<String>, backup_id: String) -> Result<Actio
         backup_id: restore_marker,
         state,
     })
+}
+
+#[tauri::command]
+async fn restore_backup(config_dir: Option<String>, backup_id: String) -> Result<ActionResult> {
+    tauri::async_runtime::spawn_blocking(move || restore_backup_inner(config_dir, backup_id))
+        .await
+        .map_err(|e| CodexxError::Config(format!("恢复备份失败: {e}")))?
 }
 
 #[tauri::command]
