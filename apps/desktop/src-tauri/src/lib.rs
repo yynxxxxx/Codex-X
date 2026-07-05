@@ -569,7 +569,11 @@ fn normalize_prompt_filename(input: &str, fallback: &str) -> String {
 }
 
 fn canonical_prompt_content(input: &str) -> String {
-    input.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
+    input
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_string()
 }
 
 fn list_saved_prompts_inner() -> Result<Vec<SavedPrompt>> {
@@ -1451,7 +1455,8 @@ fn import_ccswitch_mcp_servers_for_codex(
         let enabled = enabled_codex || live_enabled.contains(&id);
         save_managed_mcp(&id, &name, &config, enabled)?;
         if enabled_codex && !live_enabled.contains(&id) {
-            doc["mcp_servers"][&id] = json_to_toml_item(&config);
+            ensure_table(doc.as_table_mut(), "mcp_servers")?
+                .insert(&id, json_to_toml_item(&config));
             changed_config = true;
         }
         if imported_ids.insert(id) {
@@ -1525,7 +1530,7 @@ fn toggle_codex_mcp_inner(
             .into_iter()
             .find(|(sid, _, _, _)| sid == &id)
             .ok_or_else(|| CodexxError::Config(format!("未找到 MCP: {id}")))?;
-        doc["mcp_servers"][&id] = json_to_toml_item(&db.2);
+        ensure_table(doc.as_table_mut(), "mcp_servers")?.insert(&id, json_to_toml_item(&db.2));
         save_managed_mcp(&id, &db.1, &db.2, true)?;
     } else {
         if let Some(item) = doc
@@ -1542,6 +1547,28 @@ fn toggle_codex_mcp_inner(
     }
     write_text(&cfg, &doc.to_string())?;
     build_skills_mcp_state_inner(config_dir)
+}
+
+fn move_dir_replace(src: &Path, dst: &Path) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    if dst.exists() {
+        fs::remove_dir_all(dst).map_err(|e| io_err(dst, e))?;
+    }
+    fs::rename(src, dst)
+        .or_else(|_| {
+            copy_dir_recursive(src, dst).map(|_| {
+                let _ = fs::remove_dir_all(src);
+            })
+        })
+        .map_err(|e| {
+            CodexxError::Config(format!(
+                "移动目录失败 {} -> {}: {e}",
+                src.display(),
+                dst.display()
+            ))
+        })
 }
 
 fn toggle_codex_skill_inner(
@@ -1564,22 +1591,12 @@ fn toggle_codex_skill_inner(
     let enabled_path = skills_dir.join(&name);
     let disabled_path = disabled_dir.join(&name);
     if enabled {
-        if disabled_path.exists() && !enabled_path.exists() {
-            fs::rename(&disabled_path, &enabled_path)
-                .or_else(|_| {
-                    copy_dir_recursive(&disabled_path, &enabled_path).map(|_| {
-                        let _ = fs::remove_dir_all(&disabled_path);
-                    })
-                })
+        if disabled_path.exists() {
+            move_dir_replace(&disabled_path, &enabled_path)
                 .map_err(|e| CodexxError::Config(format!("启用 Skill 失败: {e}")))?;
         }
-    } else if enabled_path.exists() && !disabled_path.exists() {
-        fs::rename(&enabled_path, &disabled_path)
-            .or_else(|_| {
-                copy_dir_recursive(&enabled_path, &disabled_path).map(|_| {
-                    let _ = fs::remove_dir_all(&enabled_path);
-                })
-            })
+    } else if enabled_path.exists() {
+        move_dir_replace(&enabled_path, &disabled_path)
             .map_err(|e| CodexxError::Config(format!("禁用 Skill 失败: {e}")))?;
     }
     build_skills_mcp_state_inner(config_dir)
@@ -1599,61 +1616,66 @@ fn install_skill_zip_inner(
         .join("tmp")
         .join(format!("skill-zip-{}", Local::now().timestamp_millis()));
     fs::create_dir_all(&tmp).map_err(|e| io_err(&tmp, e))?;
-    let mut total_size = 0u64;
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| CodexxError::Config(format!("读取 ZIP 条目失败: {e}")))?;
-        let Some(path) = file.enclosed_name().map(|p| p.to_path_buf()) else {
-            continue;
-        };
-        total_size += file.size();
-        if total_size > 80 * 1024 * 1024 {
-            return Err(CodexxError::Config("ZIP 解压后超过 80MB".to_string()));
-        }
-        let out = tmp.join(path);
-        if file.name().ends_with('/') {
-            fs::create_dir_all(&out).map_err(|e| io_err(&out, e))?;
-        } else {
-            if let Some(parent) = out.parent() {
-                fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+    let install_result = (|| -> Result<usize> {
+        let mut total_size = 0u64;
+        for i in 0..archive.len() {
+            let mut file = archive
+                .by_index(i)
+                .map_err(|e| CodexxError::Config(format!("读取 ZIP 条目失败: {e}")))?;
+            let Some(path) = file.enclosed_name().map(|p| p.to_path_buf()) else {
+                continue;
+            };
+            total_size += file.size();
+            if total_size > MAX_SKILL_ZIP_BYTES {
+                return Err(CodexxError::Config("ZIP 解压后超过 20MB".to_string()));
             }
-            let mut outfile = fs::File::create(&out).map_err(|e| io_err(&out, e))?;
-            std::io::copy(&mut file, &mut outfile).map_err(|e| io_err(&out, e))?;
-        }
-    }
-    let mut skill_dirs = Vec::new();
-    fn find_skill_dirs(current: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-        if current.join("SKILL.md").is_file() {
-            out.push(current.to_path_buf());
-            return Ok(());
-        }
-        for entry in fs::read_dir(current).map_err(|e| io_err(current, e))? {
-            let entry = entry.map_err(|e| io_err(current, e))?;
-            let path = entry.path();
-            if path.is_dir() {
-                find_skill_dirs(&path, out)?;
+            let out = tmp.join(path);
+            if file.name().ends_with('/') {
+                fs::create_dir_all(&out).map_err(|e| io_err(&out, e))?;
+            } else {
+                if let Some(parent) = out.parent() {
+                    fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+                }
+                let mut outfile = fs::File::create(&out).map_err(|e| io_err(&out, e))?;
+                std::io::copy(&mut file, &mut outfile).map_err(|e| io_err(&out, e))?;
             }
         }
-        Ok(())
-    }
-    find_skill_dirs(&tmp, &mut skill_dirs)?;
-    if skill_dirs.is_empty() {
-        return Err(CodexxError::Config("ZIP 中没有找到 SKILL.md".to_string()));
-    }
-    let mut imported_skills = 0usize;
-    for src in skill_dirs {
-        let fallback = file_name.trim_end_matches(".zip");
-        let dir_name = src.file_name().and_then(|v| v.to_str()).unwrap_or(fallback);
-        let dst_name = sanitize_dir_name(dir_name, "skill");
-        let dst = skills_dir.join(dst_name);
-        if dst.exists() {
-            fs::remove_dir_all(&dst).map_err(|e| io_err(&dst, e))?;
+
+        let mut skill_dirs = Vec::new();
+        fn find_skill_dirs(current: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+            if current.join("SKILL.md").is_file() {
+                out.push(current.to_path_buf());
+                return Ok(());
+            }
+            for entry in fs::read_dir(current).map_err(|e| io_err(current, e))? {
+                let entry = entry.map_err(|e| io_err(current, e))?;
+                let path = entry.path();
+                if path.is_dir() {
+                    find_skill_dirs(&path, out)?;
+                }
+            }
+            Ok(())
         }
-        copy_dir_recursive(&src, &dst)?;
-        imported_skills += 1;
-    }
+        find_skill_dirs(&tmp, &mut skill_dirs)?;
+        if skill_dirs.is_empty() {
+            return Err(CodexxError::Config("ZIP 中没有找到 SKILL.md".to_string()));
+        }
+        let mut imported_skills = 0usize;
+        for src in skill_dirs {
+            let fallback = file_name.trim_end_matches(".zip");
+            let dir_name = src.file_name().and_then(|v| v.to_str()).unwrap_or(fallback);
+            let dst_name = sanitize_dir_name(dir_name, "skill");
+            let dst = skills_dir.join(dst_name);
+            if dst.exists() {
+                fs::remove_dir_all(&dst).map_err(|e| io_err(&dst, e))?;
+            }
+            copy_dir_recursive(&src, &dst)?;
+            imported_skills += 1;
+        }
+        Ok(imported_skills)
+    })();
     let _ = fs::remove_dir_all(&tmp);
+    let imported_skills = install_result?;
     let state = build_skills_mcp_state_inner(config_dir)?;
     Ok(SkillsMcpActionResult {
         imported_skills,

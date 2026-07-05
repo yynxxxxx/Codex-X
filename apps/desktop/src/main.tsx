@@ -1429,6 +1429,10 @@ function App() {
       setError(lang === "zh" ? "请选择 .zip 技能包" : "Please choose a .zip skill package");
       return;
     }
+    if (file.size > 20 * 1024 * 1024) {
+      setError(lang === "zh" ? "ZIP 技能包不能超过 20MB" : "Skill ZIP must be smaller than 20MB");
+      return;
+    }
     setActionBusy("installSkillZip");
     setError("");
     try {
