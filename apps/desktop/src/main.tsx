@@ -799,8 +799,10 @@ function App() {
   const t = dict[lang];
   const isMacRuntime = navigator.userAgent.toLowerCase().includes("mac");
   const [tab, setTab] = React.useState<Tab>("dashboard");
+  const [visitedTabs, setVisitedTabs] = React.useState<Set<Tab>>(() => new Set(["dashboard"]));
   const [providerMode, setProviderMode] = React.useState<ProviderMode>("list");
   const [instructionMode, setInstructionMode] = React.useState<InstructionMode>("list");
+  const [skillsMcpTab, setSkillsMcpTab] = React.useState<"mcp" | "skills">("mcp");
   const [editingProviderId, setEditingProviderId] = React.useState<string | null>(null);
   const [editingPromptId, setEditingPromptId] = React.useState<string | null>(null);
   const [savedProviders, setSavedProviders] = React.useState<SavedProvider[]>([]);
@@ -815,6 +817,7 @@ function App() {
   const [startupWizardOpen, setStartupWizardOpen] = React.useState(() => localStorage.getItem(STARTUP_WIZARD_SEEN_KEY) !== "1");
   const [startupClosing, setStartupClosing] = React.useState(false);
   const [sessionQuery, setSessionQuery] = React.useState("");
+  const deferredSessionQuery = React.useDeferredValue(sessionQuery);
   const [sessionGroupByCwd, setSessionGroupByCwd] = React.useState(true);
   const [selectedSessionIds, setSelectedSessionIds] = React.useState<string[]>([]);
   const [state, setState] = React.useState<CodexState | null>(null);
@@ -854,6 +857,15 @@ function App() {
   React.useEffect(() => {
     localStorage.setItem(LANG_KEY, lang);
   }, [lang]);
+
+  React.useEffect(() => {
+    setVisitedTabs((tabs) => {
+      if (tabs.has(tab)) return tabs;
+      const next = new Set(tabs);
+      next.add(tab);
+      return next;
+    });
+  }, [tab]);
 
   React.useEffect(() => {
     if (providerMode === "form" && !providerTomlDirty) {
@@ -935,13 +947,13 @@ function App() {
   }, [detectedRows, localRows, state?.model, state?.modelProvider]);
 
   const filteredSessions = React.useMemo(() => {
-    const query = sessionQuery.trim().toLowerCase();
+    const query = deferredSessionQuery.trim().toLowerCase();
     const list = sessionStatus?.sessions || [];
     if (!query) return list;
     return list.filter((item) => [item.title, item.cwd, item.rolloutPath, item.modelProvider, item.model, item.id]
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(query)));
-  }, [sessionQuery, sessionStatus?.sessions]);
+  }, [deferredSessionQuery, sessionStatus?.sessions]);
 
   const groupedSessions = React.useMemo(() => {
     const groups = new Map<string, SessionPreview[]>();
@@ -966,6 +978,9 @@ function App() {
 
   const enabledSkillCount = skillsMcpState?.skills.filter((item) => item.enabled).length ?? 0;
   const enabledMcpCount = skillsMcpState?.mcpServers.filter((item) => item.enabled).length ?? 0;
+  const activeSkillsMcpCount = skillsMcpTab === "mcp"
+    ? (skillsMcpState?.mcpServers.length ?? 0)
+    : (skillsMcpState?.skills.length ?? 0);
 
   React.useEffect(() => {
     setSelectedSessionIds((ids) => ids.filter((id) => (sessionStatus?.sessions || []).some((item) => item.id === id)));
@@ -1415,7 +1430,6 @@ function App() {
       const result = await invoke<SkillsMcpState>("toggle_codex_mcp", { configDir: configDir || null, id, enabled });
       setSkillsMcpState(result);
       setToast(enabled ? (lang === "zh" ? "MCP 已启用" : "MCP enabled") : (lang === "zh" ? "MCP 已禁用" : "MCP disabled"));
-      void refresh();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -1983,8 +1997,8 @@ function App() {
               </section>
             )}
 
-            {tab === "sessions" && (
-              <section className="panel glass sessions-panel">
+            {(tab === "sessions" || visitedTabs.has("sessions")) && (
+              <section className={cx("panel glass sessions-panel", tab !== "sessions" && "page-pane-hidden")}>
                 <div className="panel-head provider-title-row">
                   <div>
                     <p className="eyebrow">Provider Sync</p>
@@ -2118,8 +2132,8 @@ function App() {
               </section>
             )}
 
-            {tab === "skillsMcp" && (
-              <section className="panel glass skills-mcp-panel">
+            {(tab === "skillsMcp" || visitedTabs.has("skillsMcp")) && (
+              <section className={cx("panel glass skills-mcp-panel", tab !== "skillsMcp" && "page-pane-hidden")}>
                 <div className="panel-head provider-title-row">
                   <div>
                     <p className="eyebrow">Skills / MCP</p>
@@ -2156,76 +2170,80 @@ function App() {
                   </div>
                 ) : (
                   <>
-                    <div className="skills-mcp-summary">
-                      <StatCard icon={<Sparkles size={20} />} label={lang === "zh" ? "已启用 Skills" : "Enabled Skills"} value={`${enabledSkillCount}/${skillsMcpState.skills.length}`} ok={enabledSkillCount > 0} />
-                      <StatCard icon={<TerminalSquare size={20} />} label={lang === "zh" ? "已启用 MCP" : "Enabled MCP"} value={`${enabledMcpCount}/${skillsMcpState.mcpServers.length}`} ok={enabledMcpCount > 0} />
-                      <div className="skills-path-card">
-                        <span>~/.codex/skills</span>
-                        <code>{skillsMcpState.codexSkillsDir}</code>
-                      </div>
+                    <div className="skills-mcp-tabs" role="tablist" aria-label="Skills and MCP">
+                      <button
+                        className={cx("skills-mcp-tab", skillsMcpTab === "mcp" && "active")}
+                        onClick={() => setSkillsMcpTab("mcp")}
+                        role="tab"
+                        aria-selected={skillsMcpTab === "mcp"}
+                      >
+                        MCP <span>{skillsMcpState.mcpServers.length}</span>
+                      </button>
+                      <button
+                        className={cx("skills-mcp-tab", skillsMcpTab === "skills" && "active")}
+                        onClick={() => setSkillsMcpTab("skills")}
+                        role="tab"
+                        aria-selected={skillsMcpTab === "skills"}
+                      >
+                        Skills <span>{skillsMcpState.skills.length}</span>
+                      </button>
                     </div>
 
-                    <div className="skills-mcp-columns">
-                      <section className="skills-mcp-card">
-                        <div className="skills-mcp-card-head">
-                          <div>
-                            <strong>Skills</strong>
-                            <p>{lang === "zh" ? "启用后会放入 Codex skills 目录；禁用会移动到 Codex-X 的禁用目录。" : "Enabled skills live in the Codex skills directory; disabled skills are moved into Codex-X storage."}</p>
-                          </div>
-                          <span className="mini-tag ok">{skillsMcpState.skills.length}</span>
-                        </div>
-                        <div className="skills-mcp-list">
-                          {skillsMcpState.skills.length === 0 ? (
-                            <div className="session-empty compact"><Sparkles size={18} /><span>{lang === "zh" ? "还没有发现 Skills，点击导入已有或从 ZIP 安装。" : "No Skills found. Import existing or install a ZIP."}</span></div>
-                          ) : skillsMcpState.skills.map((skill) => (
-                            <article className={cx("skill-mcp-row", skill.enabled && "selected")} key={skill.id}>
-                              <div className="instruction-icon custom"><Sparkles size={20} /></div>
-                              <div className="skill-mcp-main">
-                                <strong>{skill.name}</strong>
-                                <p>{skill.description || (lang === "zh" ? "无描述" : "No description")}</p>
-                                <code title={skill.path}>{skill.directory}</code>
-                              </div>
-                              <div className="skill-mcp-meta">
-                                <span className={cx("mini-tag", skill.enabled ? "ok" : undefined)}>{skill.enabled ? (lang === "zh" ? "已启用" : "Enabled") : (lang === "zh" ? "已禁用" : "Disabled")}</span>
-                                <small>{skill.updateStatus}</small>
-                              </div>
-                              <button className={cx(skill.enabled ? "ghost-btn" : "secondary-btn", "small", "lively-btn")} onClick={() => void toggleSkillEnabled(skill.id, !skill.enabled)} disabled={actionBusy === `skill:${skill.id}`}>
-                                {actionBusy === `skill:${skill.id}` ? <Loader2 size={14} className="spin" /> : null}{skill.enabled ? (lang === "zh" ? "禁用" : "Disable") : (lang === "zh" ? "启用" : "Enable")}
-                              </button>
-                            </article>
-                          ))}
-                        </div>
-                      </section>
+                    <p className="skills-mcp-help">
+                      {skillsMcpTab === "mcp"
+                        ? (lang === "zh" ? `当前共有 ${skillsMcpState.mcpServers.length} 个 MCP；开启后会写入 Codex config.toml。` : `${skillsMcpState.mcpServers.length} MCP server(s). Enabling writes them to Codex config.toml.`)
+                        : (lang === "zh" ? `当前共有 ${skillsMcpState.skills.length} 个 Skills；开启后会放入 Codex skills 目录。` : `${skillsMcpState.skills.length} Skill(s). Enabling moves them into the Codex skills directory.`)}
+                    </p>
 
-                      <section className="skills-mcp-card">
-                        <div className="skills-mcp-card-head">
-                          <div>
-                            <strong>MCP</strong>
-                            <p>{lang === "zh" ? "启用会写入 ~/.codex/config.toml 的 [mcp_servers]；禁用会移除但保留在 Codex-X。" : "Enabling writes to ~/.codex/config.toml [mcp_servers]; disabling removes it but keeps a Codex-X copy."}</p>
-                          </div>
-                          <span className="mini-tag ok">{skillsMcpState.mcpServers.length}</span>
-                        </div>
-                        <div className="skills-mcp-list">
-                          {skillsMcpState.mcpServers.length === 0 ? (
-                            <div className="session-empty compact"><TerminalSquare size={18} /><span>{lang === "zh" ? "还没有发现 MCP。当前会从 config.toml 导入已有 MCP。" : "No MCP server found. Existing config.toml MCP entries can be imported."}</span></div>
-                          ) : skillsMcpState.mcpServers.map((server) => (
-                            <article className={cx("skill-mcp-row", server.enabled && "selected")} key={server.id}>
-                              <div className="instruction-icon"><TerminalSquare size={20} /></div>
-                              <div className="skill-mcp-main">
+                    <div className="skills-mcp-list-card">
+                      <div className="skills-mcp-list-head">
+                        <strong>{skillsMcpTab === "mcp" ? "MCP" : "Skills"}</strong>
+                        <span>{lang === "zh" ? `共 ${activeSkillsMcpCount} 个` : `${activeSkillsMcpCount} total`}</span>
+                      </div>
+
+                      {skillsMcpTab === "mcp" ? (
+                        skillsMcpState.mcpServers.length === 0 ? (
+                          <div className="session-empty compact"><span>{lang === "zh" ? "还没有发现 MCP，点击导入已有。" : "No MCP server found. Import existing items first."}</span></div>
+                        ) : (
+                          <div className="skills-mcp-simple-list">
+                            {skillsMcpState.mcpServers.map((server) => (
+                              <article className="skills-mcp-simple-row" key={server.id}>
                                 <strong>{server.name || server.id}</strong>
-                                <p title={server.summary}>{server.summary || server.transport}</p>
-                                <code>{server.transport} · {server.source}</code>
-                              </div>
-                              <div className="skill-mcp-meta">
-                                <span className={cx("mini-tag", server.enabled ? "ok" : undefined)}>{server.enabled ? (lang === "zh" ? "已启用" : "Enabled") : (lang === "zh" ? "已禁用" : "Disabled")}</span>
-                              </div>
-                              <button className={cx(server.enabled ? "ghost-btn" : "secondary-btn", "small", "lively-btn")} onClick={() => void toggleMcpEnabled(server.id, !server.enabled)} disabled={actionBusy === `mcp:${server.id}`}>
-                                {actionBusy === `mcp:${server.id}` ? <Loader2 size={14} className="spin" /> : null}{server.enabled ? (lang === "zh" ? "关闭" : "Disable") : (lang === "zh" ? "开启" : "Enable")}
-                              </button>
-                            </article>
-                          ))}
-                        </div>
-                      </section>
+                                <button
+                                  className={cx("switch-toggle", server.enabled && "on")}
+                                  onClick={() => void toggleMcpEnabled(server.id, !server.enabled)}
+                                  disabled={Boolean(actionBusy) && actionBusy !== `mcp:${server.id}`}
+                                  aria-label={server.enabled ? (lang === "zh" ? "关闭 MCP" : "Disable MCP") : (lang === "zh" ? "开启 MCP" : "Enable MCP")}
+                                  aria-pressed={server.enabled}
+                                >
+                                  {actionBusy === `mcp:${server.id}` ? <Loader2 size={14} className="spin" /> : <span />}
+                                </button>
+                              </article>
+                            ))}
+                          </div>
+                        )
+                      ) : (
+                        skillsMcpState.skills.length === 0 ? (
+                          <div className="session-empty compact"><span>{lang === "zh" ? "还没有发现 Skills，点击导入已有或从 ZIP 安装。" : "No Skills found. Import existing items or install a ZIP."}</span></div>
+                        ) : (
+                          <div className="skills-mcp-simple-list">
+                            {skillsMcpState.skills.map((skill) => (
+                              <article className="skills-mcp-simple-row" key={skill.id}>
+                                <strong>{skill.name || skill.directory}</strong>
+                                <button
+                                  className={cx("switch-toggle", skill.enabled && "on")}
+                                  onClick={() => void toggleSkillEnabled(skill.id, !skill.enabled)}
+                                  disabled={Boolean(actionBusy) && actionBusy !== `skill:${skill.id}`}
+                                  aria-label={skill.enabled ? (lang === "zh" ? "禁用 Skill" : "Disable Skill") : (lang === "zh" ? "启用 Skill" : "Enable Skill")}
+                                  aria-pressed={skill.enabled}
+                                >
+                                  {actionBusy === `skill:${skill.id}` ? <Loader2 size={14} className="spin" /> : <span />}
+                                </button>
+                              </article>
+                            ))}
+                          </div>
+                        )
+                      )}
                     </div>
 
                     {skillsMcpState.warnings.length > 0 && (

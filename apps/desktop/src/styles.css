@@ -692,7 +692,7 @@ html, body, #root {
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: stable both-edges;
 }
 .content::-webkit-scrollbar,
 .provider-row-list::-webkit-scrollbar,
@@ -2188,78 +2188,136 @@ html, body, #root {
   animation: page-soft-in .24s cubic-bezier(.2,.8,.2,1) both;
 }
 @keyframes page-soft-in {
-  from { opacity: 0; transform: translateY(8px) scale(.992); filter: blur(2px); }
-  to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* Skills & MCP */
-.skills-mcp-panel { display: grid; gap: 16px; }
-.skills-mcp-summary {
+.page-pane-hidden {
+  display: none !important;
+}
+.skills-mcp-panel {
   display: grid;
-  grid-template-columns: minmax(180px, 240px) minmax(180px, 240px) 1fr;
   gap: 14px;
-  align-items: stretch;
 }
-.skills-path-card {
-  min-height: 110px;
-  border-radius: 24px;
-  padding: 18px;
-  background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.035));
-  border: 1px solid rgba(255,255,255,.1);
-  display: grid;
-  align-content: center;
-  gap: 8px;
-  min-width: 0;
-}
-.skills-path-card span { color: #91a0bb; font-size: 13px; font-weight: 800; }
-.skills-path-card code { color: #d9e6ff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.skills-mcp-columns {
+.skills-mcp-tabs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-  align-items: start;
+  gap: 10px;
 }
-.skills-mcp-card {
-  border-radius: 26px;
-  padding: 18px;
-  background: rgba(4, 12, 27, .34);
-  border: 1px solid rgba(255,255,255,.09);
+.skills-mcp-tab {
+  height: 42px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.055);
+  color: #f5f8ff;
+  font-weight: 900;
+  transition: background .16s ease, border-color .16s ease, transform .16s ease;
+}
+.skills-mcp-tab:hover {
+  transform: translateY(-1px);
+  background: rgba(255,255,255,.08);
+}
+.skills-mcp-tab.active {
+  border-color: rgba(33, 236, 158, .70);
+  background: rgba(22, 122, 74, .30);
+  box-shadow: inset 0 0 0 1px rgba(33, 236, 158, .08);
+}
+.skills-mcp-tab span {
+  margin-left: 6px;
+  color: #a7f7d5;
+  font-size: 12px;
+}
+.skills-mcp-help {
+  margin: 0;
+  color: #9aa8bf;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.skills-mcp-list-card {
+  border-radius: 18px;
+  padding: 14px;
+  background: rgba(10, 14, 24, .40);
+  border: 1px solid rgba(255,255,255,.08);
   min-width: 0;
 }
-.skills-mcp-card-head {
+.skills-mcp-list-head {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-.skills-mcp-card-head strong { font-size: 18px; color: #f5f9ff; }
-.skills-mcp-card-head p { margin: 5px 0 0; color: #8fa0bc; line-height: 1.55; font-size: 13px; }
-.skills-mcp-list { display: grid; gap: 12px; max-height: calc(100vh - 365px); overflow: auto; padding-right: 4px; }
-.skill-mcp-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  gap: 12px;
   align-items: center;
-  min-height: 92px;
-  padding: 14px;
-  border-radius: 22px;
-  background: linear-gradient(180deg, rgba(255,255,255,.065), rgba(255,255,255,.03));
-  border: 1px solid rgba(255,255,255,.09);
-  transition: transform .18s ease, border-color .18s ease, background .18s ease;
+  justify-content: space-between;
+  padding: 2px 4px 12px;
+  color: #f3f7ff;
 }
-.skill-mcp-row:hover { transform: translateY(-1px); border-color: rgba(87, 173, 255, .35); }
-.skill-mcp-row.selected { border-color: rgba(35, 207, 255, .62); background: linear-gradient(180deg, rgba(36,135,255,.16), rgba(17,75,112,.12)); }
-.skill-mcp-main { min-width: 0; }
-.skill-mcp-main strong { display: block; color: #f5f9ff; margin-bottom: 4px; }
-.skill-mcp-main p { margin: 0 0 6px; color: #9caac4; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.skill-mcp-main code { display: block; color: #bcd0ef; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.skill-mcp-meta { display: grid; justify-items: end; gap: 6px; color: #8fa0bc; font-size: 12px; }
-.session-empty.compact { min-height: 96px; }
-.skills-loading { min-height: 280px; }
+.skills-mcp-list-head strong {
+  font-size: 16px;
+}
+.skills-mcp-list-head span {
+  color: #98a6bb;
+  font-size: 12px;
+  font-weight: 800;
+}
+.skills-mcp-simple-list {
+  display: grid;
+  gap: 8px;
+}
+.skills-mcp-simple-row {
+  min-height: 50px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 8px 10px 10px;
+  border-radius: 9px;
+  background: rgba(255,255,255,.045);
+  border: 1px solid rgba(255,255,255,.075);
+  transition: background .16s ease, border-color .16s ease;
+}
+.skills-mcp-simple-row:hover {
+  background: rgba(255,255,255,.065);
+  border-color: rgba(33,236,158,.22);
+}
+.skills-mcp-simple-row strong {
+  color: #f4f7ff;
+  font-size: 14px;
+  line-height: 1.3;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.switch-toggle {
+  width: 48px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.12);
+  padding: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  transition: background .16s ease, border-color .16s ease;
+}
+.switch-toggle.on {
+  justify-content: flex-end;
+  background: rgba(20, 196, 121, .28);
+  border-color: rgba(28, 238, 155, .78);
+}
+.switch-toggle span {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #aeb8ca;
+  box-shadow: 0 2px 8px rgba(0,0,0,.25);
+}
+.switch-toggle.on span {
+  background: #1df0a1;
+}
+.switch-toggle:disabled {
+  opacity: .72;
+}
+.skills-loading { min-height: 220px; }
+.session-empty.compact { min-height: 74px; }
 @media (max-width: 1280px) {
-  .skills-mcp-summary { grid-template-columns: 1fr; }
-  .skills-mcp-columns { grid-template-columns: 1fr; }
-  .skills-mcp-list { max-height: none; }
+  .skills-mcp-tabs { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   .content > .panel,
