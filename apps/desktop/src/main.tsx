@@ -2304,7 +2304,6 @@ function App() {
                             <div className="instruction-main">
                               <strong>{item.title}</strong>
                               <p>{item.subtitle}</p>
-                              <code>./{item.filename}</code>
                               <div className="prompt-remote-meta" title={remoteStatus?.message || undefined}>
                                 <span className={cx("mini-tag", remoteStatus?.contentSource === "github" ? "ok" : undefined)}>{sourceLabel}</span>
                                 {remoteStatus?.checkedAt && <small>{new Date(remoteStatus.checkedAt).toLocaleString()}</small>}
@@ -2328,7 +2327,6 @@ function App() {
                             <div className="instruction-main">
                               <strong>{prompt.title}</strong>
                               <p>{lang === "zh" ? "自定义指令提示词" : "Custom instruction prompt"}</p>
-                              <code>./{prompt.filename}</code>
                             </div>
                             <div className="instruction-status-col">
                               {isCurrent ? <StatusPill active label={t.provider.current} /> : <span />}
@@ -2348,7 +2346,6 @@ function App() {
                           <div className="instruction-main">
                             <strong>{lang === "zh" ? "当前自定义指令提示词" : "Current custom prompt"}</strong>
                             <p>{lang === "zh" ? "当前使用的是外部提示词；切换到内置模板前会自动保存到下方列表，之后仍可重新启用。" : "An external prompt is currently active. It will be saved before switching to a built-in template so you can enable it again later."}</p>
-                            <code>{state.instructionFile}</code>
                           </div>
                           <div className="instruction-status-col"><StatusPill active label={t.provider.current} /></div>
                           <div className="instruction-action-col"><button className="ghost-btn small" onClick={disableInstruction} disabled={loading}>{lang === "zh" ? "禁用" : "Disable"}</button></div>
