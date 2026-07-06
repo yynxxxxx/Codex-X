@@ -716,6 +716,12 @@ fn builtin_prompt_meta(
     template_id: &str,
 ) -> Result<(&'static str, &'static str, &'static str, &'static str)> {
     match template_id.trim() {
+        "gpt5.5-jeli" => Ok((
+            "gpt5.5-jeli",
+            INSTRUCTION_JELI_FILENAME,
+            INSTRUCTION_JELI_RELATIVE,
+            INSTRUCTION_JELI_CONTENT,
+        )),
         "gpt5.4-unrestricted" => Ok((
             "gpt5.4-unrestricted",
             INSTRUCTION_54_FILENAME,
@@ -730,6 +736,10 @@ fn builtin_prompt_meta(
         )),
         other => Err(CodexxError::Config(format!("未知指令提示词模板: {other}"))),
     }
+}
+
+fn builtin_prompt_ids() -> [&'static str; 3] {
+    ["gpt5.5-unrestricted", "gpt5.4-unrestricted", "gpt5.5-jeli"]
 }
 
 fn builtin_prompt_source_url(filename: &str) -> String {
@@ -844,7 +854,7 @@ fn refresh_builtin_prompt_inner(template_id: &str) -> Result<BuiltinPromptStatus
 }
 
 fn builtin_prompt_status_inner() -> Result<Vec<BuiltinPromptStatus>> {
-    ["gpt5.5-unrestricted", "gpt5.4-unrestricted"]
+    builtin_prompt_ids()
         .iter()
         .map(|template_id| {
             let (id, filename, _relative, _bundled) = builtin_prompt_meta(template_id)?;
@@ -865,7 +875,7 @@ fn builtin_prompt_status_inner() -> Result<Vec<BuiltinPromptStatus>> {
 }
 
 fn refresh_builtin_prompts_inner() -> Result<Vec<BuiltinPromptStatus>> {
-    ["gpt5.5-unrestricted", "gpt5.4-unrestricted"]
+    builtin_prompt_ids()
         .iter()
         .map(|template_id| refresh_builtin_prompt_inner(template_id))
         .collect()
@@ -3406,14 +3416,18 @@ fn sync_sessions_provider_inner(
 }
 
 fn is_managed_instruction_value(value: &str) -> bool {
-    [INSTRUCTION_FILENAME, INSTRUCTION_54_FILENAME]
-        .iter()
-        .any(|filename| {
-            value == format!("./{filename}")
-                || value == *filename
-                || value.ends_with(&format!("/{filename}"))
-                || value.ends_with(&format!("\\{filename}"))
-        })
+    [
+        INSTRUCTION_FILENAME,
+        INSTRUCTION_54_FILENAME,
+        INSTRUCTION_JELI_FILENAME,
+    ]
+    .iter()
+    .any(|filename| {
+        value == format!("./{filename}")
+            || value == *filename
+            || value.ends_with(&format!("/{filename}"))
+            || value.ends_with(&format!("\\{filename}"))
+    })
 }
 
 fn set_top_level_defaults(doc: &mut DocumentMut) {
@@ -3885,7 +3899,11 @@ fn disable_instruction_inner(
 
     write_text(&cfg, &doc.to_string())?;
     if delete_file.unwrap_or(true) {
-        for filename in [INSTRUCTION_FILENAME, INSTRUCTION_54_FILENAME] {
+        for filename in [
+            INSTRUCTION_FILENAME,
+            INSTRUCTION_54_FILENAME,
+            INSTRUCTION_JELI_FILENAME,
+        ] {
             let md = codex_dir.join(filename);
             if md.exists() {
                 fs::remove_file(&md).map_err(|e| io_err(&md, e))?;

@@ -248,15 +248,22 @@ const instructionTemplates: InstructionTemplate[] = [
     id: "gpt5.5-unrestricted",
     filename: "gpt5.5-unrestricted.md",
     title: "gpt-5.5 unrestricted",
-    subtitle: "Codex-X 默认模板，适合 GPT-5.5 / Codex 5.5。",
+    subtitle: "gpt5.5 ctf提示词版本",
     badge: "推荐",
   },
   {
     id: "gpt5.4-unrestricted",
     filename: "gpt5.4-unrestricted.md",
     title: "gpt-5.4 unrestricted",
-    subtitle: "兼容旧版 GPT-5.4 / Codex 配置。",
+    subtitle: "gpt5.4 ctf提示词版本",
     badge: "兼容",
+  },
+  {
+    id: "gpt5.5-jeli",
+    filename: "gpt5.5-jeli.md",
+    title: "gpt5.5-jeli.md",
+    subtitle: "gpt5.5 大白话（80%场景）破甲",
+    badge: "通用",
   },
 ];
 
@@ -2294,7 +2301,6 @@ function App() {
                             : (lang === "zh" ? "打包内置" : "Bundled");
                         return (
                           <div className={cx("instruction-row", isCurrent && "selected")} key={item.id}>
-                            <div className="instruction-icon"><Sparkles size={22} /></div>
                             <div className="instruction-main">
                               <strong>{item.title}</strong>
                               <p>{item.subtitle}</p>
@@ -2319,7 +2325,6 @@ function App() {
                         const isCurrent = Boolean(state.instructionFile) && (state.instructionFile || "").replace(/\\/g, "/").endsWith(prompt.filename);
                         return (
                           <div className={cx("instruction-row", isCurrent && "selected")} key={prompt.id}>
-                            <div className="instruction-icon custom"><FileCode2 size={22} /></div>
                             <div className="instruction-main">
                               <strong>{prompt.title}</strong>
                               <p>{lang === "zh" ? "自定义指令提示词" : "Custom instruction prompt"}</p>
@@ -2340,7 +2345,6 @@ function App() {
 
                       {state.instructionFile && currentInstructionId === "custom" && !savedPrompts.some((p) => state.instructionFile?.replace(/\\/g, "/").endsWith(p.filename)) && (
                         <div className="instruction-row selected">
-                          <div className="instruction-icon custom"><FileCode2 size={22} /></div>
                           <div className="instruction-main">
                             <strong>{lang === "zh" ? "当前自定义指令提示词" : "Current custom prompt"}</strong>
                             <p>{lang === "zh" ? "当前使用的是外部提示词；切换到内置模板前会自动保存到下方列表，之后仍可重新启用。" : "An external prompt is currently active. It will be saved before switching to a built-in template so you can enable it again later."}</p>

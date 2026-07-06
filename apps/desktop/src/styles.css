@@ -1073,40 +1073,26 @@ html, body, #root {
   gap: 13px;
 }
 .instruction-row {
-  min-height: 96px;
+  min-height: 88px;
   display: grid;
-  grid-template-columns: 50px minmax(260px, 1fr) minmax(160px, auto) max-content;
-  gap: 16px;
+  grid-template-columns: minmax(260px, 1fr) minmax(86px, auto) max-content;
+  gap: 14px;
   align-items: center;
-  padding: 16px 18px;
-  border-radius: 20px;
-  background: rgba(7, 15, 31, .52);
-  border: 1px solid rgba(255,255,255,.1);
+  padding: 15px 18px;
+  border-radius: 18px;
+  background: rgba(7, 13, 27, .48);
+  border: 1px solid rgba(255,255,255,.085);
   transition: .18s ease;
 }
 .instruction-row:hover {
-  border-color: rgba(65, 165, 255, .5);
-  background: rgba(14, 28, 52, .68);
+  border-color: rgba(103, 174, 255, .36);
+  background: rgba(12, 22, 41, .62);
   transform: translateY(-1px);
 }
 .instruction-row.selected {
-  border-color: rgba(64, 158, 255, .85);
-  background: linear-gradient(135deg, rgba(66, 153, 255, .14), rgba(18, 211, 255, .08));
-  box-shadow: 0 18px 42px rgba(0, 112, 255, .13), inset 0 0 0 1px rgba(64, 158, 255, .14);
-}
-.instruction-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 16px;
-  display: grid;
-  place-items: center;
-  color: #dff8ff;
-  background: linear-gradient(135deg, rgba(124,92,255,.72), rgba(18,211,255,.45));
-  border: 1px solid rgba(255,255,255,.16);
-}
-.instruction-icon.custom {
-  background: rgba(255,255,255,.08);
-  color: #aeb9d1;
+  border-color: rgba(78, 159, 255, .74);
+  background: rgba(16, 32, 58, .72);
+  box-shadow: inset 3px 0 0 rgba(72, 163, 255, .85);
 }
 .instruction-main {
   min-width: 0;
@@ -1232,8 +1218,8 @@ html, body, #root {
 
 /* Simpler instruction prompt page: aligned status + enable/disable controls. */
 .simple-instruction-panel .instruction-row {
-  grid-template-columns: 50px minmax(320px, 1fr) 86px 280px;
-  min-height: 102px;
+  grid-template-columns: minmax(320px, 1fr) 86px 280px;
+  min-height: 88px;
 }
 .instruction-status-col {
   display: flex;
@@ -1291,10 +1277,10 @@ html, body, #root {
 }
 @media (max-width: 1320px) {
   .simple-instruction-panel .instruction-row {
-    grid-template-columns: 50px minmax(260px, 1fr) 76px;
+    grid-template-columns: minmax(260px, 1fr) 76px;
   }
   .instruction-action-col {
-    grid-column: 2 / -1;
+    grid-column: 1 / -1;
     min-width: 0;
     justify-content: flex-start;
   }
@@ -1992,8 +1978,9 @@ html, body, #root {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 7px;
+  margin-top: 6px;
   min-width: 0;
+  opacity: .88;
 }
 .prompt-remote-meta small {
   color: #8293b1;
