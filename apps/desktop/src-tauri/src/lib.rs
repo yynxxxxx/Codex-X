@@ -109,6 +109,7 @@ struct BackupEntry {
 #[serde(rename_all = "camelCase")]
 struct ProviderInput {
     config_dir: Option<String>,
+    provider_id: Option<String>,
     provider_name: String,
     base_url: String,
     model: String,
@@ -1980,7 +1981,7 @@ fn extract_ccswitch_codex_provider(
     let requires_openai_auth = provider_table
         .and_then(|table| table.get("requires_openai_auth"))
         .and_then(|item| item.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     Some(SavedProvider {
         id: sanitize_id(id),
@@ -3965,6 +3966,7 @@ fn save_provider_toml_config_inner(input: ProviderTomlInput) -> Result<ActionRes
             auth_value = json!({});
         }
         auth_value["OPENAI_API_KEY"] = Value::String(api_key);
+        auth_value["auth_mode"] = Value::String("api_key".to_string());
         write_json(&auth, &auth_value)?;
     }
 
@@ -3992,6 +3994,13 @@ fn switch_provider_inner(input: ProviderInput) -> Result<ActionResult> {
     let backup_id = create_backup(&codex_dir, "switch-provider")?;
 
     let provider_name = input.provider_name.trim();
+    let provider_key = input
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(sanitize_id)
+        .unwrap_or_else(|| sanitize_id(provider_name));
     let base_url = input.base_url.trim().trim_end_matches('/');
     let model = input.model.trim();
     if provider_name.is_empty() {
@@ -4006,17 +4015,17 @@ fn switch_provider_inner(input: ProviderInput) -> Result<ActionResult> {
 
     let text = read_to_string_if_exists(&cfg)?;
     let mut doc = parse_toml_document(&cfg, &text)?;
-    doc["model_provider"] = value("custom");
+    doc["model_provider"] = value(provider_key.as_str());
     doc["model"] = value(model);
     set_top_level_defaults(&mut doc);
 
     let root = doc.as_table_mut();
     let providers = ensure_table(root, "model_providers")?;
-    let custom = ensure_table(providers, "custom")?;
-    custom["name"] = value(provider_name);
-    custom["base_url"] = value(base_url);
-    custom["wire_api"] = value(input.wire_api.unwrap_or_else(|| "responses".to_string()));
-    custom["requires_openai_auth"] = value(input.requires_openai_auth.unwrap_or(true));
+    let provider_table = ensure_table(providers, provider_key.as_str())?;
+    provider_table["name"] = value(provider_name);
+    provider_table["base_url"] = value(base_url);
+    provider_table["wire_api"] = value(input.wire_api.unwrap_or_else(|| "responses".to_string()));
+    provider_table["requires_openai_auth"] = value(input.requires_openai_auth.unwrap_or(false));
 
     write_text(&cfg, &doc.to_string())?;
 
@@ -4035,6 +4044,7 @@ fn switch_provider_inner(input: ProviderInput) -> Result<ActionResult> {
             auth_value = json!({});
         }
         auth_value["OPENAI_API_KEY"] = Value::String(api_key);
+        auth_value["auth_mode"] = Value::String("api_key".to_string());
         write_json(&auth, &auth_value)?;
     }
 
@@ -4180,4 +4190,56 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Codex-X");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_codex_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-x-{name}-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).expect("create temp codex dir");
+        dir
+    }
+
+    #[test]
+    fn switch_provider_writes_real_provider_key_and_api_key_auth_mode() {
+        let codex_dir = temp_codex_dir("switch-provider");
+        let result = switch_provider_inner(ProviderInput {
+            config_dir: Some(codex_dir.display().to_string()),
+            provider_id: Some("magicai".to_string()),
+            provider_name: "MagicAI".to_string(),
+            base_url: "https://example.com/v1/".to_string(),
+            model: "gpt-5.5".to_string(),
+            api_key: Some("sk-test".to_string()),
+            wire_api: Some("responses".to_string()),
+            requires_openai_auth: None,
+        })
+        .expect("switch provider");
+
+        assert_eq!(result.state.model_provider.as_deref(), Some("magicai"));
+        assert_eq!(result.state.model.as_deref(), Some("gpt-5.5"));
+
+        let config_text = fs::read_to_string(config_path(&codex_dir)).expect("read config");
+        assert!(config_text.contains("model_provider = \"magicai\""));
+        assert!(config_text.contains("[model_providers.magicai]"));
+        assert!(config_text.contains("requires_openai_auth = false"));
+
+        let auth_text = fs::read_to_string(auth_path(&codex_dir)).expect("read auth");
+        let auth: Value = serde_json::from_str(&auth_text).expect("parse auth");
+        assert_eq!(
+            auth.get("OPENAI_API_KEY").and_then(Value::as_str),
+            Some("sk-test")
+        );
+        assert_eq!(
+            auth.get("auth_mode").and_then(Value::as_str),
+            Some("api_key")
+        );
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
 }

@@ -279,7 +279,7 @@ const defaultProviderForm: SavedProvider = {
   model: "gpt-5.5",
   apiKey: "",
   wireApi: "responses",
-  requiresOpenaiAuth: true,
+  requiresOpenaiAuth: false,
 };
 
 const blankProviderForm: SavedProvider = {
@@ -289,7 +289,7 @@ const blankProviderForm: SavedProvider = {
   model: "gpt-5.5",
   apiKey: "",
   wireApi: "responses",
-  requiresOpenaiAuth: true,
+  requiresOpenaiAuth: false,
 };
 
 const blankPromptForm: SavedPrompt = {
@@ -599,6 +599,7 @@ function extractOpenAiApiKey(authText?: string) {
 function buildProviderTomlPreview(provider: SavedProvider, state: CodexState | null) {
   const model = provider.model.trim() || "gpt-5.5";
   const name = provider.providerName.trim() || "your-provider";
+  const providerKey = providerId(provider.id || name || provider.baseUrl || "custom");
   const baseUrl = provider.baseUrl.trim().replace(/\/+$/, "") || "https://example.com/v1";
   const wireApi = provider.wireApi || "responses";
   const source = state?.configText?.trimEnd() || "";
@@ -612,7 +613,7 @@ function buildProviderTomlPreview(provider: SavedProvider, state: CodexState | n
     const sectionMatch = line.match(/^\s*\[([^\]]+)]\s*$/);
     if (sectionMatch) {
       currentSection = sectionMatch[1].trim();
-      skippingCustomProvider = currentSection === "model_providers.custom";
+      skippingCustomProvider = currentSection === `model_providers.${providerKey}`;
       if (skippingCustomProvider) continue;
     }
     if (skippingCustomProvider) continue;
@@ -637,7 +638,7 @@ function buildProviderTomlPreview(provider: SavedProvider, state: CodexState | n
   });
 
   const headerLines = [
-    'model_provider = "custom"',
+    `model_provider = "${tomlEscape(providerKey)}"`,
     `model = "${tomlEscape(model)}"`,
   ];
   if (!hasReasoningEffort) {
@@ -645,7 +646,7 @@ function buildProviderTomlPreview(provider: SavedProvider, state: CodexState | n
   }
 
   const providerLines = [
-    "[model_providers.custom]",
+    `[model_providers.${providerKey}]`,
     `name = "${tomlEscape(name)}"`,
     `base_url = "${tomlEscape(baseUrl)}"`,
     `wire_api = "${tomlEscape(wireApi)}"`,
@@ -664,7 +665,7 @@ function buildProviderTomlPreview(provider: SavedProvider, state: CodexState | n
 
 function buildProviderAuthPreview(provider: SavedProvider) {
   const key = provider.apiKey?.trim();
-  return JSON.stringify({ OPENAI_API_KEY: key || null }, null, 2);
+  return JSON.stringify({ OPENAI_API_KEY: key || null, auth_mode: key ? "api_key" : undefined }, null, 2);
 }
 
 
@@ -910,7 +911,7 @@ function App() {
       baseUrl: p.baseUrl || "",
       model: state?.model || "gpt-5.5",
       wireApi: p.wireApi || "responses",
-      requiresOpenaiAuth: p.requiresOpenaiAuth ?? true,
+      requiresOpenaiAuth: p.requiresOpenaiAuth ?? false,
       isCurrent: p.isCurrent,
     }));
   }, [state]);
@@ -921,7 +922,7 @@ function App() {
       source: "local" as const,
       isCurrent:
         Boolean(currentProvider) &&
-        currentProvider?.baseUrl === p.baseUrl &&
+        (currentProvider?.id === p.id || currentProvider?.baseUrl === p.baseUrl) &&
         (state?.model || "") === p.model,
     }));
   }, [savedProviders, currentProvider, state?.model]);
@@ -1227,6 +1228,7 @@ function App() {
         invoke<ActionResult>("switch_provider", {
           input: {
             configDir: configDir || null,
+            providerId: provider.id,
             providerName: provider.providerName,
             baseUrl: provider.baseUrl,
             model: provider.model,

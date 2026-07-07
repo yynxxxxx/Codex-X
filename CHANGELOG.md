@@ -2,6 +2,13 @@
 
 All notable changes to Codex-X will be documented here.
 
+## [v0.2.26] - 2026-07-07
+
+- 修复第三方 Provider 切换后可能“看起来已切换但实际未按新供应商生效”的问题：不再把所有第三方都写成 `model_provider = "custom"`，而是写入供应商自己的稳定 ID。
+- 修复从官方 ChatGPT 登录态切到第三方 API Key 时 `auth.json` 仍保留 `auth_mode = "chatgpt"` 的问题；写入 API Key 时会同步设置 `auth_mode = "api_key"`。
+- 第三方供应商默认不再要求 OpenAI 登录态，避免新建/导入 Provider 时错误继承官方 auth 语义。
+- 增加 Provider 切换单元测试，覆盖真实 provider key 和 API Key auth mode 的落盘结果。
+
 ## [v0.2.25] - 2026-07-06
 
 - 进一步修复 TOML、指令提示词、供应商、会话管理等页面切换时右侧滚动条闪现/消失造成的视觉抖动。
