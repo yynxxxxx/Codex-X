@@ -3,6 +3,14 @@
 All notable changes to Codex-X will be documented here.
 
 
+
+## [v0.2.28] - 2026-07-07
+
+- 修复从 cc-switch 导入 Codex Provider 时可能把供应商名称、base_url 与 API Key 串台的问题。
+- 导入 cc-switch Provider 时改为先扫描所有 `[model_providers.<id>]` section，再按 provider row id 精确匹配，避免使用过期的 `model_provider` active 值。
+- 兼容 cc-switch legacy `custom` provider 模板，同时保留 `experimental_bearer_token` 兜底。
+- 增加复现 Sky2api / MagicAI 交叉配置的单元测试，防止 Provider 切换再次出现“看起来切了但实际没切对”的问题。
+
 ## [v0.2.27] - 2026-07-07
 
 - 优化【指令提示词】页面为 Skills/MCP 风格的简洁列表：左侧显示模板名称与说明，右侧使用开启/关闭切换；自定义/导入的 md 提示词增加编辑与删除图标。

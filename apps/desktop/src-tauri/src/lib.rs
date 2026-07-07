@@ -1972,75 +1972,183 @@ fn experimental_bearer_token_from_doc(
         .map(ToString::to_string)
 }
 
-fn extract_ccswitch_codex_provider(
-    id: &str,
-    name: &str,
-    settings_config: &str,
-) -> Option<SavedProvider> {
-    let settings: Value = serde_json::from_str(settings_config).ok()?;
-    let auth = settings.get("auth");
-    let api_key = auth
+#[derive(Debug, Clone)]
+struct CcSwitchCodexRow {
+    id: String,
+    name: String,
+    settings_config: String,
+}
+
+#[derive(Debug, Clone)]
+struct CcSwitchCodexSection {
+    id: String,
+    name: Option<String>,
+    base_url: String,
+    model: Option<String>,
+    wire_api: String,
+    requires_openai_auth: bool,
+    experimental_bearer_token: Option<String>,
+}
+
+fn table_string(table: &Table, key: &str) -> Option<String> {
+    table
+        .get(key)
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn ccswitch_auth_api_key(settings: &Value) -> Option<String> {
+    settings
+        .get("auth")
         .and_then(|v| v.get("OPENAI_API_KEY"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(ToString::to_string);
+        .map(ToString::to_string)
+}
 
-    let config_text = settings.get("config").and_then(Value::as_str).unwrap_or("");
-    if config_text.trim().is_empty() {
-        return None;
-    }
-    let doc = config_text.parse::<DocumentMut>().ok()?;
-    let model = string_value(&doc, "model").unwrap_or_else(|| "gpt-5.5".to_string());
-    let active_provider =
-        string_value(&doc, "model_provider").unwrap_or_else(|| "custom".to_string());
-    let api_key =
-        api_key.or_else(|| experimental_bearer_token_from_doc(&doc, Some(&active_provider)));
-
-    let provider_table = doc
-        .get("model_providers")
-        .and_then(|item| item.as_table())
-        .and_then(|providers| providers.get(&active_provider))
-        .and_then(|item| item.as_table());
-
-    let base_url = provider_table
-        .and_then(|table| table.get("base_url"))
-        .and_then(|item| item.as_str())
-        .or_else(|| doc.get("base_url").and_then(|item| item.as_str()))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())?
+fn codex_section_from_table(
+    id: &str,
+    table: &Table,
+    model: Option<String>,
+) -> Option<CcSwitchCodexSection> {
+    let base_url = table_string(table, "base_url")?
         .trim_end_matches('/')
         .to_string();
-
-    let provider_name = provider_table
-        .and_then(|table| table.get("name"))
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(name)
-        .to_string();
-
-    let wire_api = provider_table
-        .and_then(|table| table.get("wire_api"))
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("responses")
-        .to_string();
-
-    let requires_openai_auth = provider_table
-        .and_then(|table| table.get("requires_openai_auth"))
-        .and_then(|item| item.as_bool())
-        .unwrap_or(false);
-
-    Some(SavedProvider {
-        id: custom_provider_id(id),
-        provider_name,
+    if base_url.is_empty() {
+        return None;
+    }
+    Some(CcSwitchCodexSection {
+        id: id.to_string(),
+        name: table_string(table, "name"),
         base_url,
         model,
+        wire_api: table_string(table, "wire_api").unwrap_or_else(|| "responses".to_string()),
+        requires_openai_auth: table
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            .unwrap_or(false),
+        experimental_bearer_token: table_string(table, "experimental_bearer_token"),
+    })
+}
+
+fn codex_sections_from_config(config_text: &str) -> Vec<CcSwitchCodexSection> {
+    let Ok(doc) = config_text.parse::<DocumentMut>() else {
+        return Vec::new();
+    };
+    let model = string_value(&doc, "model");
+    let Some(providers) = doc.get("model_providers").and_then(|item| item.as_table()) else {
+        return Vec::new();
+    };
+    providers
+        .iter()
+        .filter_map(|(id, item)| {
+            item.as_table()
+                .and_then(|table| codex_section_from_table(id, table, model.clone()))
+        })
+        .collect()
+}
+
+fn select_ccswitch_section_for_row(
+    row: &CcSwitchCodexRow,
+    settings: &Value,
+    global_sections: &HashMap<String, CcSwitchCodexSection>,
+) -> Option<CcSwitchCodexSection> {
+    let provider_id = custom_provider_id(&row.id);
+    if let Some(section) = global_sections.get(&provider_id) {
+        return Some(section.clone());
+    }
+    if let Some(section) = global_sections.get(row.id.trim()) {
+        return Some(section.clone());
+    }
+
+    let config_text = settings.get("config").and_then(Value::as_str).unwrap_or("");
+    let doc = config_text.parse::<DocumentMut>().ok()?;
+    let model = string_value(&doc, "model");
+    let active_provider = string_value(&doc, "model_provider");
+    let providers = doc.get("model_providers").and_then(|item| item.as_table());
+
+    if let Some(providers) = providers {
+        for exact_id in [provider_id.as_str(), row.id.trim()] {
+            if let Some(section) = providers
+                .get(exact_id)
+                .and_then(|item| item.as_table())
+                .and_then(|table| codex_section_from_table(exact_id, table, model.clone()))
+            {
+                return Some(section);
+            }
+        }
+
+        if active_provider.as_deref() == Some(row.id.trim())
+            || active_provider.as_deref() == Some(provider_id.as_str())
+        {
+            if let Some(active) = active_provider.as_deref() {
+                if let Some(section) = providers
+                    .get(active)
+                    .and_then(|item| item.as_table())
+                    .and_then(|table| codex_section_from_table(active, table, model.clone()))
+                {
+                    return Some(section);
+                }
+            }
+        }
+
+        // Legacy cc-switch/custom templates often store every third-party provider
+        // under `[model_providers.custom]`. Only use it when the row's own config
+        // explicitly activates custom or contains no other provider identity.
+        if active_provider
+            .as_deref()
+            .is_none_or(|active| active == "custom")
+        {
+            if let Some(section) = providers
+                .get("custom")
+                .and_then(|item| item.as_table())
+                .and_then(|table| codex_section_from_table("custom", table, model.clone()))
+            {
+                return Some(section);
+            }
+        }
+    }
+
+    doc.get("base_url")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|base_url| CcSwitchCodexSection {
+            id: provider_id,
+            name: None,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            model,
+            wire_api: "responses".to_string(),
+            requires_openai_auth: false,
+            experimental_bearer_token: experimental_bearer_token_from_doc(
+                &doc,
+                active_provider.as_deref(),
+            ),
+        })
+}
+
+fn build_ccswitch_codex_provider(
+    row: &CcSwitchCodexRow,
+    global_sections: &HashMap<String, CcSwitchCodexSection>,
+) -> Option<SavedProvider> {
+    let settings: Value = serde_json::from_str(&row.settings_config).ok()?;
+    let section = select_ccswitch_section_for_row(row, &settings, global_sections)?;
+    let api_key = ccswitch_auth_api_key(&settings).or(section.experimental_bearer_token.clone());
+    Some(SavedProvider {
+        id: custom_provider_id(&row.id),
+        provider_name: if row.name.trim().is_empty() {
+            section.name.unwrap_or_else(|| row.id.clone())
+        } else {
+            row.name.trim().to_string()
+        },
+        base_url: section.base_url,
+        model: section.model.unwrap_or_else(|| "gpt-5.5".to_string()),
         api_key,
-        wire_api,
-        requires_openai_auth,
+        wire_api: section.wire_api,
+        requires_openai_auth: section.requires_openai_auth,
     })
 }
 
@@ -2214,21 +2322,40 @@ fn import_ccswitch_codex_providers_inner(path: Option<String>) -> Result<ImportR
 
     let rows = stmt
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+            Ok(CcSwitchCodexRow {
+                id: row.get::<_, String>(0)?,
+                name: row.get::<_, String>(1)?,
+                settings_config: row.get::<_, String>(2)?,
+            })
         })
         .map_err(|e| CodexxError::Database(e.to_string()))?;
+
+    let mut rows_vec = Vec::new();
+    for row in rows {
+        rows_vec.push(row.map_err(|e| CodexxError::Database(e.to_string()))?);
+    }
+
+    let mut global_sections: HashMap<String, CcSwitchCodexSection> = HashMap::new();
+    for row in &rows_vec {
+        let Ok(settings) = serde_json::from_str::<Value>(&row.settings_config) else {
+            continue;
+        };
+        let Some(config_text) = settings.get("config").and_then(Value::as_str) else {
+            continue;
+        };
+        for section in codex_sections_from_config(config_text) {
+            if !global_sections.contains_key(&section.id) {
+                global_sections.insert(section.id.clone(), section);
+            }
+        }
+    }
 
     let mut imported = 0usize;
     let mut skipped = 0usize;
     let mut warnings = Vec::new();
 
-    for row in rows {
-        let (id, name, settings_config) = row.map_err(|e| CodexxError::Database(e.to_string()))?;
-        match extract_ccswitch_codex_provider(&id, &name, &settings_config) {
+    for row in rows_vec {
+        match build_ccswitch_codex_provider(&row, &global_sections) {
             Some(provider) => {
                 save_provider_inner(provider)?;
                 imported += 1;
@@ -2236,7 +2363,8 @@ fn import_ccswitch_codex_providers_inner(path: Option<String>) -> Result<ImportR
             None => {
                 skipped += 1;
                 warnings.push(format!(
-                    "跳过 {name} ({id})：未找到可用 config/base_url，可能是官方登录或空模板"
+                    "跳过 {} ({})：未找到可用 config/base_url，可能是官方登录或空模板",
+                    row.name, row.id
                 ));
             }
         }
@@ -4421,11 +4549,80 @@ experimental_bearer_token = "sk-from-config"
         })
         .to_string();
 
-        let provider =
-            extract_ccswitch_codex_provider("openai", "Proxy", &settings_config).expect("provider");
+        let row = CcSwitchCodexRow {
+            id: "openai".to_string(),
+            name: "Proxy".to_string(),
+            settings_config,
+        };
+        let provider = build_ccswitch_codex_provider(&row, &HashMap::new()).expect("provider");
         assert_eq!(provider.id, "openai-custom");
         assert_eq!(provider.api_key.as_deref(), Some("sk-from-config"));
         assert_eq!(provider.base_url, "https://proxy.example.com/v1");
+    }
+
+    #[test]
+    fn import_ccswitch_provider_uses_row_id_section_not_stale_active_provider() {
+        let sky_row = CcSwitchCodexRow {
+            id: "sky2api-1782194988817".to_string(),
+            name: "Sky2api".to_string(),
+            settings_config: json!({
+                "auth": {"OPENAI_API_KEY": "sk-sky"},
+                "config": r#"model = "gpt-5.5"
+model_provider = "magicai-1782956845071"
+
+[model_providers.magicai-1782956845071]
+name = "MagicAI"
+base_url = "https://sky1818.com"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+            })
+            .to_string(),
+        };
+        let magic_row = CcSwitchCodexRow {
+            id: "magicai-1782956845071".to_string(),
+            name: "MagicAI".to_string(),
+            settings_config: json!({
+                "auth": {"OPENAI_API_KEY": "sk-magic"},
+                "config": r#"model = "gpt-5.5"
+model_provider = "sky2api-1782194988817"
+
+[model_providers.magicai-1782956845071]
+name = "MagicAI"
+base_url = "https://sky1818.com"
+wire_api = "responses"
+requires_openai_auth = true
+
+[model_providers.sky2api-1782194988817]
+name = "Sky2api"
+base_url = "https://ikuncode.site/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+            })
+            .to_string(),
+        };
+
+        let mut sections = HashMap::new();
+        for row in [&sky_row, &magic_row] {
+            let settings: Value = serde_json::from_str(&row.settings_config).expect("settings");
+            for section in codex_sections_from_config(
+                settings.get("config").and_then(Value::as_str).unwrap_or(""),
+            ) {
+                sections.entry(section.id.clone()).or_insert(section);
+            }
+        }
+
+        let sky = build_ccswitch_codex_provider(&sky_row, &sections).expect("sky");
+        let magic = build_ccswitch_codex_provider(&magic_row, &sections).expect("magic");
+
+        assert_eq!(sky.provider_name, "Sky2api");
+        assert_eq!(sky.base_url, "https://ikuncode.site/v1");
+        assert_eq!(sky.api_key.as_deref(), Some("sk-sky"));
+
+        assert_eq!(magic.provider_name, "MagicAI");
+        assert_eq!(magic.base_url, "https://sky1818.com");
+        assert_eq!(magic.api_key.as_deref(), Some("sk-magic"));
     }
 
     #[test]
