@@ -257,6 +257,8 @@ type StartupDiagnostics = {
 const INSTRUCTION_RELATIVE_UI = "./gpt5.5-unrestricted.md";
 const LANG_KEY = "codexx.lang";
 const STARTUP_WIZARD_SEEN_KEY = "codexx.startupWizardSeen";
+const AUTO_SESSION_SYNC_KEY = "codexx.autoSessionSync";
+const ACTIVE_PROVIDER_KEY = "codexx.activeProviderId";
 const FALLBACK_GITHUB_REPO = "yynxxxxx/Codex-X";
 
 const instructionTemplates: InstructionTemplate[] = [
@@ -562,6 +564,36 @@ function customProviderId(name: string) {
   return isReservedCodexProviderId(id) ? `${id}-custom` : id;
 }
 
+function uniqueId(base: string, existingIds: Iterable<string>) {
+  const used = new Set(Array.from(existingIds).map((id) => id.trim().toLowerCase()));
+  const clean = providerId(base);
+  let candidate = clean;
+  let index = 2;
+  while (used.has(candidate.toLowerCase())) {
+    candidate = `${clean}-${index}`;
+    index += 1;
+  }
+  return candidate;
+}
+
+function splitMarkdownFilename(filename: string) {
+  const clean = filename.trim().replace(/[\/\\]+/g, "-") || "prompt.md";
+  const stem = clean.replace(/\.md$/i, "") || "prompt";
+  return { stem, filename: `${stem}.md` };
+}
+
+function uniquePromptFilename(filename: string, existingFilenames: Iterable<string>) {
+  const used = new Set(Array.from(existingFilenames).map((name) => name.trim().toLowerCase()));
+  const { stem } = splitMarkdownFilename(filename);
+  let candidate = `${stem}.md`;
+  let index = 2;
+  while (used.has(candidate.toLowerCase())) {
+    candidate = `${stem}-${index}.md`;
+    index += 1;
+  }
+  return candidate;
+}
+
 function StatusPill({ active, label }: { active: boolean; label: string }) {
   return <span className={cx("pill", active ? "pill-ok" : "pill-muted")}>{label}</span>;
 }
@@ -847,6 +879,7 @@ function App() {
   const [editingProviderId, setEditingProviderId] = React.useState<string | null>(null);
   const [editingPromptId, setEditingPromptId] = React.useState<string | null>(null);
   const [savedProviders, setSavedProviders] = React.useState<SavedProvider[]>([]);
+  const [activeProviderId, setActiveProviderId] = React.useState(() => localStorage.getItem(ACTIVE_PROVIDER_KEY) || "");
   const [savedPrompts, setSavedPrompts] = React.useState<SavedPrompt[]>([]);
   const [builtinPromptStatus, setBuiltinPromptStatus] = React.useState<BuiltinPromptStatus[]>([]);
   const [aboutInfo, setAboutInfo] = React.useState<AboutInfo | null>(null);
@@ -863,6 +896,8 @@ function App() {
   const deferredSessionQuery = React.useDeferredValue(sessionQuery);
   const [sessionGroupByCwd, setSessionGroupByCwd] = React.useState(true);
   const [selectedSessionIds, setSelectedSessionIds] = React.useState<string[]>([]);
+  const [autoSessionSync, setAutoSessionSync] = React.useState(() => localStorage.getItem(AUTO_SESSION_SYNC_KEY) === "1");
+  const [autoSessionSyncBusy, setAutoSessionSyncBusy] = React.useState(false);
   const [state, setState] = React.useState<CodexState | null>(null);
   const [backups, setBackups] = React.useState<BackupEntry[]>([]);
   const [configDir, setConfigDir] = React.useState("");
@@ -881,6 +916,7 @@ function App() {
   const [promptForm, setPromptForm] = React.useState<SavedPrompt>(blankPromptForm);
   const [officialForm, setOfficialForm] = React.useState({ model: "gpt-5.5", authJson: "" });
   const autoUpdateCheckedRef = React.useRef(false);
+  const autoSessionSyncRanRef = React.useRef(false);
   const promptImportRef = React.useRef<HTMLInputElement | null>(null);
   const skillZipImportRef = React.useRef<HTMLInputElement | null>(null);
   const promptUpdateCheckedRef = React.useRef(false);
@@ -939,6 +975,10 @@ function App() {
 
 
   const currentProvider = state?.providers.find((p) => p.isCurrent);
+  const liveProviderId = (state?.modelProvider || "openai").trim();
+  const effectiveActiveProviderId = liveProviderId === "custom" ? activeProviderId : liveProviderId;
+  const currentInstructionPath = (state?.instructionFile || "").replace(/\\/g, "/");
+  const currentInstructionFilename = currentInstructionPath.split("/").pop() || "";
   const detectedRows = React.useMemo(() => {
     return (state?.providers || []).map((p) => ({
       id: `detected-${p.id}`,
@@ -956,12 +996,9 @@ function App() {
     return savedProviders.map((p) => ({
       ...p,
       source: "local" as const,
-      isCurrent:
-        Boolean(currentProvider) &&
-        (currentProvider?.id === p.id || currentProvider?.baseUrl === p.baseUrl) &&
-        (state?.model || "") === p.model,
+      isCurrent: effectiveActiveProviderId === p.id,
     }));
-  }, [savedProviders, currentProvider, state?.model]);
+  }, [savedProviders, effectiveActiveProviderId]);
 
   const providerRows = React.useMemo(() => {
     const officialRow = {
@@ -1083,6 +1120,45 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  React.useEffect(() => {
+    localStorage.setItem(AUTO_SESSION_SYNC_KEY, autoSessionSync ? "1" : "0");
+  }, [autoSessionSync]);
+
+  React.useEffect(() => {
+    if (liveProviderId !== "custom") {
+      if (activeProviderId) {
+        localStorage.removeItem(ACTIVE_PROVIDER_KEY);
+        setActiveProviderId("");
+      }
+      return;
+    }
+    if (activeProviderId && !savedProviders.some((item) => item.id === activeProviderId)) {
+      localStorage.removeItem(ACTIVE_PROVIDER_KEY);
+      setActiveProviderId("");
+    }
+  }, [activeProviderId, liveProviderId, savedProviders]);
+
+  React.useEffect(() => {
+    if (!autoSessionSync || autoSessionSyncRanRef.current || !state?.codexDir) return;
+    autoSessionSyncRanRef.current = true;
+    const resolvedConfigDir = configDir || state.codexDir || null;
+    setAutoSessionSyncBusy(true);
+    invoke<SessionSyncStatus>("get_session_sync_status", { configDir: resolvedConfigDir, targetProvider: null })
+      .then((status) => {
+        if (!status.needsSync) {
+          setSessionStatus(status);
+          return null;
+        }
+        return invoke<SessionSyncResult>("sync_sessions_provider", { configDir: resolvedConfigDir, targetProvider: null })
+          .then((result) => {
+            setSessionStatus(result.status);
+            setToast(lang === "zh" ? `已自动修复 ${result.updatedThreads} 条会话` : `Auto repaired ${result.updatedThreads} session(s)`);
+          });
+      })
+      .catch(() => undefined)
+      .finally(() => setAutoSessionSyncBusy(false));
+  }, [autoSessionSync, configDir, lang, state?.codexDir]);
+
   const handleActionResult = (result: ActionResult) => {
     setState(result.state);
     setToast(result.message);
@@ -1129,13 +1205,18 @@ function App() {
     setInstructionMode("form");
   };
 
-  const normalizedPromptForm = (): SavedPrompt => ({
-    ...promptForm,
-    id: editingPromptId || promptForm.id || providerId(promptForm.title || promptForm.filename),
-    title: promptForm.title.trim(),
-    filename: promptForm.filename.trim(),
-    content: promptForm.content,
-  });
+  const normalizedPromptForm = (): SavedPrompt => {
+    const existing = savedPrompts.filter((item) => item.id !== editingPromptId);
+    const requestedFilename = promptForm.filename.trim() || `${providerId(promptForm.title || "prompt")}.md`;
+    const filename = editingPromptId ? requestedFilename : uniquePromptFilename(requestedFilename, existing.map((item) => item.filename));
+    return {
+      ...promptForm,
+      id: editingPromptId || uniqueId(promptForm.id || promptForm.title || filename, existing.map((item) => item.id)),
+      title: promptForm.title.trim(),
+      filename,
+      content: promptForm.content,
+    };
+  };
 
   const savePromptOnly = () =>
     call(
@@ -1192,11 +1273,12 @@ function App() {
     try {
       const content = await file.text();
       const title = file.name.replace(/\.md$/i, "");
+      const filename = uniquePromptFilename(file.name, savedPrompts.map((item) => item.filename));
       await invoke<SavedPrompt>("save_prompt", {
         prompt: {
-          id: providerId(title),
-          title,
-          filename: file.name,
+          id: uniqueId(title, savedPrompts.map((item) => item.id)),
+          title: filename.replace(/\.md$/i, ""),
+          filename,
           content,
         },
       });
@@ -1238,7 +1320,7 @@ function App() {
 
   const normalizedProviderForm = (): SavedProvider => ({
     ...providerForm,
-    id: editingProviderId || providerForm.id || customProviderId(providerForm.providerName || providerForm.baseUrl),
+    id: editingProviderId || uniqueId(providerForm.id || customProviderId(providerForm.providerName || providerForm.baseUrl), savedProviders.map((item) => item.id)),
     providerName: providerForm.providerName.trim(),
     baseUrl: providerForm.baseUrl.trim().replace(/\/+$/, ""),
     model: providerForm.model.trim(),
@@ -1296,7 +1378,11 @@ function App() {
           },
         });
       },
-      handleActionResult,
+      (result) => {
+        localStorage.setItem(ACTIVE_PROVIDER_KEY, provider.id);
+        setActiveProviderId(provider.id);
+        handleActionResult(result);
+      },
     );
 
   const testProvider = async (id: string, baseUrl: string, apiKey?: string | null) => {
@@ -1319,7 +1405,11 @@ function App() {
   const switchOfficialProvider = () =>
     call(
       () => invoke<ActionResult>("switch_official_provider", { configDir: configDir || null }),
-      handleActionResult,
+      (result) => {
+        localStorage.removeItem(ACTIVE_PROVIDER_KEY);
+        setActiveProviderId("");
+        handleActionResult(result);
+      },
     );
 
   const importFromCcSwitch = () =>
@@ -2022,53 +2112,56 @@ function App() {
                       </div>
                     </div>
 
-                    <div className="provider-row-list">
-                      {providerRows.length === 0 && <p className="empty">{t.provider.noProviders}</p>}
-                      {providerRows.map((p) => {
-                        const local = p.source === "official"
-                          ? undefined
-                          : savedProviders.find((item) =>
-                            p.source === "local"
-                              ? item.id === p.id
-                              : item.baseUrl === p.baseUrl && item.model === p.model,
+                    <div className="provider-list-frame">
+                      <div className="provider-row-list">
+                        {providerRows.length === 0 && <p className="empty">{t.provider.noProviders}</p>}
+                        {providerRows.map((p) => {
+                          const local = p.source === "official"
+                            ? undefined
+                            : savedProviders.find((item) =>
+                              p.source === "local"
+                                ? item.id === p.id
+                                : item.baseUrl === p.baseUrl && item.model === p.model,
+                            );
+                          const switchable: SavedProvider | null = p.source === "official" ? null : local || {
+                            id: customProviderId(p.providerName),
+                            providerName: p.providerName,
+                            baseUrl: p.baseUrl,
+                            model: p.model,
+                            apiKey: "",
+                            tomlConfig: "",
+                            wireApi: p.wireApi,
+                            requiresOpenaiAuth: p.requiresOpenaiAuth,
+                          };
+                          return (
+                            <div className={cx("provider-row", p.isCurrent && "selected")} key={`${p.source}-${p.id}-${p.baseUrl}`}>
+                              <div className="drag-dot">⋮⋮</div>
+                              {p.source === "official" ? <OpenAIIcon /> : <Avatar name={p.providerName} />}
+                              <div className="provider-main">
+                                <strong>{p.providerName}</strong>
+                                <a>{p.baseUrl || "no base_url"}</a>
+                              </div>
+                              <div className="provider-badges">
+                                {p.isCurrent && <StatusPill active label={t.provider.current} />}
+                              </div>
+                              <div className="provider-actions">
+                                <button className="secondary-btn small" onClick={() => switchable ? switchProvider(switchable) : switchOfficialProvider()} disabled={loading || p.isCurrent}>{lang === "zh" ? "启用" : "Enable"}</button>
+                                {p.source !== "official" && (
+                                  <button className="icon-btn small" title={lang === "zh" ? "测试连接" : "Test connection"} onClick={() => void testProvider(`${p.source}-${p.id}`, p.baseUrl, local?.apiKey || (p.source === "local" ? p.apiKey : null))} disabled={loading || providerTestingId === `${p.source}-${p.id}`}>
+                                    {providerTestingId === `${p.source}-${p.id}` ? <Loader2 size={15} className="spin" /> : <Activity size={15} />}
+                                  </button>
+                                )}
+                                {p.source === "official" && <button className="icon-btn small" title={t.provider.edit} onClick={openOfficialEdit}><PencilLine size={15} /></button>}
+                                {local && <button className="icon-btn small" title={t.provider.edit} onClick={() => openEditProvider(local)}><PencilLine size={15} /></button>}
+                                {!local && p.source === "detected" && <button className="icon-btn small" title={t.provider.edit} onClick={() => openEditDetectedProvider(p)}><PencilLine size={15} /></button>}
+                                {local && <button className="icon-btn danger small" title={t.provider.remove} onClick={() => removeProvider(local.id)}><Trash2 size={15} /></button>}
+                              </div>
+                            </div>
                           );
-                        const switchable: SavedProvider | null = p.source === "official" ? null : local || {
-                          id: customProviderId(p.providerName),
-                          providerName: p.providerName,
-                          baseUrl: p.baseUrl,
-                          model: p.model,
-                          apiKey: "",
-                          tomlConfig: "",
-                          wireApi: p.wireApi,
-                          requiresOpenaiAuth: p.requiresOpenaiAuth,
-                        };
-                        return (
-                          <div className={cx("provider-row", p.isCurrent && "selected")} key={`${p.source}-${p.id}-${p.baseUrl}`}>
-                            <div className="drag-dot">⋮⋮</div>
-                            {p.source === "official" ? <OpenAIIcon /> : <Avatar name={p.providerName} />}
-                            <div className="provider-main">
-                              <strong>{p.providerName}</strong>
-                              <a>{p.baseUrl || "no base_url"}</a>
-                            </div>
-                            <div className="provider-badges">
-                              {p.isCurrent && <StatusPill active label={t.provider.current} />}
-                            </div>
-                            <div className="provider-actions">
-                              <button className="secondary-btn small" onClick={() => switchable ? switchProvider(switchable) : switchOfficialProvider()} disabled={loading || p.isCurrent}>{lang === "zh" ? "启用" : "Enable"}</button>
-                              {p.source !== "official" && (
-                                <button className="icon-btn small" title={lang === "zh" ? "测试连接" : "Test connection"} onClick={() => void testProvider(`${p.source}-${p.id}`, p.baseUrl, local?.apiKey || (p.source === "local" ? p.apiKey : null))} disabled={loading || providerTestingId === `${p.source}-${p.id}`}>
-                                  {providerTestingId === `${p.source}-${p.id}` ? <Loader2 size={15} className="spin" /> : <Activity size={15} />}
-                                </button>
-                              )}
-                              {p.source === "official" && <button className="icon-btn small" title={t.provider.edit} onClick={openOfficialEdit}><PencilLine size={15} /></button>}
-                              {local && <button className="icon-btn small" title={t.provider.edit} onClick={() => openEditProvider(local)}><PencilLine size={15} /></button>}
-                              {!local && p.source === "detected" && <button className="icon-btn small" title={t.provider.edit} onClick={() => openEditDetectedProvider(p)}><PencilLine size={15} /></button>}
-                              {local && <button className="icon-btn danger small" title={t.provider.remove} onClick={() => removeProvider(local.id)}><Trash2 size={15} /></button>}
-                            </div>
-                          </div>
-                        );
-                      })}
+                        })}
+                      </div>
                     </div>
+
                   </>
                 ) : providerMode === "official" ? (
                   <div className="provider-form-page">
@@ -2196,7 +2289,15 @@ function App() {
                         : "Check and repair local Codex session provider metadata so old threads stay visible and resumable after provider switching."}
                     </p>
                   </div>
-                  <div className="provider-title-actions">
+                  <div className="provider-title-actions session-title-actions">
+                    <label className="session-auto-toggle" title={lang === "zh" ? "启动 Codex-X 后在后台检查会话；发现未同步时自动修复" : "Check sessions on startup in the background and repair when needed"}>
+                      <input type="checkbox" checked={autoSessionSync} onChange={(e) => setAutoSessionSync(e.target.checked)} />
+                      <span>{lang === "zh" ? "启动自动修复" : "Auto repair on startup"}</span>
+                      {autoSessionSyncBusy && <Loader2 size={14} className="spin" />}
+                    </label>
+                    <span className="session-provider-chip">
+                      {lang === "zh" ? "目标" : "Target"}: {sessionStatus?.targetProvider || state.modelProvider || "openai"}
+                    </span>
                     <button className="secondary-btn add-provider-btn lively-btn" onClick={checkSessions} disabled={loading}>
                       {actionBusy === "checkSessions" ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />} {actionBusy === "checkSessions" ? (lang === "zh" ? "检查中..." : "Checking...") : (lang === "zh" ? "检查会话" : "Check")}
                     </button>
@@ -2206,26 +2307,13 @@ function App() {
                   </div>
                 </div>
 
-                <div className={cx("session-status-card", sessionStatus?.needsSync ? "needs-sync" : "synced")}>
-                  <div className="session-status-icon">
-                    {sessionStatus?.needsSync ? <AlertCircle size={24} /> : <CheckCircle2 size={24} />}
-                  </div>
-                  <div>
-                    <strong>{sessionStatus?.needsSync ? (lang === "zh" ? "发现未同步会话" : "Unsynced sessions found") : (lang === "zh" ? "会话已同步" : "Sessions are in sync")}</strong>
-                    <p>{lang === "zh"
-                      ? `目标 Provider：${sessionStatus?.targetProvider || state.modelProvider || "openai"}`
-                      : `Target provider: ${sessionStatus?.targetProvider || state.modelProvider || "openai"}`}</p>
-                  </div>
-                  {sessionStatus?.needsSync && <StatusPill active label={lang === "zh" ? "需要修复" : "Needs repair"} />}
+                <div className={cx("session-compact-summary", sessionStatus?.needsSync ? "needs-sync" : "synced")}>
+                  <span>{sessionStatus?.needsSync ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />} {sessionStatus?.needsSync ? (lang === "zh" ? "发现未同步" : "Unsynced") : (lang === "zh" ? "会话已同步" : "Synced")}</span>
+                  <span>{lang === "zh" ? "聊天总数" : "Total"} <strong>{sessionStatus?.sqliteThreads ?? "-"}</strong></span>
+                  <span>{lang === "zh" ? "已展示" : "Shown"} <strong>{filteredSessions.length}</strong></span>
+                  <span>{lang === "zh" ? "需修复" : "Need repair"} <strong>{sessionStatus ? unsyncedChatCount : "-"}</strong></span>
+                  <span>{lang === "zh" ? "状态" : "Status"} <strong>{sessionStatus?.needsSync ? (lang === "zh" ? "可修复" : "Repairable") : (lang === "zh" ? "正常" : "OK")}</strong></span>
                 </div>
-
-                <div className="session-stat-grid user-session-stats">
-                  <StatCard icon={<History size={20} />} label={lang === "zh" ? "聊天总数" : "Total chats"} value={sessionStatus?.sqliteThreads ?? "-"} ok />
-                  <StatCard icon={<Layers3 size={20} />} label={lang === "zh" ? "当前已展示" : "Shown now"} value={filteredSessions.length} ok />
-                  <StatCard icon={<AlertCircle size={20} />} label={lang === "zh" ? "需要修复" : "Need repair"} value={sessionStatus ? unsyncedChatCount : "-"} ok={!unsyncedChatCount} />
-                  <StatCard icon={<CheckCircle2 size={20} />} label={lang === "zh" ? "状态" : "Status"} value={sessionStatus?.needsSync ? (lang === "zh" ? "可修复" : "Repairable") : (lang === "zh" ? "正常" : "OK")} ok={!sessionStatus?.needsSync} />
-                </div>
-
 
                 <div className="session-list-card">
                   <div className="session-list-head session-list-head-rich">
@@ -2249,6 +2337,11 @@ function App() {
                       <input type="checkbox" checked={sessionGroupByCwd} onChange={(e) => setSessionGroupByCwd(e.target.checked)} />
                       <span>{lang === "zh" ? "按项目路径分组" : "Group by cwd"}</span>
                     </label>
+                    <span className="session-selected-hint">
+                      {lang === "zh"
+                        ? `已选 ${selectedSessionIds.length} 条 · 需修复 ${selectedNeedsSyncCount} 条`
+                        : `${selectedSessionIds.length} selected · ${selectedNeedsSyncCount} repairable`}
+                    </span>
                     <button className="ghost-btn small" onClick={selectVisibleNeedsSyncSessions} disabled={!filteredSessions.some((item) => item.needsSync)}>
                       {lang === "zh" ? "选择需同步" : "Select unsynced"}
                     </button>
@@ -2271,13 +2364,16 @@ function App() {
                           {items.map((item) => {
                             const providerOk = !item.needsSync;
                             return (
-                              <article className={cx("session-row", item.needsSync && "needs-sync", selectedSessionSet.has(item.id) && "selected")} key={item.id}>
-                                <label className="session-select-box" title={item.needsSync ? (lang === "zh" ? "选择修复这个会话" : "Select this session for repair") : (lang === "zh" ? "Provider 已一致" : "Provider already matches")}>
+                              <article
+                                className={cx("session-row", item.needsSync && "needs-sync", selectedSessionSet.has(item.id) && "selected")}
+                                key={item.id}
+                                onClick={() => toggleSessionSelected(item.id)}
+                              >
+                                <label className="session-select-box" title={lang === "zh" ? "选择这个会话" : "Select this session"} onClick={(e) => e.stopPropagation()}>
                                   <input
                                     type="checkbox"
                                     checked={selectedSessionSet.has(item.id)}
                                     onChange={() => toggleSessionSelected(item.id)}
-                                    disabled={!item.needsSync}
                                   />
                                 </label>
                                 <div className="session-row-main">
@@ -2502,7 +2598,7 @@ function App() {
                       })}
 
                       {savedPrompts.map((prompt) => {
-                        const isCurrent = Boolean(state.instructionFile) && (state.instructionFile || "").replace(/\\/g, "/").endsWith(prompt.filename);
+                        const isCurrent = Boolean(currentInstructionFilename) && currentInstructionFilename === prompt.filename;
                         return (
                           <article className={cx("skills-mcp-simple-row instruction-switch-row", isCurrent && "selected")} key={prompt.id}>
                             <div className="instruction-main">
@@ -2525,7 +2621,7 @@ function App() {
                         );
                       })}
 
-                      {state.instructionFile && currentInstructionId === "custom" && !savedPrompts.some((p) => state.instructionFile?.replace(/\\/g, "/").endsWith(p.filename)) && (
+                      {state.instructionFile && currentInstructionId === "custom" && !savedPrompts.some((p) => currentInstructionFilename === p.filename) && (
                         <article className="skills-mcp-simple-row instruction-switch-row selected">
                           <div className="instruction-main">
                             <strong>{lang === "zh" ? "当前自定义指令提示词" : "Current custom prompt"}</strong>
