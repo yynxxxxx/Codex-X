@@ -976,7 +976,20 @@ function App() {
 
   const currentProvider = state?.providers.find((p) => p.isCurrent);
   const liveProviderId = (state?.modelProvider || "openai").trim();
-  const effectiveActiveProviderId = liveProviderId === "custom" ? activeProviderId : liveProviderId;
+  const liveCustomProvider = React.useMemo(() => (state?.providers || []).find((item) => item.id === "custom"), [state?.providers]);
+  const inferredActiveProviderId = React.useMemo(() => {
+    if (liveProviderId !== "custom" || activeProviderId) return activeProviderId;
+    const liveBaseUrl = (liveCustomProvider?.baseUrl || "").replace(/\/+$/, "");
+    const liveWireApi = liveCustomProvider?.wireApi || "responses";
+    const liveModel = state?.model || "";
+    const matched = savedProviders.find((item) =>
+      item.baseUrl.replace(/\/+$/, "") === liveBaseUrl &&
+      (item.model || "") === liveModel &&
+      (item.wireApi || "responses") === liveWireApi,
+    );
+    return matched?.id || "";
+  }, [activeProviderId, liveCustomProvider?.baseUrl, liveCustomProvider?.wireApi, liveProviderId, savedProviders, state?.model]);
+  const effectiveActiveProviderId = liveProviderId === "custom" ? inferredActiveProviderId : liveProviderId;
   const currentInstructionPath = (state?.instructionFile || "").replace(/\\/g, "/");
   const currentInstructionFilename = currentInstructionPath.split("/").pop() || "";
   const detectedRows = React.useMemo(() => {
@@ -1125,6 +1138,7 @@ function App() {
   }, [autoSessionSync]);
 
   React.useEffect(() => {
+    if (!state) return;
     if (liveProviderId !== "custom") {
       if (activeProviderId) {
         localStorage.removeItem(ACTIVE_PROVIDER_KEY);
@@ -1132,11 +1146,12 @@ function App() {
       }
       return;
     }
+    if (!savedProviders.length) return;
     if (activeProviderId && !savedProviders.some((item) => item.id === activeProviderId)) {
       localStorage.removeItem(ACTIVE_PROVIDER_KEY);
       setActiveProviderId("");
     }
-  }, [activeProviderId, liveProviderId, savedProviders]);
+  }, [activeProviderId, liveProviderId, savedProviders, state]);
 
   React.useEffect(() => {
     if (!autoSessionSync || autoSessionSyncRanRef.current || !state?.codexDir) return;
@@ -1808,11 +1823,36 @@ function App() {
     ["about", t.nav.about, <Info size={18} />],
   ];
 
+  const toastLayer = toast ? (() => {
+    const [title, ...rest] = toast.split("\n");
+    const message = rest.join("\n").trim();
+    return (
+      <div className="toast ok" onAnimationEnd={() => setToast("")}>
+        <div className="toast-icon"><CheckCircle2 size={16} /></div>
+        <div className="toast-copy">
+          <strong>{title}</strong>
+          {message && <span>{message}</span>}
+        </div>
+        <button className="toast-close" onClick={() => setToast("")}>×</button>
+      </div>
+    );
+  })() : error ? (
+    <div className="toast error">
+      <div className="toast-icon"><AlertCircle size={16} /></div>
+      <div className="toast-copy">
+        <strong>{lang === "zh" ? "操作失败" : "Action failed"}</strong>
+        <span>{error}</span>
+      </div>
+      <button className="toast-close" onClick={() => setError("")}>×</button>
+    </div>
+  ) : null;
+
   return (
     <main className={cx("app-shell", isMacRuntime && "mac-shell")}>
       {isMacRuntime && <div className="window-drag-strip" data-tauri-drag-region />}
       <div className="orb orb-a" />
       <div className="orb orb-b" />
+      {toastLayer}
 
       <aside className="sidebar glass">
         <div className="brand">
@@ -1854,30 +1894,6 @@ function App() {
           </header>
         )}
 
-        {toast && (() => {
-          const [title, ...rest] = toast.split("\n");
-          const message = rest.join("\n").trim();
-          return (
-            <div className="toast ok" onAnimationEnd={() => setToast("")}>
-              <div className="toast-icon"><CheckCircle2 size={16} /></div>
-              <div className="toast-copy">
-                <strong>{title}</strong>
-                {message && <span>{message}</span>}
-              </div>
-              <button className="toast-close" onClick={() => setToast("")}>×</button>
-            </div>
-          );
-        })()}
-        {error && (
-          <div className="toast error">
-            <div className="toast-icon"><AlertCircle size={16} /></div>
-            <div className="toast-copy">
-              <strong>{lang === "zh" ? "操作失败" : "Action failed"}</strong>
-              <span>{error}</span>
-            </div>
-            <button className="toast-close" onClick={() => setError("")}>×</button>
-          </div>
-        )}
         {updatePromptOpen && releaseInfo.hasUpdate && (
           <div className="update-mask" onClick={() => setUpdatePromptOpen(false)}>
             <div className="update-dialog glass" onClick={(e) => e.stopPropagation()}>

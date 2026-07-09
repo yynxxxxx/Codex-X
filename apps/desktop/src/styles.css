@@ -198,7 +198,7 @@ input, select, textarea {
 .toast {
   position: fixed;
   left: 50%;
-  top: 24px;
+  top: 14px;
   z-index: 50;
   transform: translateX(-50%);
   min-width: 360px;
@@ -260,7 +260,7 @@ input, select, textarea {
   padding: 0;
 }
 .toast-close:hover { color: #fff; }
-.app-shell.mac-shell .toast { top: calc(18px + var(--mac-titlebar-safe)); }
+.app-shell.mac-shell .toast { top: 68px; }
 @keyframes toast {
   0% { opacity: 0; transform: translate(-50%, -10px) scale(.98); }
   12%, 84% { opacity: 1; transform: translate(-50%, 0) scale(1); }
@@ -1360,6 +1360,15 @@ html, body, #root {
 }
 .provider-edit-panel .provider-form-page > .provider-edit-stack {
   margin: 0;
+}
+
+/* Provider edit page can be taller than one viewport; let the outer content pane scroll.
+   Keep only the provider list page using the fixed internal list scroller. */
+.panel.glass.provider-panel.provider-edit-panel {
+  height: auto;
+  max-height: none;
+  min-height: calc(100vh - var(--shell-vertical-pad));
+  overflow: visible;
 }
 
 /* Simpler instruction prompt page: aligned status + enable/disable controls. */

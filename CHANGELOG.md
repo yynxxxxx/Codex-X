@@ -2,6 +2,24 @@
 
 All notable changes to Codex-X will be documented here.
 
+## [v0.2.31] - 2026-07-09
+
+### 更新
+
+- 调整 macOS Toast 展示位置：Toast 现在直接挂在窗口根层，不再被内容区域下移影响，提示位置更靠上、更自然。
+- 优化 Skills ZIP 安装体验：从 ZIP 安装 Skill 时会读取 `SKILL.md` 里的真实 `name` / `description`，不再显示 `skill-zip-时间戳` 这类临时目录名。
+- Skills 页面刷新时会自动识别旧版 `skill-zip-*` 目录，并尝试重命名为 Skill 自身名称。
+
+### 修复 Bug
+
+- 修复启用第三方供应商后，关闭并重新打开 Codex-X 不再显示“当前启用”的问题。
+- 修复 Windows / Linux 上供应商编辑页无法正常下拉滚动的问题，编辑 `config.toml` 时不再需要用 PageDown 绕过。
+- 修复 Toast 受内容容器 `contain` 影响导致 macOS 位置调整不生效的问题。
+
+### 开发
+
+- 增加 Skill 元数据读取与旧 ZIP Skill 目录自动修正的单元测试。
+
 ## [v0.2.30] - 2026-07-09
 
 ### 更新

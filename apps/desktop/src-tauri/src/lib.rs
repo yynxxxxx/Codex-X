@@ -1154,31 +1154,100 @@ fn compute_dir_hash(dir: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn clean_skill_metadata_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
 fn read_skill_metadata(skill_dir: &Path, fallback: &str) -> (String, Option<String>) {
     let skill_md = skill_dir.join("SKILL.md");
     let text = read_to_string_if_exists(&skill_md).unwrap_or_default();
-    let mut title = None;
-    let mut desc = None;
-    for line in text.lines() {
+    let mut frontmatter_name: Option<String> = None;
+    let mut frontmatter_desc: Option<String> = None;
+    let mut heading_title: Option<String> = None;
+    let mut body_desc: Option<String> = None;
+    let mut in_frontmatter = false;
+    let mut frontmatter_seen = false;
+
+    for (index, line) in text.lines().enumerate() {
         let trimmed = line.trim();
+        if index == 0 && trimmed == "---" {
+            in_frontmatter = true;
+            frontmatter_seen = true;
+            continue;
+        }
+        if in_frontmatter {
+            if trimmed == "---" {
+                in_frontmatter = false;
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once(':') {
+                let key = key.trim().to_ascii_lowercase();
+                let value = clean_skill_metadata_value(value);
+                if key == "name" && frontmatter_name.is_none() && !value.is_empty() {
+                    frontmatter_name = Some(value);
+                } else if key == "description" && frontmatter_desc.is_none() && !value.is_empty() {
+                    frontmatter_desc = Some(value);
+                }
+            }
+            continue;
+        }
         if trimmed.is_empty() {
             continue;
         }
-        if title.is_none() && trimmed.starts_with('#') {
-            title = Some(trimmed.trim_start_matches('#').trim().to_string());
+        if heading_title.is_none() && trimmed.starts_with('#') {
+            heading_title = Some(trimmed.trim_start_matches('#').trim().to_string());
             continue;
         }
-        if desc.is_none() && !trimmed.starts_with('#') && !trimmed.starts_with("---") {
-            desc = Some(trimmed.trim_matches('`').to_string());
+        if body_desc.is_none()
+            && !trimmed.starts_with('#')
+            && !trimmed.starts_with("---")
+            && !frontmatter_seen
+        {
+            body_desc = Some(clean_skill_metadata_value(trimmed));
             break;
         }
     }
-    (
-        title
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| fallback.to_string()),
-        desc.filter(|s| !s.is_empty()),
-    )
+
+    let title = frontmatter_name
+        .or(heading_title)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback.to_string());
+    let desc = frontmatter_desc.or(body_desc).filter(|s| !s.is_empty());
+    (title, desc)
+}
+
+fn normalize_legacy_zip_skill_dirs(base: &Path) -> Result<()> {
+    if !base.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(base).map_err(|e| io_err(base, e))? {
+        let entry = entry.map_err(|e| io_err(base, e))?;
+        let path = entry.path();
+        if !path.is_dir() || !path.join("SKILL.md").is_file() {
+            continue;
+        }
+        let directory = entry.file_name().to_string_lossy().to_string();
+        if !directory.starts_with("skill-zip-") {
+            continue;
+        }
+        let (name, _) = read_skill_metadata(&path, &directory);
+        let dst_name = sanitize_dir_name(&name, "skill");
+        if dst_name == directory || dst_name.starts_with("skill-zip-") {
+            continue;
+        }
+        let dst = base.join(dst_name);
+        if dst.exists() {
+            continue;
+        }
+        fs::rename(&path, &dst).map_err(|e| io_err(&dst, e))?;
+    }
+    Ok(())
 }
 
 fn save_managed_skill(skill: &ManagedSkill) -> Result<()> {
@@ -1457,6 +1526,12 @@ fn build_skills_mcp_state_inner(config_dir: Option<String>) -> Result<SkillsMcpS
     let mut warnings = Vec::new();
     let mut skills = Vec::new();
     let mut seen = HashSet::new();
+    if let Err(e) = normalize_legacy_zip_skill_dirs(&skills_dir) {
+        warnings.push(format!("修正 ZIP Skill 目录名失败: {e}"));
+    }
+    if let Err(e) = normalize_legacy_zip_skill_dirs(&disabled_dir) {
+        warnings.push(format!("修正已禁用 ZIP Skill 目录名失败: {e}"));
+    }
     if let Err(e) = scan_skill_dir(&skills_dir, true, "Codex", &mut skills, &mut seen) {
         warnings.push(e.to_string());
     }
@@ -1888,7 +1963,8 @@ fn install_skill_zip_inner(
         for src in skill_dirs {
             let fallback = file_name.trim_end_matches(".zip");
             let dir_name = src.file_name().and_then(|v| v.to_str()).unwrap_or(fallback);
-            let dst_name = sanitize_dir_name(dir_name, "skill");
+            let (skill_name, _) = read_skill_metadata(&src, dir_name);
+            let dst_name = sanitize_dir_name(&skill_name, "skill");
             let dst = skills_dir.join(dst_name);
             if dst.exists() {
                 fs::remove_dir_all(&dst).map_err(|e| io_err(&dst, e))?;
@@ -4761,6 +4837,55 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("create temp codex dir");
         dir
+    }
+
+    #[test]
+    fn skill_metadata_reads_frontmatter_name_before_directory() {
+        let dir = temp_codex_dir("skill-frontmatter").join("skill-zip-123");
+        fs::create_dir_all(&dir).expect("create skill dir");
+        write_text(
+            &dir.join("SKILL.md"),
+            r#"---
+name: ctf-sandbox-runner
+description: Resume authorized CTF sandbox projects.
+---
+
+# CTF Sandbox Runner
+"#,
+        )
+        .expect("write skill");
+
+        let (name, desc) = read_skill_metadata(&dir, "skill-zip-123");
+        assert_eq!(name, "ctf-sandbox-runner");
+        assert_eq!(
+            desc.as_deref(),
+            Some("Resume authorized CTF sandbox projects.")
+        );
+
+        let root = dir.parent().unwrap().to_path_buf();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn normalize_legacy_zip_skill_dir_renames_to_metadata_name() {
+        let root = temp_codex_dir("skill-normalize");
+        let dir = root.join("skill-zip-1783334291187");
+        fs::create_dir_all(&dir).expect("create legacy skill dir");
+        write_text(
+            &dir.join("SKILL.md"),
+            r#"---
+name: mission-keeper
+description: Keep long investigations aligned.
+---
+"#,
+        )
+        .expect("write skill");
+
+        normalize_legacy_zip_skill_dirs(&root).expect("normalize");
+        assert!(!dir.exists());
+        assert!(root.join("mission-keeper").join("SKILL.md").exists());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
