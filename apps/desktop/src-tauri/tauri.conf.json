@@ -34,6 +34,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -42,5 +43,13 @@
       "icons/icon.ico"
     ],
     "targets": "all"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY4NDBDOTFFMjgzOTMzM0QKUldROU16a29Ic2xBYUE5TWx3WUx0QXYwTHBFMVd4Ymx4TmJ5QnFVa3FiRVRkaDJ2NXREeTg5elYK",
+      "endpoints": [
+        "https://github.com/yynxxxxx/Codex-X/releases/latest/download/latest-{{target}}-{{arch}}-{{bundle_type}}.json"
+      ]
+    }
   }
 }

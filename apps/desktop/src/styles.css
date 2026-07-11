@@ -146,6 +146,11 @@ code { color: #c7f0ff; font-family: "SFMono-Regular", ui-monospace, Menlo, Conso
 .primary-btn:hover { background: linear-gradient(135deg, #8568ff, #23d7ff); }
 .secondary-btn:hover { background: rgba(255,255,255,.13); border-color: rgba(255,255,255,.18); }
 .ghost-btn:hover { background: rgba(255,255,255,.085); border-color: rgba(255,255,255,.12); color: #eef4ff; }
+.primary-btn:disabled, .secondary-btn:disabled, .ghost-btn:disabled {
+  cursor: not-allowed;
+  opacity: .46;
+  box-shadow: none;
+}
 .big { height: 50px; }
 .full { width: 100%; margin-top: 18px; }
 .action-stack { display: grid; gap: 11px; }
@@ -1588,6 +1593,80 @@ html, body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.update-strip-actions {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.update-progress-dialog {
+  width: min(560px, calc(100vw - 40px));
+}
+.update-progress-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.update-progress-summary strong {
+  color: #f4f8ff;
+}
+.update-progress-summary span {
+  color: #8fffe0;
+  font-weight: 900;
+}
+.update-progress-bar {
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(3, 8, 18, .78);
+  border: 1px solid rgba(124, 168, 255, .16);
+  box-shadow: inset 0 1px 8px rgba(0, 0, 0, .32);
+}
+.update-progress-bar span {
+  display: block;
+  height: 100%;
+  min-width: 8%;
+  border-radius: inherit;
+  background: linear-gradient(135deg, #7c5cff, #12d3ff 55%, #2ff5b5);
+  transition: width .18s ease;
+}
+.update-progress-message {
+  margin: 12px 0 0;
+  color: #c9d7ef;
+  line-height: 1.55;
+  word-break: break-word;
+}
+.update-progress-meta {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  color: #91a0bb;
+  font-size: 12px;
+  font-weight: 800;
+}
+.update-progress-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+.update-progress-step {
+  padding: 6px 9px;
+  border-radius: 999px;
+  color: #91a0bb;
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.08);
+  font-size: 12px;
+  font-weight: 850;
+}
+.update-progress-step.active {
+  color: #071713;
+  background: linear-gradient(135deg, #2ff5b5, #9cffd8);
+  border-color: rgba(47, 245, 181, .72);
+}
+.update-progress-step.muted {
+  opacity: .52;
 }
 .update-dot {
   width: 9px;

@@ -34,6 +34,8 @@ import {
   Zap,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { check } from "@tauri-apps/plugin-updater";
 import "./styles.css";
 
 type Lang = "zh" | "en";
@@ -155,13 +157,28 @@ type AboutInfo = {
 };
 
 type ReleaseInfo = {
-  status: "idle" | "checking" | "ok" | "error";
+  status: "idle" | "checking" | "installing" | "ok" | "error";
   latestVersion?: string;
   htmlUrl?: string;
-  assetName?: string;
   body?: string;
   message?: string;
   hasUpdate?: boolean;
+  canInstall?: boolean;
+  downloadProgress?: number;
+};
+
+type ReleaseUpdateInstallResult = {
+  version: string;
+  assetName: string;
+  downloadUrl: string;
+};
+
+type ReleaseUpdateProgress = {
+  phase: string;
+  message: string;
+  downloadedBytes?: number | null;
+  totalBytes?: number | null;
+  progress?: number | null;
 };
 
 type ProviderConnectionResult = {
@@ -937,28 +954,53 @@ function normalizeVersion(value?: string) {
 }
 
 function compareVersions(a?: string, b?: string) {
-  const pa = normalizeVersion(a).split(/[.-]/).map((x) => Number.parseInt(x, 10) || 0);
-  const pb = normalizeVersion(b).split(/[.-]/).map((x) => Number.parseInt(x, 10) || 0);
-  const len = Math.max(pa.length, pb.length, 3);
-  for (let i = 0; i < len; i += 1) {
-    const diff = (pa[i] || 0) - (pb[i] || 0);
-    if (diff !== 0) return diff;
+  const left = normalizeVersion(a).split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const right = normalizeVersion(b).split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(left.length, right.length, 3);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (left[index] || 0) - (right[index] || 0);
+    if (difference !== 0) return difference;
   }
   return 0;
 }
 
-function releaseAssetForPlatform(assets: Array<{ name?: string; browser_download_url?: string }>) {
-  const platform = navigator.userAgent.toLowerCase();
-  const isMac = platform.includes("mac");
-  const isWindows = platform.includes("windows");
-  const isLinux = platform.includes("linux");
-  return assets.find((asset) => {
-    const name = (asset.name || "").toLowerCase();
-    if (isMac) return name.endsWith(".dmg") || name.endsWith(".app.tar.gz");
-    if (isWindows) return name.endsWith(".msi") || name.endsWith(".exe");
-    if (isLinux) return name.endsWith(".appimage") || name.endsWith(".deb") || name.endsWith(".rpm");
-    return Boolean(name);
-  }) || assets[0];
+async function fetchLatestGithubRelease(repo: string) {
+  const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+    headers: { Accept: "application/vnd.github+json" },
+  });
+  if (!response.ok) throw new Error(`GitHub Releases ${response.status}`);
+  return response.json() as Promise<{
+    tag_name?: string;
+    name?: string;
+    html_url?: string;
+    body?: string;
+  }>;
+}
+
+function formatBytes(value?: number | null) {
+  if (!value || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function releaseUpdatePhaseLabel(phase: string, lang: Lang) {
+  const labels: Record<string, { zh: string; en: string }> = {
+    checking: { zh: "检查更新", en: "Checking" },
+    downloading: { zh: "下载更新", en: "Downloading" },
+    mounting: { zh: "挂载镜像", en: "Mounting" },
+    installing: { zh: "安装更新", en: "Installing" },
+    cleanup: { zh: "清理现场", en: "Cleaning up" },
+    restarting: { zh: "重新启动", en: "Restarting" },
+    error: { zh: "更新失败", en: "Failed" },
+  };
+  const item = labels[phase] || labels.checking;
+  return lang === "zh" ? item.zh : item.en;
 }
 
 function formatSessionTime(value?: number | null) {
@@ -1011,6 +1053,8 @@ function App() {
   const [aboutInfo, setAboutInfo] = React.useState<AboutInfo | null>(null);
   const [releaseInfo, setReleaseInfo] = React.useState<ReleaseInfo>({ status: "idle" });
   const [updatePromptOpen, setUpdatePromptOpen] = React.useState(false);
+  const [releaseUpdateProgressOpen, setReleaseUpdateProgressOpen] = React.useState(false);
+  const [releaseUpdateProgress, setReleaseUpdateProgress] = React.useState<ReleaseUpdateProgress | null>(null);
   const [sessionStatus, setSessionStatus] = React.useState<SessionSyncStatus | null>(null);
   const [skillsMcpState, setSkillsMcpState] = React.useState<SkillsMcpState | null>(null);
   const [skillsMcpImportPreview, setSkillsMcpImportPreview] = React.useState<SkillsMcpImportPreview | null>(null);
@@ -1081,15 +1125,58 @@ function App() {
   const builtinPromptStatusMap = React.useMemo(() => new Map(builtinPromptStatus.map((item) => [item.id, item])), [builtinPromptStatus]);
   const releaseStatusLabel = React.useMemo(() => {
     if (releaseInfo.status === "checking") return lang === "zh" ? "检查中" : "Checking";
+    if (releaseInfo.status === "installing") return lang === "zh" ? "下载并安装中" : "Downloading and installing";
     if (releaseInfo.status === "error") return lang === "zh" ? "失败" : "Failed";
     if (releaseInfo.hasUpdate) return lang === "zh" ? "有更新" : "Update found";
     if (releaseInfo.status === "ok") return lang === "zh" ? "已是最新" : "Up to date";
     return lang === "zh" ? "未检查" : "Idle";
   }, [lang, releaseInfo.hasUpdate, releaseInfo.status]);
+  const canAutoInstallRelease = releaseInfo.hasUpdate === true && releaseInfo.status !== "installing";
+  const releaseUpdatePercent = typeof releaseUpdateProgress?.progress === "number"
+    ? Math.max(0, Math.min(100, Math.round(releaseUpdateProgress.progress * 100)))
+    : null;
+  const releaseUpdateVisualPercent = releaseUpdatePercent ?? ({
+    checking: 12,
+    downloading: 18,
+    mounting: 58,
+    installing: 78,
+    cleanup: 90,
+    restarting: 100,
+    error: 100,
+  }[releaseUpdateProgress?.phase || "checking"] ?? 12);
+  const releaseUpdateProgressLabel = releaseUpdateProgress
+    ? releaseUpdatePhaseLabel(releaseUpdateProgress.phase, lang)
+    : (lang === "zh" ? "准备更新" : "Preparing update");
 
   React.useEffect(() => {
     localStorage.setItem(LANG_KEY, lang);
   }, [lang]);
+
+  React.useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<ReleaseUpdateProgress>("release-update-progress", (event) => {
+      if (disposed) return;
+      const payload = event.payload;
+      setReleaseUpdateProgress(payload);
+      setReleaseInfo((current) => ({
+        ...current,
+        status: payload.phase === "error" ? "error" : "installing",
+        downloadProgress: typeof payload.progress === "number" ? payload.progress : current.downloadProgress,
+        message: payload.message || current.message,
+      }));
+    }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+      } else {
+        unlisten = cleanup;
+      }
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   React.useEffect(() => {
     localStorage.setItem(PROMPT_INJECTION_MODE_KEY, promptInjectionMode);
@@ -1790,56 +1877,109 @@ function App() {
 
   const checkForUpdates = React.useCallback(async ({ quiet = false }: { quiet?: boolean } = {}) => {
     const repo = aboutInfo?.githubRepo || FALLBACK_GITHUB_REPO;
-    const appVersion = aboutInfo?.appVersion || "0.0.0";
     const releasesUrl = `https://github.com/${repo}/releases/`;
-    setReleaseInfo({ status: "checking" });
+    setReleaseInfo({ status: "checking", htmlUrl: releasesUrl });
+    let update: Awaited<ReturnType<typeof check>> = null;
     try {
-      const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-        headers: { Accept: "application/vnd.github+json" },
-      });
-      if (!response.ok) {
-        throw new Error(`GitHub Releases ${response.status}`);
+      update = await check({ timeout: 15_000 });
+      if (!update) {
+        const message = lang === "zh" ? "当前已是最新版本" : "You are up to date";
+        setReleaseInfo({ status: "ok", htmlUrl: releasesUrl, hasUpdate: false, canInstall: false, message });
+        if (!quiet) setToast(message);
+        return;
       }
-      const release = await response.json() as {
-        tag_name?: string;
-        name?: string;
-        html_url?: string;
-        body?: string;
-        assets?: Array<{ name?: string; browser_download_url?: string }>;
-      };
-      const latestVersion = release.tag_name || release.name || "";
-      const asset = releaseAssetForPlatform(release.assets || []);
-      const hasUpdate = compareVersions(latestVersion, appVersion) > 0;
-      const message = hasUpdate
-        ? (lang === "zh" ? "发现新版本" : "Update available")
-        : (lang === "zh" ? "当前已是最新版本" : "You are up to date");
+
+      const latestVersion = update.version;
       setReleaseInfo({
         status: "ok",
         latestVersion,
         htmlUrl: releasesUrl,
-        assetName: asset?.name,
-        body: release.body || "",
-        hasUpdate,
-        message,
+        body: update.body || "",
+        hasUpdate: true,
+        canInstall: true,
+        message: lang === "zh" ? "发现新版本" : "Update available",
       });
-      if (hasUpdate) {
-        if (quiet) {
-          setToast(lang === "zh" ? `发现新版本 ${latestVersion}，可在概览页查看` : `New version ${latestVersion} is available`);
-        } else {
-          setUpdatePromptOpen(true);
-        }
-      } else if (!quiet) {
-        setToast(message);
+      if (quiet) {
+        setToast(lang === "zh" ? `发现新版本 ${latestVersion}，可在“关于”页安装` : `New version ${latestVersion} is available`);
+      } else {
+        setUpdatePromptOpen(true);
       }
-    } catch (e) {
-      const message = quiet ? (lang === "zh" ? "自动检查失败" : "Auto check failed") : (lang === "zh" ? "检查失败" : "Check failed");
-      setReleaseInfo({
-        status: "error",
-        message,
-      });
-      if (!quiet) setToast(message);
+    } catch {
+      try {
+        const release = await fetchLatestGithubRelease(repo);
+        const latestVersion = release.tag_name || release.name || "";
+        const hasUpdate = compareVersions(latestVersion, aboutInfo?.appVersion) > 0;
+        const message = hasUpdate
+          ? (lang === "zh" ? "发现新版本，请从发布页下载" : "Update available on the releases page")
+          : (lang === "zh" ? "当前已是最新版本" : "You are up to date");
+        setReleaseInfo({
+          status: "ok",
+          latestVersion: latestVersion || undefined,
+          htmlUrl: release.html_url || releasesUrl,
+          body: release.body || "",
+          hasUpdate,
+          canInstall: false,
+          message,
+        });
+        if (hasUpdate || !quiet) setToast(message);
+      } catch {
+        const message = quiet ? (lang === "zh" ? "自动检查失败" : "Auto check failed") : (lang === "zh" ? "检查失败" : "Check failed");
+        setReleaseInfo({ status: "error", htmlUrl: releasesUrl, message });
+        if (!quiet) setToast(message);
+      }
+    } finally {
+      await update?.close().catch(() => undefined);
     }
   }, [aboutInfo?.githubRepo, aboutInfo?.appVersion, lang]);
+
+  const installAvailableUpdate = React.useCallback(async () => {
+    const repo = aboutInfo?.githubRepo || FALLBACK_GITHUB_REPO;
+    const releasesUrl = `https://github.com/${repo}/releases/`;
+    if (!releaseInfo.hasUpdate || releaseInfo.status === "installing") {
+      if (!releaseInfo.hasUpdate) {
+        setToast(lang === "zh" ? "请先检查更新" : "Check for updates first");
+      }
+      return;
+    }
+    setUpdatePromptOpen(false);
+    setReleaseUpdateProgressOpen(true);
+    setReleaseUpdateProgress({
+      phase: "checking",
+      message: lang === "zh" ? "正在准备自动更新…" : "Preparing automatic update…",
+      progress: null,
+      downloadedBytes: null,
+      totalBytes: null,
+    });
+    setReleaseInfo((current) => ({
+      ...current,
+      status: "installing",
+      htmlUrl: current.htmlUrl || releasesUrl,
+      downloadProgress: undefined,
+      message: lang === "zh" ? "正在自动下载并安装更新…" : "Downloading and installing update…",
+    }));
+    try {
+      const result = await invoke<ReleaseUpdateInstallResult>("install_release_update_from_github", { repo });
+      setReleaseInfo((current) => ({
+        ...current,
+        latestVersion: result.version,
+        htmlUrl: result.downloadUrl || current.htmlUrl || releasesUrl,
+        message: lang === "zh" ? `已安装 ${result.version}，正在重新启动…` : `Installed ${result.version}. Restarting…`,
+      }));
+      setToast(lang === "zh" ? "更新已安装，正在重新启动…" : "Update installed. Restarting…");
+    } catch (e) {
+      const detail = String(e || "");
+      const message = lang === "zh" ? "下载或安装更新失败" : "Failed to download or install the update";
+      setReleaseUpdateProgress({
+        phase: "error",
+        message: detail ? `${message}: ${detail}` : message,
+        progress: null,
+        downloadedBytes: null,
+        totalBytes: null,
+      });
+      setReleaseInfo((current) => ({ ...current, status: "error", htmlUrl: current.htmlUrl || releasesUrl, message }));
+      setToast(message);
+    }
+  }, [aboutInfo?.githubRepo, lang, releaseInfo.hasUpdate, releaseInfo.status]);
 
   React.useEffect(() => {
     if (!state || !aboutInfo || autoUpdateCheckedRef.current) return;
@@ -2257,7 +2397,7 @@ function App() {
                 </div>
               </div>
               <div className="update-body">
-                <p>{lang === "zh" ? "检测到新版本，是否立即打开下载页？" : "A new version was found. Open the download page now?"}</p>
+                <p>{lang === "zh" ? "检测到新版本，是否立即从官方 Release 自动下载并安装？" : "A new version was found. Download and install it from the official release now?"}</p>
                 <div className="about-kv compact">
                   <div><span>{lang === "zh" ? "当前版本" : "Current"}</span><strong>{aboutInfo?.appVersion || "-"}</strong></div>
                   <div><span>{lang === "zh" ? "最新版本" : "Latest"}</span><strong>{releaseInfo.latestVersion || "-"}</strong></div>
@@ -2265,14 +2405,76 @@ function App() {
               </div>
               <div className="update-actions">
                 <button className="primary-btn" onClick={() => {
-                  setUpdatePromptOpen(false);
-                  openExternalUrl(releaseInfo.htmlUrl);
-                }}>
-                  <Download size={16} /> {lang === "zh" ? "现在下载" : "Download now"}
+                  void installAvailableUpdate();
+                }} disabled={!canAutoInstallRelease}>
+                  {releaseInfo.status === "installing" ? <Loader2 className="spin" size={16} /> : <Download size={16} />} {releaseInfo.status === "installing" && typeof releaseInfo.downloadProgress === "number"
+                    ? `${Math.round(releaseInfo.downloadProgress * 100)}%`
+                    : (lang === "zh" ? "自动下载并更新" : "Auto download and update")}
                 </button>
                 <button className="secondary-btn" onClick={() => setUpdatePromptOpen(false)}>
                   {lang === "zh" ? "稍后" : "Later"}
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {releaseUpdateProgressOpen && releaseUpdateProgress && (
+          <div className="update-mask" onClick={() => {
+            if (releaseUpdateProgress.phase === "error") setReleaseUpdateProgressOpen(false);
+          }}>
+            <div className="update-dialog update-progress-dialog glass" onClick={(e) => e.stopPropagation()}>
+              <div className="update-head">
+                <div className="update-icon">
+                  {releaseUpdateProgress.phase === "error" ? <AlertCircle size={22} /> : <Download size={22} />}
+                </div>
+                <div>
+                  <p className="eyebrow">Codex-X</p>
+                  <h3>{releaseUpdateProgress.phase === "error"
+                    ? (lang === "zh" ? "自动更新失败" : "Automatic update failed")
+                    : (lang === "zh" ? "自动下载并更新" : "Auto download and update")}</h3>
+                </div>
+              </div>
+              <div className="update-body">
+                <div className="update-progress-summary">
+                  <strong>{releaseUpdateProgressLabel}</strong>
+                  <span>{releaseUpdatePercent !== null ? `${releaseUpdatePercent}%` : (lang === "zh" ? "处理中" : "Working")}</span>
+                </div>
+                <div className="update-progress-bar" aria-label={releaseUpdateProgressLabel}>
+                  <span style={{ width: `${releaseUpdateVisualPercent}%` }} />
+                </div>
+                <p className="update-progress-message">{releaseUpdateProgress.message}</p>
+                {releaseUpdateProgress.phase === "downloading" && (
+                  <div className="update-progress-meta">
+                    <span>{formatBytes(releaseUpdateProgress.downloadedBytes)}</span>
+                    <span>{releaseUpdateProgress.totalBytes ? `/ ${formatBytes(releaseUpdateProgress.totalBytes)}` : (lang === "zh" ? "已下载" : "downloaded")}</span>
+                  </div>
+                )}
+                <div className="update-progress-steps">
+                  {["checking", "downloading", "mounting", "installing", "cleanup", "restarting"].map((phase) => (
+                    <span key={phase} className={cx(
+                      "update-progress-step",
+                      releaseUpdateProgress.phase === phase && "active",
+                      releaseUpdateProgress.phase === "error" && "muted",
+                    )}>{releaseUpdatePhaseLabel(phase, lang)}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="update-actions">
+                {releaseUpdateProgress.phase === "error" ? (
+                  <>
+                    <button className="primary-btn" onClick={() => void installAvailableUpdate()} disabled={!canAutoInstallRelease}>
+                      <RefreshCw size={16} /> {lang === "zh" ? "重试" : "Retry"}
+                    </button>
+                    <button className="secondary-btn" onClick={() => setReleaseUpdateProgressOpen(false)}>
+                      {lang === "zh" ? "关闭" : "Close"}
+                    </button>
+                  </>
+                ) : (
+                  <button className="secondary-btn" disabled>
+                    <Loader2 className="spin" size={16} /> {lang === "zh" ? "请保持应用打开" : "Keep the app open"}
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -2503,16 +2705,21 @@ function App() {
           <>
             {tab === "dashboard" && (
               <>
-                {releaseInfo.status === "ok" && releaseInfo.hasUpdate && (
+                {releaseInfo.hasUpdate && (releaseInfo.status === "ok" || releaseInfo.status === "installing") && (
                   <div className="update-strip glass">
                     <div>
                       <span className="update-dot" />
                       <strong>{lang === "zh" ? "发现新版本" : "New version found"}</strong>
                       <p>{lang === "zh" ? `Codex-X ${releaseInfo.latestVersion || ""} 已发布` : `Codex-X ${releaseInfo.latestVersion || ""} is available`}</p>
                     </div>
-                    <button className="secondary-btn small" onClick={() => openExternalUrl(releaseInfo.htmlUrl)}>
-                      {lang === "zh" ? "查看更新" : "View"}
-                    </button>
+                    <div className="update-strip-actions">
+                      <button className="primary-btn small" onClick={() => void installAvailableUpdate()} disabled={!canAutoInstallRelease}>
+                        {releaseInfo.status === "installing" ? <Loader2 className="spin" size={14} /> : <Download size={14} />} {lang === "zh" ? "自动下载并更新" : "Auto update"}
+                      </button>
+                      <button className="secondary-btn small" onClick={() => openExternalUrl(releaseInfo.htmlUrl)}>
+                        {lang === "zh" ? "查看更新" : "View"}
+                      </button>
+                    </div>
                   </div>
                 )}
               <div className="grid dashboard-grid">
@@ -3319,7 +3526,8 @@ function App() {
                   </div>
                   <div className="about-actions">
                     <button className="primary-btn" onClick={() => void checkForUpdates()} disabled={releaseInfo.status === "checking"}><RefreshCw size={16} className={cx(releaseInfo.status === "checking" && "spin")} /> {lang === "zh" ? "检查更新" : "Check updates"}</button>
-                    <button className="secondary-btn" onClick={() => openExternalUrl(releaseInfo.htmlUrl)} disabled={!releaseInfo.htmlUrl}><Download size={16} /> {lang === "zh" ? "打开下载页" : "Open releases"}</button>
+                    <button className="primary-btn" onClick={() => void installAvailableUpdate()} disabled={!canAutoInstallRelease}>{releaseInfo.status === "installing" ? <Loader2 size={16} className="spin" /> : <Download size={16} />} {lang === "zh" ? "自动下载并更新" : "Auto download and update"}</button>
+                    <button className="secondary-btn" onClick={() => releaseInfo.canInstall ? setUpdatePromptOpen(true) : openExternalUrl(releaseInfo.htmlUrl)} disabled={!releaseInfo.htmlUrl}><Download size={16} /> {releaseInfo.canInstall ? (lang === "zh" ? "立即更新" : "Update now") : (lang === "zh" ? "打开下载页" : "Open releases")}</button>
                   </div>
                 </section>
               </section>
