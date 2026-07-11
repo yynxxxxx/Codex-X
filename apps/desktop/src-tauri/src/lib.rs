@@ -1,5 +1,5 @@
 use chrono::Local;
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -7,6 +7,7 @@ use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -41,6 +42,8 @@ enum CodexxError {
 }
 
 type Result<T> = std::result::Result<T, CodexxError>;
+
+static BUILTIN_PROMPT_CACHE_LOCK: Mutex<()> = Mutex::new(());
 
 impl serde::Serialize for CodexxError {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
@@ -917,11 +920,14 @@ fn stable_remote_prompt_id(filename: &str) -> String {
         return meta.id.to_string();
     }
     use sha2::{Digest, Sha256};
-    let stem = filename.strip_suffix(".md").unwrap_or(filename);
+    let normalized_filename = filename.to_ascii_lowercase();
+    let stem = normalized_filename
+        .strip_suffix(".md")
+        .unwrap_or(&normalized_filename);
     let slug = normalize_prompt_filename(stem, "remote-prompt")
         .trim_end_matches(".md")
         .to_string();
-    let digest = Sha256::digest(filename.to_ascii_lowercase().as_bytes());
+    let digest = Sha256::digest(normalized_filename.as_bytes());
     let suffix = digest[..4]
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -930,6 +936,13 @@ fn stable_remote_prompt_id(filename: &str) -> String {
 }
 
 fn prompt_display_meta(filename: &str) -> (String, String, String) {
+    if filename.eq_ignore_ascii_case("海鸥3.0破甲.md") {
+        return (
+            "海鸥3.0破甲.md".to_string(),
+            "测试生效：海鸥在线，你要整点薯条吗？".to_string(),
+            "远程".to_string(),
+        );
+    }
     if let Some(meta) = bundled_prompt_metas()
         .into_iter()
         .find(|item| item.filename.eq_ignore_ascii_case(filename))
@@ -974,8 +987,7 @@ fn cached_builtin_prompt(id: &str) -> Result<Option<CachedBuiltinPrompt>> {
     }
 }
 
-fn cached_builtin_prompts() -> Result<Vec<CachedBuiltinPrompt>> {
-    let conn = open_db()?;
+fn cached_builtin_prompts_from_connection(conn: &Connection) -> Result<Vec<CachedBuiltinPrompt>> {
     let mut stmt = conn
         .prepare(
             "SELECT id, filename, source_url, content, checked_at
@@ -995,6 +1007,64 @@ fn cached_builtin_prompts() -> Result<Vec<CachedBuiltinPrompt>> {
         .map_err(|e| CodexxError::Database(e.to_string()))?;
     rows.map(|row| row.map_err(|e| CodexxError::Database(e.to_string())))
         .collect()
+}
+
+fn cached_builtin_prompts() -> Result<Vec<CachedBuiltinPrompt>> {
+    let conn = open_db()?;
+    cached_builtin_prompts_from_connection(&conn)
+}
+
+fn stale_cached_prompt_ids(
+    caches: &[CachedBuiltinPrompt],
+    active_ids: &HashSet<String>,
+) -> Vec<String> {
+    caches
+        .iter()
+        .filter(|cache| !active_ids.contains(&cache.id))
+        .map(|cache| cache.id.clone())
+        .collect()
+}
+
+#[cfg(test)]
+fn delete_cached_prompt_ids(conn: &mut Connection, stale_ids: &[String]) -> Result<usize> {
+    if stale_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let transaction = conn
+        .transaction()
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    let mut deleted = 0;
+    for id in stale_ids {
+        deleted += transaction
+            .execute("DELETE FROM builtin_prompt_cache WHERE id = ?1", [id])
+            .map_err(|e| CodexxError::Database(e.to_string()))?;
+    }
+    transaction
+        .commit()
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    Ok(deleted)
+}
+
+fn prune_builtin_prompt_cache(active_ids: &HashSet<String>) -> Result<usize> {
+    let mut conn = open_db()?;
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    let stale_ids = stale_cached_prompt_ids(
+        &cached_builtin_prompts_from_connection(&transaction)?,
+        active_ids,
+    );
+    let mut deleted = 0;
+    for id in stale_ids {
+        deleted += transaction
+            .execute("DELETE FROM builtin_prompt_cache WHERE id = ?1", [id])
+            .map_err(|e| CodexxError::Database(e.to_string()))?;
+    }
+    transaction
+        .commit()
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    Ok(deleted)
 }
 
 fn save_builtin_prompt_cache(
@@ -1053,28 +1123,34 @@ fn fetch_github_prompt_catalog() -> Result<Vec<(String, String, String)>> {
         .map_err(|e| CodexxError::Config(format!("读取 GitHub examples 目录失败: {e}")))?;
     let entries: Vec<GithubContentEntry> = serde_json::from_str(&body)
         .map_err(|e| CodexxError::Config(format!("解析 GitHub examples 目录失败: {e}")))?;
-    Ok(github_prompt_catalog_from_entries(entries))
+    github_prompt_catalog_from_entries(entries)
 }
 
 fn github_prompt_catalog_from_entries(
     entries: Vec<GithubContentEntry>,
-) -> Vec<(String, String, String)> {
-    let mut prompts = entries
-        .into_iter()
-        .filter(|entry| {
-            entry.kind == "file"
-                && entry.name.to_ascii_lowercase().ends_with(".md")
-                && !entry.name.contains('/')
-                && !entry.name.contains('\\')
-        })
-        .filter_map(|entry| {
-            let source_url = entry.download_url?;
-            let id = stable_remote_prompt_id(&entry.name);
-            Some((id, entry.name, source_url))
-        })
-        .collect::<Vec<_>>();
+) -> Result<Vec<(String, String, String)>> {
+    let mut prompts = Vec::new();
+    for entry in entries {
+        if entry.kind != "file"
+            || !entry.name.to_ascii_lowercase().ends_with(".md")
+            || entry.name.contains('/')
+            || entry.name.contains('\\')
+        {
+            continue;
+        }
+        let source_url = entry.download_url.ok_or_else(|| {
+            CodexxError::Config(format!("GitHub 模板缺少下载地址: {}", entry.name))
+        })?;
+        let id = stable_remote_prompt_id(&entry.name);
+        prompts.push((id, entry.name, source_url));
+    }
     prompts.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
-    prompts
+    let mut seen_ids = HashSet::new();
+    let mut seen_filenames = HashSet::new();
+    prompts.retain(|(id, filename, _)| {
+        seen_ids.insert(id.clone()) && seen_filenames.insert(filename.to_ascii_lowercase())
+    });
+    Ok(prompts)
 }
 
 fn prompt_status_from_cache(cache: CachedBuiltinPrompt, message: &str) -> BuiltinPromptStatus {
@@ -1165,49 +1241,80 @@ fn refresh_builtin_prompt_from_source(
     }
 }
 
-fn builtin_prompt_status_inner() -> Result<Vec<BuiltinPromptStatus>> {
-    let caches = cached_builtin_prompts()?;
+fn bundled_prompt_status(meta: BundledPromptMeta, message: &str) -> BuiltinPromptStatus {
+    BuiltinPromptStatus {
+        id: meta.id.to_string(),
+        filename: meta.filename.to_string(),
+        title: meta.title.to_string(),
+        subtitle: meta.subtitle.to_string(),
+        badge: meta.badge.to_string(),
+        source_url: builtin_prompt_source_url(meta.filename),
+        cached: false,
+        updated: false,
+        content_source: "bundled".to_string(),
+        checked_at: None,
+        message: message.to_string(),
+    }
+}
+
+fn cached_prompt_fallback_statuses(caches: Vec<CachedBuiltinPrompt>) -> Vec<BuiltinPromptStatus> {
     let cache_map = caches
         .iter()
         .cloned()
-        .map(|item| (item.id.clone(), item))
+        .map(|cache| (cache.id.clone(), cache))
         .collect::<HashMap<_, _>>();
-    let bundled_ids = bundled_prompt_metas()
-        .into_iter()
-        .map(|meta| meta.id.to_string())
-        .collect::<HashSet<_>>();
+    let mut seen_ids = HashSet::new();
+    let mut seen_filenames = HashSet::new();
     let mut statuses = Vec::new();
+
     for meta in bundled_prompt_metas() {
-        if let Some(cache) = cache_map.get(meta.id).cloned() {
-            statuses.push(prompt_status_from_cache(cache, "等待后台检查 GitHub 更新"));
-        } else {
-            statuses.push(BuiltinPromptStatus {
-                id: meta.id.to_string(),
-                filename: meta.filename.to_string(),
-                title: meta.title.to_string(),
-                subtitle: meta.subtitle.to_string(),
-                badge: meta.badge.to_string(),
-                source_url: builtin_prompt_source_url(meta.filename),
-                cached: false,
-                updated: false,
-                content_source: "bundled".to_string(),
-                checked_at: None,
-                message: "等待后台检查 GitHub 更新".to_string(),
-            });
-        }
+        let status = cache_map
+            .get(meta.id)
+            .cloned()
+            .map(|cache| prompt_status_from_cache(cache, "使用上次成功同步的 GitHub 缓存"))
+            .unwrap_or_else(|| bundled_prompt_status(meta, "使用打包内置版本"));
+        seen_ids.insert(status.id.to_ascii_lowercase());
+        seen_filenames.insert(status.filename.to_ascii_lowercase());
+        statuses.push(status);
     }
-    for cache in caches {
-        if !bundled_ids.contains(&cache.id) {
-            statuses.push(prompt_status_from_cache(
-                cache,
-                "使用上次发现的 GitHub 模板",
-            ));
+
+    let mut extra_caches = caches;
+    extra_caches.sort_by_key(|cache| cache.id != stable_remote_prompt_id(&cache.filename));
+    for cache in extra_caches {
+        let id = cache.id.to_ascii_lowercase();
+        let filename = cache.filename.to_ascii_lowercase();
+        if seen_ids.contains(&id) || seen_filenames.contains(&filename) {
+            continue;
         }
+        seen_ids.insert(id);
+        seen_filenames.insert(filename);
+        statuses.push(prompt_status_from_cache(
+            cache,
+            "使用上次成功同步的 GitHub 缓存",
+        ));
     }
-    Ok(statuses)
+    statuses
 }
 
-fn refresh_builtin_prompts_inner() -> Result<Vec<BuiltinPromptStatus>> {
+fn builtin_prompt_status_inner() -> Result<Vec<BuiltinPromptStatus>> {
+    Ok(cached_prompt_fallback_statuses(cached_builtin_prompts()?))
+}
+
+fn active_remote_builtin_prompt_id(config_dir: Option<String>) -> Option<String> {
+    let codex_dir = resolve_codex_dir(config_dir).ok()?;
+    let state = build_state(codex_dir).ok()?;
+    let template_key = state.instruction_template_key.as_deref()?;
+    let id = template_key.strip_prefix("builtin:")?.trim();
+    if id.is_empty() || bundled_prompt_meta(id).is_some() {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+fn refresh_builtin_prompts_inner(config_dir: Option<String>) -> Result<Vec<BuiltinPromptStatus>> {
+    let _cache_guard = BUILTIN_PROMPT_CACHE_LOCK
+        .lock()
+        .map_err(|_| CodexxError::Database("提示词缓存锁已损坏".to_string()))?;
     let catalog = match fetch_github_prompt_catalog() {
         Ok(catalog) => catalog,
         Err(error) => {
@@ -1222,11 +1329,6 @@ fn refresh_builtin_prompts_inner() -> Result<Vec<BuiltinPromptStatus>> {
         .iter()
         .map(|(id, _, _)| id.clone())
         .collect::<HashSet<_>>();
-    let bundled_ids = bundled_prompt_metas()
-        .into_iter()
-        .map(|meta| meta.id.to_string())
-        .collect::<HashSet<_>>();
-
     let mut statuses = Vec::new();
     for (id, filename, source_url) in catalog {
         let bundled = bundled_prompt_meta(&id).map(|meta| meta.content);
@@ -1239,34 +1341,27 @@ fn refresh_builtin_prompts_inner() -> Result<Vec<BuiltinPromptStatus>> {
     }
     for meta in bundled_prompt_metas() {
         if !remote_ids.contains(meta.id) {
-            let cached = cached_builtin_prompt(meta.id)?;
-            statuses.push(if let Some(cache) = cached {
-                prompt_status_from_cache(cache, "GitHub 中未找到该模板，继续使用本地缓存")
-            } else {
-                BuiltinPromptStatus {
-                    id: meta.id.to_string(),
-                    filename: meta.filename.to_string(),
-                    title: meta.title.to_string(),
-                    subtitle: meta.subtitle.to_string(),
-                    badge: meta.badge.to_string(),
-                    source_url: builtin_prompt_source_url(meta.filename),
-                    cached: false,
-                    updated: false,
-                    content_source: "bundled".to_string(),
-                    checked_at: None,
-                    message: "GitHub 中未找到该模板，继续使用打包内置版本".to_string(),
-                }
-            });
-        }
-    }
-    for cache in cached_builtin_prompts()? {
-        if !bundled_ids.contains(&cache.id) && !remote_ids.contains(&cache.id) {
-            statuses.push(prompt_status_from_cache(
-                cache,
-                "GitHub 目录中已不存在该模板，已保留本地缓存",
+            statuses.push(bundled_prompt_status(
+                meta,
+                "GitHub 中未找到该模板，继续使用打包内置版本",
             ));
         }
     }
+    let mut retained_ids = remote_ids.clone();
+    if let Some(active_id) = active_remote_builtin_prompt_id(config_dir) {
+        if !remote_ids.contains(&active_id) {
+            if let Some(cache) = cached_builtin_prompt(&active_id)? {
+                let mut status = prompt_status_from_cache(
+                    cache,
+                    "该模板已从 GitHub 目录移除，但当前配置仍在使用",
+                );
+                status.content_source = "removed".to_string();
+                statuses.push(status);
+            }
+            retained_ids.insert(active_id);
+        }
+    }
+    prune_builtin_prompt_cache(&retained_ids)?;
     let order = bundled_prompt_metas()
         .into_iter()
         .enumerate()
@@ -1285,6 +1380,9 @@ fn refresh_builtin_prompts_inner() -> Result<Vec<BuiltinPromptStatus>> {
 }
 
 fn builtin_prompt_content(template_id: &str) -> Result<(String, String, String, String)> {
+    let _cache_guard = BUILTIN_PROMPT_CACHE_LOCK
+        .lock()
+        .map_err(|_| CodexxError::Database("提示词缓存锁已损坏".to_string()))?;
     let id = if template_id.trim().is_empty() {
         "gpt5.5-unrestricted"
     } else {
@@ -4624,8 +4722,8 @@ async fn get_builtin_prompt_status() -> Result<Vec<BuiltinPromptStatus>> {
 }
 
 #[tauri::command]
-async fn refresh_builtin_prompts() -> Result<Vec<BuiltinPromptStatus>> {
-    tauri::async_runtime::spawn_blocking(refresh_builtin_prompts_inner)
+async fn refresh_builtin_prompts(config_dir: Option<String>) -> Result<Vec<BuiltinPromptStatus>> {
+    tauri::async_runtime::spawn_blocking(move || refresh_builtin_prompts_inner(config_dir))
         .await
         .map_err(|e| CodexxError::Config(format!("提示词后台更新失败: {e}")))?
 }
@@ -5665,10 +5763,128 @@ mod tests {
                 kind: "file".to_string(),
                 download_url: Some("https://example.invalid/notes.txt".to_string()),
             },
-        ]);
+            GithubContentEntry {
+                name: "BRAND-NEW-PROMPT.MD".to_string(),
+                kind: "file".to_string(),
+                download_url: Some(
+                    "https://raw.githubusercontent.com/yynxxxxx/Codex-X/main/examples/BRAND-NEW-PROMPT.MD"
+                        .to_string(),
+                ),
+            },
+        ])
+        .expect("build GitHub prompt catalog");
         assert_eq!(catalog.len(), 1);
         assert_eq!(catalog[0].1, "brand-new-prompt.md");
         assert!(catalog[0].0.starts_with("github-brand-new-prompt-"));
+        assert_eq!(
+            stable_remote_prompt_id("brand-new-prompt.md"),
+            stable_remote_prompt_id("BRAND-NEW-PROMPT.MD")
+        );
+    }
+
+    #[test]
+    fn github_catalog_rejects_markdown_without_a_download_url() {
+        let catalog = github_prompt_catalog_from_entries(vec![GithubContentEntry {
+            name: "missing-url.md".to_string(),
+            kind: "file".to_string(),
+            download_url: None,
+        }]);
+
+        assert!(catalog.is_err());
+    }
+
+    #[test]
+    fn empty_cache_fallback_uses_only_bundled_prompts() {
+        let statuses = cached_prompt_fallback_statuses(Vec::new());
+        let ids = statuses
+            .iter()
+            .map(|status| status.id.as_str())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(statuses.len(), bundled_prompt_metas().len());
+        assert_eq!(ids.len(), statuses.len());
+        assert!(statuses
+            .iter()
+            .all(|status| status.content_source == "bundled" && !status.cached));
+    }
+
+    #[test]
+    fn stale_prompt_cache_ids_follow_authoritative_catalog() {
+        let cache = |id: &str, filename: &str| CachedBuiltinPrompt {
+            id: id.to_string(),
+            filename: filename.to_string(),
+            source_url: format!("https://example.invalid/{filename}"),
+            content: "cached".to_string(),
+            checked_at: "2026-07-11T00:00:00+08:00".to_string(),
+        };
+        let caches = vec![
+            cache("gpt5.5-unrestricted", "gpt5.5-unrestricted.md"),
+            cache("github-new", "new.md"),
+            cache("github-removed", "removed.md"),
+            cache("legacy-alias", "new.md"),
+        ];
+        let active_ids =
+            HashSet::from(["gpt5.5-unrestricted".to_string(), "github-new".to_string()]);
+
+        assert_eq!(
+            stale_cached_prompt_ids(&caches, &active_ids),
+            vec!["github-removed".to_string(), "legacy-alias".to_string()]
+        );
+    }
+
+    #[test]
+    fn cache_fallback_is_unique_and_keeps_remote_templates_offline() {
+        let cache = |id: &str, filename: &str| CachedBuiltinPrompt {
+            id: id.to_string(),
+            filename: filename.to_string(),
+            source_url: format!("https://example.invalid/{filename}"),
+            content: "cached".to_string(),
+            checked_at: "2026-07-11T00:00:00+08:00".to_string(),
+        };
+        let statuses = cached_prompt_fallback_statuses(vec![
+            cache("gpt5.5-unrestricted", "gpt5.5-unrestricted.md"),
+            cache("gpt5.4-unrestricted", "gpt5.4-unrestricted.md"),
+            cache("gpt5.5-jeli", "gpt5.5-jeli.md"),
+            cache("github-new", "new.md"),
+            cache("legacy-new", "new.md"),
+        ]);
+        let ids = statuses
+            .iter()
+            .map(|status| status.id.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        let filenames = statuses
+            .iter()
+            .map(|status| status.filename.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(statuses.len(), 4);
+        assert_eq!(ids.len(), statuses.len());
+        assert_eq!(filenames.len(), statuses.len());
+        assert!(statuses.iter().any(|status| status.filename == "new.md"));
+    }
+
+    #[test]
+    fn deleting_stale_prompt_cache_ids_removes_database_rows() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE builtin_prompt_cache (id TEXT PRIMARY KEY);
+             INSERT INTO builtin_prompt_cache (id) VALUES ('keep'), ('remove-old'), ('remove-alias');",
+        )
+        .expect("seed prompt cache");
+        let stale_ids = vec!["remove-old".to_string(), "remove-alias".to_string()];
+
+        assert_eq!(
+            delete_cached_prompt_ids(&mut conn, &stale_ids).expect("delete stale rows"),
+            2
+        );
+        let remaining = conn
+            .query_row(
+                "SELECT group_concat(id, ',') FROM builtin_prompt_cache",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read remaining rows");
+        assert_eq!(remaining, "keep");
     }
 
     #[test]

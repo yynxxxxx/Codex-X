@@ -1213,7 +1213,12 @@ html, body, #root {
 }
 
 .instruction-panel {
+  /* This is a flex item inside the fixed-height content scroller. Without an
+     explicit non-shrinking basis, long prompt lists outgrow a one-screen frame. */
+  flex: 0 0 auto;
+  height: auto;
   min-height: calc(100vh - var(--shell-vertical-pad));
+  overflow: visible;
 }
 .instruction-row-list {
   display: flex;
@@ -2379,6 +2384,18 @@ html, body, #root {
   border: 1px solid rgba(255,255,255,.08);
   min-width: 0;
 }
+.instruction-list-shell {
+  display: grid;
+  border-radius: 12px;
+  padding: 14px;
+  background: rgba(6, 12, 25, .48);
+  border: 1px solid rgba(124, 168, 255, .13);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+  min-width: 0;
+}
+.instruction-list-shell .skills-mcp-simple-list {
+  padding: 0;
+}
 .skills-mcp-list-head {
   display: flex;
   align-items: center;
@@ -2510,18 +2527,22 @@ html, body, #root {
 /* Prompt templates use the same compact switch-list language as Skills/MCP. */
 .prompt-injection-mode-bar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(470px, auto);
-  align-items: center;
-  gap: 22px;
+  grid-template-columns: minmax(260px, .78fr) minmax(560px, 1.22fr);
+  align-items: stretch;
+  gap: 0;
   margin: 4px 0 14px;
-  padding: 14px 2px;
-  border-top: 1px solid rgba(124, 168, 255, .10);
-  border-bottom: 1px solid rgba(124, 168, 255, .14);
+  padding: 4px;
+  border-radius: 12px;
+  background: rgba(5, 10, 22, .58);
+  border: 1px solid rgba(124, 168, 255, .13);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
 }
 .prompt-active-summary {
   min-width: 0;
   display: grid;
   gap: 5px;
+  align-content: center;
+  padding: 14px 16px;
 }
 .prompt-mode-label {
   color: #7f8da7;
@@ -2542,6 +2563,7 @@ html, body, #root {
   font-size: 14px;
 }
 .prompt-state-dot {
+  position: relative;
   width: 8px;
   height: 8px;
   flex: 0 0 auto;
@@ -2573,7 +2595,7 @@ html, body, #root {
   align-items: center;
   justify-content: flex-end;
   gap: 14px;
-  padding-left: 20px;
+  padding: 14px 16px 14px 20px;
   border-left: 1px solid rgba(124, 168, 255, .12);
 }
 .prompt-mode-copy {
@@ -2675,6 +2697,10 @@ html, body, #root {
   color: #93a2bc;
   background: transparent;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   white-space: nowrap;
   transition: color .14s ease, background-color .14s ease, box-shadow .14s ease;
 }
@@ -2692,22 +2718,46 @@ html, body, #root {
 .instruction-switch-list {
   gap: 8px;
 }
+.instruction-switch-list .instruction-switch-row {
+  width: 100%;
+}
 .instruction-switch-row {
   min-height: 62px;
   grid-template-columns: minmax(0, 1fr) auto;
-  padding: 11px 10px 11px 14px;
+  padding: 12px 10px 12px 14px;
+  border-radius: 8px;
+  background: rgba(255,255,255,.05);
 }
 .instruction-switch-row.selected {
   border-color: rgba(33,236,158,.36);
   background: rgba(18, 72, 53, .18);
 }
-.instruction-switch-row .instruction-main strong {
-  margin-bottom: 3px;
+.instruction-title-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: #92a3c0;
+}
+.instruction-title-line strong {
+  min-width: 0;
+  margin: 0;
+}
+.instruction-title-line svg {
+  flex: 0 0 auto;
+}
+.instruction-switch-row .instruction-main > strong {
+  margin-bottom: 4px;
 }
 .instruction-switch-row .instruction-main p {
   margin: 0;
   color: #9aa8bf;
   font-size: 13px;
+  line-height: 1.45;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .instruction-switch-row .prompt-remote-meta {
   margin-top: 6px;
@@ -2718,6 +2768,14 @@ html, body, #root {
   justify-content: flex-end;
   gap: 8px;
 }
+.instruction-switch-row .mini-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.instruction-switch-row .prompt-remote-meta small {
+  font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+}
 .skills-loading { min-height: 220px; }
 .session-empty.compact { min-height: 74px; }
 @media (max-width: 1280px) {
@@ -2726,7 +2784,7 @@ html, body, #root {
   .prompt-mode-choice {
     width: 100%;
     justify-content: space-between;
-    padding: 12px 0 0;
+    padding: 14px 12px;
     border-left: 0;
     border-top: 1px solid rgba(124, 168, 255, .10);
   }

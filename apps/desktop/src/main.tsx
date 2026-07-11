@@ -2,9 +2,11 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import {
   Activity,
+  ArrowLeftRight,
   CheckCircle2,
   ChevronRight,
   CircleHelp,
+  CirclePlus,
   Code2,
   Download,
   ExternalLink,
@@ -12,7 +14,9 @@ import {
   Eye,
   EyeOff,
   FileCode2,
+  FileText,
   Globe2,
+  Github,
   History,
   Info,
   KeyRound,
@@ -741,6 +745,34 @@ function instructionIdFromPath(path: string | undefined, templates: InstructionT
   return found?.id || "custom";
 }
 
+function uniqueBuiltinPromptStatuses(statuses: BuiltinPromptStatus[]) {
+  const sourcePriority: Record<string, number> = {
+    unavailable: 0,
+    bundled: 1,
+    cache: 2,
+    removed: 2,
+    github: 3,
+  };
+  const seenIds = new Set<string>();
+  const seenFilenames = new Set<string>();
+  const selected = statuses
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.id.trim() && item.filename.trim())
+    .sort((a, b) =>
+      (sourcePriority[b.item.contentSource] ?? -1) - (sourcePriority[a.item.contentSource] ?? -1)
+      || a.index - b.index,
+    )
+    .filter(({ item }) => {
+      const id = item.id.trim().toLowerCase();
+      const filename = item.filename.trim().toLowerCase();
+      if (seenIds.has(id) || seenFilenames.has(filename)) return false;
+      seenIds.add(id);
+      seenFilenames.add(filename);
+      return true;
+    });
+  return selected.sort((a, b) => a.index - b.index).map(({ item }) => item);
+}
+
 function normalizedProviderToml(text?: string) {
   return (text || "")
     .replace(/\r\n?/g, "\n")
@@ -925,6 +957,8 @@ function App() {
   const [providerApiKeyVisible, setProviderApiKeyVisible] = React.useState(false);
   const [providerTestingId, setProviderTestingId] = React.useState("");
   const [actionBusy, setActionBusy] = React.useState<string>("");
+  const [promptSyncing, setPromptSyncing] = React.useState(false);
+  const [promptCatalogReady, setPromptCatalogReady] = React.useState(false);
   const [promptForm, setPromptForm] = React.useState<SavedPrompt>(blankPromptForm);
   const [officialForm, setOfficialForm] = React.useState({ model: "gpt-5.5", authJson: "" });
   const [promptModeHelpOpen, setPromptModeHelpOpen] = React.useState(false);
@@ -934,16 +968,28 @@ function App() {
   const skillZipImportRef = React.useRef<HTMLInputElement | null>(null);
   const providerTomlEditorRef = React.useRef<HTMLTextAreaElement | null>(null);
   const promptModeHelpRef = React.useRef<HTMLDivElement | null>(null);
-  const promptUpdateCheckedRef = React.useRef(0);
+  const promptRefreshRequestRef = React.useRef(0);
+  const promptRefreshInFlightRef = React.useRef<Promise<BuiltinPromptStatus[]> | null>(null);
+  const promptAutoRefreshStartedRef = React.useRef(false);
+  const promptCatalogReadyRef = React.useRef(false);
   const promptModeSyncedRef = React.useRef("");
   const skillsMcpLoadedRef = React.useRef(false);
   const bootStartedAtRef = React.useRef(Date.now());
   const providerTomlPreview = React.useMemo(() => buildProviderTomlPreview(providerForm, state), [providerForm, state]);
   const providerAuthPreview = React.useMemo(() => buildProviderAuthPreview(providerForm), [providerForm]);
+  const activeBuiltinTemplateId = state?.instructionTemplateKey?.startsWith("builtin:")
+    ? state.instructionTemplateKey.slice("builtin:".length)
+    : "";
   const instructionTemplates = React.useMemo<InstructionTemplate[]>(() => {
     if (!builtinPromptStatus.length) return bundledInstructionTemplates;
-    return builtinPromptStatus.map(({ id, filename, title, subtitle, badge }) => ({ id, filename, title, subtitle, badge }));
-  }, [builtinPromptStatus]);
+    return builtinPromptStatus
+      .filter((item) => item.contentSource !== "removed" || item.id === activeBuiltinTemplateId)
+      .map(({ id, filename, title, subtitle, badge }) => ({ id, filename, title, subtitle, badge }));
+  }, [activeBuiltinTemplateId, builtinPromptStatus]);
+  const missingActiveBuiltinTemplateId = activeBuiltinTemplateId
+    && !instructionTemplates.some((item) => item.id === activeBuiltinTemplateId)
+    ? activeBuiltinTemplateId
+    : "";
   const currentInstructionId = instructionIdFromPath(state?.instructionFile, instructionTemplates);
   const builtinPromptStatusMap = React.useMemo(() => new Map(builtinPromptStatus.map((item) => [item.id, item])), [builtinPromptStatus]);
   const releaseStatusLabel = React.useMemo(() => {
@@ -1194,20 +1240,18 @@ function App() {
   const refresh = React.useCallback(() => {
     call(
       async () => {
-        const [next, providerList, promptList, builtinStatus, about] = await Promise.all([
+        const [next, providerList, promptList, about] = await Promise.all([
           invoke<CodexState>("get_codex_state", { configDir: configDir || null }),
           invoke<SavedProvider[]>("list_saved_providers"),
           invoke<SavedPrompt[]>("list_saved_prompts"),
-          invoke<BuiltinPromptStatus[]>("get_builtin_prompt_status"),
           invoke<AboutInfo>("get_about_info", { configDir: configDir || null }),
         ]);
-        return { next, providerList, promptList, builtinStatus, about };
+        return { next, providerList, promptList, about };
       },
-      ({ next, providerList, promptList, builtinStatus, about }) => {
+      ({ next, providerList, promptList, about }) => {
         setState(next);
         setSavedProviders(providerList);
         setSavedPrompts(promptList);
-        setBuiltinPromptStatus(builtinStatus);
         setAboutInfo(about);
         if (!configDir) setConfigDir(next.codexDir);
         const resolvedConfigDir = configDir || next.codexDir || null;
@@ -1412,29 +1456,53 @@ function App() {
   };
 
   const refreshBuiltinPrompts = async ({ quiet = false }: { quiet?: boolean } = {}) => {
-    if (!quiet) {
-      setActionBusy("refreshPrompts");
-      setLoading(true);
-    }
+    const requestId = ++promptRefreshRequestRef.current;
+    if (!quiet) promptAutoRefreshStartedRef.current = true;
+    if (!quiet) setError("");
     try {
-      const list = await invoke<BuiltinPromptStatus[]>("refresh_builtin_prompts");
-      setBuiltinPromptStatus(list);
-      promptUpdateCheckedRef.current = Date.now();
-      const updated = list.filter((item) => item.updated).length;
-      const catalogFailed = list.some((item) => item.message.includes("无法读取 GitHub 模板目录"));
+      const existingRequest = promptRefreshInFlightRef.current;
+      const request = existingRequest || invoke<BuiltinPromptStatus[]>("refresh_builtin_prompts", { configDir: configDir || null });
+      if (!existingRequest) {
+        promptRefreshInFlightRef.current = request;
+        setPromptSyncing(true);
+        const clearRequest = () => {
+          if (promptRefreshInFlightRef.current !== request) return;
+          promptRefreshInFlightRef.current = null;
+          setPromptSyncing(false);
+        };
+        void request.then(clearRequest, clearRequest);
+      }
+      const list = await request;
+      if (requestId !== promptRefreshRequestRef.current) return;
+      const uniqueList = uniqueBuiltinPromptStatuses(list);
+      const catalogFailed = uniqueList.some((item) => item.message.includes("无法读取 GitHub 模板目录"));
+      const contentFetchFailures = uniqueList.filter((item) =>
+        item.contentSource === "unavailable" || item.message.includes("无法连接 GitHub"),
+      ).length;
+      promptAutoRefreshStartedRef.current = !catalogFailed && contentFetchFailures === 0;
+      if (!catalogFailed) {
+        promptCatalogReadyRef.current = true;
+        setPromptCatalogReady(true);
+        setBuiltinPromptStatus(uniqueList);
+      } else if (!promptCatalogReadyRef.current) {
+        setBuiltinPromptStatus(uniqueList);
+      }
+      const updated = uniqueList.filter((item) => item.updated).length;
       if (!quiet) {
         setToast(catalogFailed
-          ? (lang === "zh" ? "暂时无法连接 GitHub，已使用本地模板" : "GitHub unavailable; using local templates")
+          ? promptCatalogReadyRef.current
+            ? (lang === "zh" ? "暂时无法连接 GitHub，已保留当前模板列表" : "GitHub unavailable; keeping the current template list")
+            : (lang === "zh" ? "暂时无法连接 GitHub，已使用本地模板" : "GitHub unavailable; using local templates")
+          : contentFetchFailures > 0
+            ? (lang === "zh" ? `GitHub 目录已同步，${contentFetchFailures} 个模板暂用本地内容` : `GitHub catalog synced; ${contentFetchFailures} template(s) are using local content`)
           : updated > 0
             ? (lang === "zh" ? `已同步 ${updated} 个 GitHub 提示词模板` : `${updated} GitHub prompt template(s) synced`)
             : (lang === "zh" ? "提示词模板已是 GitHub 最新" : "Prompt templates are up to date"));
       }
     } catch (e) {
-      if (!quiet) setError(String(e));
-    } finally {
-      if (!quiet) {
-        setLoading(false);
-        setActionBusy("");
+      if (requestId === promptRefreshRequestRef.current) {
+        promptAutoRefreshStartedRef.current = false;
+        if (!quiet) setError(String(e));
       }
     }
   };
@@ -1616,17 +1684,9 @@ function App() {
   }, [state, aboutInfo, checkForUpdates]);
 
   React.useEffect(() => {
-    if (tab !== "instruction" || Date.now() - promptUpdateCheckedRef.current < 60_000) return;
-    promptUpdateCheckedRef.current = Date.now();
-    const run = () => void refreshBuiltinPrompts({ quiet: true });
-    const timer = window.setTimeout(() => {
-      if ("requestIdleCallback" in window) {
-        window.requestIdleCallback(run, { timeout: 2200 });
-      } else {
-        run();
-      }
-    }, 1600);
-    return () => window.clearTimeout(timer);
+    if (tab !== "instruction" || promptAutoRefreshStartedRef.current) return;
+    promptAutoRefreshStartedRef.current = true;
+    void refreshBuiltinPrompts({ quiet: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -2668,8 +2728,8 @@ function App() {
                           accept=".md,text/markdown,text/plain"
                           onChange={(e) => void importPromptMd(e.target.files?.[0])}
                         />
-                        <button className="ghost-btn add-provider-btn lively-btn" onClick={() => void refreshBuiltinPrompts()} disabled={loading || actionBusy === "refreshPrompts"}>
-                          {actionBusy === "refreshPrompts" ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />} {actionBusy === "refreshPrompts" ? (lang === "zh" ? "同步中..." : "Syncing...") : (lang === "zh" ? "同步 GitHub 模板" : "Sync GitHub templates")}
+                        <button className="ghost-btn add-provider-btn lively-btn" onClick={() => void refreshBuiltinPrompts()} disabled={loading || promptSyncing}>
+                          {promptSyncing ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />} {promptSyncing ? (lang === "zh" ? "同步中..." : "Syncing...") : (lang === "zh" ? "同步 GitHub 模板" : "Sync GitHub templates")}
                         </button>
                         <button className="secondary-btn add-provider-btn lively-btn" onClick={() => promptImportRef.current?.click()} disabled={loading}>
                           {actionBusy === "importPrompt" ? <Loader2 size={18} className="spin" /> : <Upload size={18} />} {actionBusy === "importPrompt" ? (lang === "zh" ? "导入中..." : "Importing...") : (lang === "zh" ? "导入 md" : "Import md")}
@@ -2681,7 +2741,7 @@ function App() {
                     <div className="prompt-injection-mode-bar">
                       <div className="prompt-active-summary">
                         <span className="prompt-mode-label">{lang === "zh" ? "当前状态" : "Current status"}</span>
-                        <div className="prompt-active-line">
+                        <div className="prompt-active-line" aria-live="polite">
                           <span className={cx("prompt-state-dot", state.instructionEnabled && "on")} />
                           <strong>{state.instructionEnabled ? activeInstructionTitle : (lang === "zh" ? "未启用提示词" : "No prompt enabled")}</strong>
                           {state.instructionEnabled && <span className="prompt-current-mode">{activeInjectionModeLabel}</span>}
@@ -2734,6 +2794,7 @@ function App() {
                             title={lang === "zh" ? "写入 AGENTS.md，并保留现有 model_instructions_file" : "Write to AGENTS.md and preserve model_instructions_file"}
                             onClick={() => setPromptInjectionMode("append")}
                           >
+                            <CirclePlus size={15} />
                             {lang === "zh" ? "保留原提示词" : "Keep existing"}
                           </button>
                           <button
@@ -2743,18 +2804,22 @@ function App() {
                             title={lang === "zh" ? "使用 model_instructions_file 替换现有指令文件" : "Replace the existing instruction file through model_instructions_file"}
                             onClick={() => setPromptInjectionMode("replace")}
                           >
+                            <ArrowLeftRight size={15} />
                             {lang === "zh" ? "替换原提示词" : "Replace existing"}
                           </button>
                         </div>
                       </div>
                     </div>
 
-                    <div className="skills-mcp-simple-list instruction-switch-list">
+                    <div className="instruction-list-shell">
+                      <div className="skills-mcp-simple-list instruction-switch-list">
                       {instructionTemplates.map((item) => {
                         const isCurrent = state.instructionTemplateKey === `builtin:${item.id}`;
                         const remoteStatus = builtinPromptStatusMap.get(item.id);
                         const sourceLabel = remoteStatus?.contentSource === "github"
                           ? (lang === "zh" ? "GitHub 最新" : "GitHub latest")
+                          : remoteStatus?.contentSource === "removed"
+                            ? (lang === "zh" ? "GitHub 已移除" : "Removed from GitHub")
                           : remoteStatus?.contentSource === "cache"
                             ? (lang === "zh" ? "本地缓存" : "Local cache")
                             : remoteStatus?.contentSource === "unavailable"
@@ -2763,11 +2828,19 @@ function App() {
                         return (
                           <article className={cx("skills-mcp-simple-row instruction-switch-row", isCurrent && "selected")} key={item.id}>
                             <div className="instruction-main">
-                              <strong>{item.title}</strong>
+                              <div className="instruction-title-line">
+                                <FileText size={16} aria-hidden="true" />
+                                <strong>{item.title}</strong>
+                              </div>
                               <p>{item.subtitle}</p>
                               <div className="prompt-remote-meta" title={remoteStatus?.message || undefined}>
                                 {isCurrent && <span className="mini-tag current-mode">{lang === "zh" ? `当前 · ${activeInjectionModeLabel}` : `Current · ${activeInjectionModeLabel}`}</span>}
-                                <span className={cx("mini-tag", remoteStatus?.contentSource === "github" ? "ok" : undefined)}>{sourceLabel}</span>
+                                <span className={cx("mini-tag", remoteStatus?.contentSource === "github" && "ok", remoteStatus?.contentSource === "removed" && "warn")}>
+                                  {remoteStatus?.contentSource === "github" || remoteStatus?.contentSource === "cache" || remoteStatus?.contentSource === "removed"
+                                    ? <Github size={12} aria-hidden="true" />
+                                    : <FileText size={12} aria-hidden="true" />}
+                                  {sourceLabel}
+                                </span>
                                 {remoteStatus?.checkedAt && <small>{new Date(remoteStatus.checkedAt).toLocaleString()}</small>}
                               </div>
                             </div>
@@ -2782,6 +2855,30 @@ function App() {
                           </article>
                         );
                       })}
+
+                      {promptCatalogReady && missingActiveBuiltinTemplateId && (
+                        <article className="skills-mcp-simple-row instruction-switch-row selected">
+                          <div className="instruction-main">
+                            <div className="instruction-title-line">
+                              <FileText size={16} aria-hidden="true" />
+                              <strong>{activeInstructionTitle}</strong>
+                            </div>
+                            <p>{lang === "zh" ? "该模板已从 GitHub 移除，当前配置仍在使用" : "This template was removed from GitHub but is still active"}</p>
+                            <div className="prompt-remote-meta">
+                              <span className="mini-tag current-mode">{lang === "zh" ? `当前 · ${activeInjectionModeLabel}` : `Current · ${activeInjectionModeLabel}`}</span>
+                              <span className="mini-tag warn">{lang === "zh" ? "GitHub 已移除" : "Removed from GitHub"}</span>
+                            </div>
+                          </div>
+                          <button
+                            className="switch-toggle on"
+                            title={lang === "zh" ? "关闭" : "Disable"}
+                            onClick={disableInstruction}
+                            disabled={loading}
+                          >
+                            <span />
+                          </button>
+                        </article>
+                      )}
 
                       {savedPrompts.map((prompt) => {
                         const isManagedCurrent = state.instructionTemplateKey === `saved:${prompt.id}`;
@@ -2826,7 +2923,10 @@ function App() {
                         );
                       })}
 
-                      {state.instructionFile && currentInstructionId === "custom" && !savedPrompts.some((p) => currentInstructionFilename === p.filename) && (
+                      {state.instructionFile
+                        && currentInstructionId === "custom"
+                        && !savedPrompts.some((p) => currentInstructionFilename === p.filename)
+                        && !(missingActiveBuiltinTemplateId && state.instructionInjectionMode !== "append") && (
                         <article className="skills-mcp-simple-row instruction-switch-row selected">
                           <div className="instruction-main">
                             <strong>{lang === "zh" ? "用户原有指令提示词" : "Existing user prompt"}</strong>
@@ -2837,6 +2937,7 @@ function App() {
                           <button className="switch-toggle on" title={lang === "zh" ? "禁用外部提示词" : "Disable external prompt"} onClick={disableExternalInstruction} disabled={loading}><span /></button>
                         </article>
                       )}
+                      </div>
                     </div>
                   </>
                 ) : (

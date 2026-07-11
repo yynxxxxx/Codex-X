@@ -73,7 +73,7 @@ PY
 pnpm --dir apps/desktop typecheck
 cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
 
-git add package.json apps/desktop/package.json apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/tauri.conf.json CHANGELOG.md
+git add package.json apps/desktop/package.json apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/Cargo.lock apps/desktop/src-tauri/tauri.conf.json CHANGELOG.md
 git commit -m "Release ${tag}"
 git tag "$tag"
 
