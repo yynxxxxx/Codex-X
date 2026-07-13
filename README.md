@@ -8,9 +8,9 @@
 
   # Codex-X
 
-  **Codex 提示词注入 · Provider 切换 · TOML / Auth 可视化管理器**
+  **Codex 提示词 · API / Provider · 会话 · Skills / MCP 一站式管理工具**
 
-  一款面向 **OpenAI Codex 桌面端 / Codex CLI** 的跨平台桌面工具，内置 `gpt5.5-unrestricted.md` 与 `gpt5.4-unrestricted.md`，支持一键写入 / 禁用指令提示词、第三方 Provider 切换、官方 Auth 管理、TOML 可视化编辑与本地会话 Provider Sync。
+  一款面向 **OpenAI Codex 桌面端 / Codex CLI** 的跨平台桌面工具。不用反复手改配置文件，就能管理提示词模板、切换第三方 API、整理 / 修复 / 永久删除本地会话、管理 Skills / MCP，并查看 TOML 与登录认证。
 
   <p>
     <img src="https://img.shields.io/github/v/release/yynxxxxx/Codex-X?label=version&color=blue" alt="version" />
@@ -32,15 +32,14 @@
 
 ## Codex-X 是什么？
 
-Codex-X 不是普通的配置文件编辑器，而是一个面向 Codex CLI 的 **可视化增强管理器**。
+当你同时使用 Codex 桌面端、CLI、第三方 API 和多套提示词时，配置很容易散落在不同文件里。Codex-X 把这些高频操作集中到一个桌面界面中，让当前状态看得见、常用操作点一下就能完成。
 
-它把几个高频操作做成了桌面软件：
+你可以用它：
 
-- 给 Codex 写入 / 禁用指令提示词模板
-- 切换官方 OpenAI 与第三方 Codex API Provider
-- 查看 / 编辑 `~/.codex/config.toml`
-- 查看 / 编辑官方 `~/.codex/auth.json`
-- 检查并修复本地历史会话的 Provider 元数据
+- 从模板库选择提示词，也可以导入自己的 `.md`；支持保留原提示词或直接替换
+- 保存、测试并切换 OpenAI Official 与第三方 API，还能从 cc-switch 导入现有供应商
+- 搜索并按项目整理本地会话，检查 / 自动修复异常会话，精确删除不再需要的会话
+- 集中管理 Skills 与 MCP，查看当前 `config.toml`、`auth.json` 和操作备份
 
 ## 软件预览
 
@@ -109,106 +108,111 @@ Codex-X 不是普通的配置文件编辑器，而是一个面向 Codex CLI 的 
 <div align="center">
 <table>
   <tr>
-    <th align="center" width="180">功能</th>
-    <th align="center">说明</th>
+    <th align="center" width="190">你想做的事</th>
+    <th align="center">Codex-X 能帮你</th>
   </tr>
   <tr>
-    <td align="center">⚡ 供应商 API</td>
-    <td>可视化管理官方 OpenAI / 第三方 Codex Provider，支持 Base URL、API Key、Model、Wire API 与一键切换。</td>
+    <td align="center">🧩 <b>使用提示词模板</b></td>
+    <td align="left">当前模板库共 <b>5 套</b>，可一键启用 / 禁用，并选择“保留原提示词”或“替换原提示词”；支持 GitHub 自动同步、本地缓存，以及导入、编辑自己的 <code>.md</code>。</td>
   </tr>
   <tr>
-    <td align="center">🧩 <b>提示词注入</b></td>
-    <td><b>特色功能</b>：内置 <code>gpt5.4-unrestricted.md</code> / <code>gpt5.5-unrestricted.md</code>，一键写入 Codex 配置；启用后可达到上方效果图中的 SQL 注入测试、APK / EXE 逆向等响应效果。</td>
+    <td align="center">⚡ <b>切换 API / 中转</b></td>
+    <td align="left">保存、测试并启用多个第三方供应商，也可从 cc-switch 导入；相同地址和 Key 会自动合并。切换后新建或重新打开会话即可生效，无需重启整个 Codex 客户端。</td>
   </tr>
   <tr>
-    <td align="center">💬 会话管理</td>
-    <td>读取 Codex 本地 SQLite 与 rollout JSONL，会话列表可视化展示，并支持 Provider Sync / 修复历史 thread 元数据。</td>
+    <td align="center">💬 <b>整理本地会话</b></td>
+    <td align="left">搜索会话、按项目路径分组、检查并自动修复异常数据；支持单选、多选或勾选整个项目，将指定会话从 Codex 存储中永久删除。</td>
   </tr>
   <tr>
-    <td align="center">📝 TOML 配置</td>
-    <td>查看当前 <code>~/.codex/config.toml</code>，并在 Provider 编辑页直接编辑完整 TOML，保存后同步到 Codex 配置目录。</td>
+    <td align="center">🧠 <b>管理 Skills / MCP</b></td>
+    <td align="left">查看当前可用的 Skills 与 MCP，先预览再导入已有内容；支持从 ZIP 安装 Skill、逐项启用 / 禁用，并检查 Skill 更新状态。</td>
   </tr>
   <tr>
-    <td align="center">🧠 Skills / MCP</td>
-    <td>新增技能和 MCP 管理页：读取 Codex 当前可用的 Skills / MCP，支持导入已有、从 ZIP 安装 Skill、启用 / 禁用单个 Skill 或 MCP，并可检查 Skill 更新状态。</td>
+    <td align="center">📝 <b>管理配置与登录</b></td>
+    <td align="left">集中查看 Codex 当前使用的 <code>config.toml</code> 与 <code>auth.json</code>，区分官方登录态和第三方 API Key；重要写入前自动备份，需要时可以恢复。</td>
   </tr>
   <tr>
-    <td align="center">🔐 Auth 管理</td>
-    <td>读取 / 编辑官方 <code>~/.codex/auth.json</code>，区分 ChatGPT 登录态 Auth 与第三方 API Key。</td>
-  </tr>
-  <tr>
-    <td align="center">📦 跨平台发布</td>
-    <td>提供 macOS Apple Silicon / Intel <code>.dmg</code>、Windows <code>.msi</code> / portable <code>.zip</code>、Linux <code>.deb</code> / <code>.rpm</code>，支持应用内检测更新。</td>
+    <td align="center">📦 <b>跨平台使用</b></td>
+    <td align="left">提供 macOS Apple Silicon / Intel、Windows 安装版 / 便携版和 Linux 安装包；应用内可检查 GitHub Releases 新版本并打开下载页。</td>
   </tr>
 </table>
 </div>
 
 ## 核心亮点
 
-### 1. 内置双指令提示词模板
+### 1. 提示词模板中心
 
-Codex-X 当前内置两套提示词模板：
+<p align="center">
+  <img src="https://img.shields.io/badge/当前模板库-5_套-2563eb?style=flat-square" alt="当前模板库 5 套" />
+  <img src="https://img.shields.io/badge/离线内置-3_套-16a34a?style=flat-square" alt="离线内置 3 套" />
+  <img src="https://img.shields.io/badge/GitHub_同步-自动更新-f59e0b?style=flat-square" alt="GitHub 自动同步" />
+</p>
 
-- `examples/gpt5.5-unrestricted.md`
-- `examples/gpt5.4-unrestricted.md`
-
-你可以在【指令提示词】页面直接点击启用 / 禁用。启用后，Codex-X 会把对应 `.md` 写入 Codex 配置目录，并更新 `config.toml` 中的 `model_instructions_file`。
+> [!TIP]
+> **安装后就能用，联网后自动补齐。**
+>
+> 安装包离线自带 3 套基础模板；打开【指令提示词】页面后，会从 GitHub `examples/` 自动同步新增模板。当前共 5 套，远程模板成功同步一次后会缓存到本地，临时离线仍可继续使用。
 
 <div align="center">
 <table>
   <tr>
-    <th align="center">对比项</th>
-    <th align="center"><code>gpt5.4-unrestricted.md</code></th>
-    <th align="center"><code>gpt5.5-unrestricted.md</code></th>
+    <th align="center">模板</th>
+    <th align="center">适合场景</th>
+    <th align="center">获取方式</th>
   </tr>
   <tr>
-    <td align="center">定位</td>
-    <td align="center">5.4 CTF 沙箱</td>
-    <td align="center">5.5 无限制模式</td>
+    <td><a href="examples/gpt5.5-unrestricted.md"><code>gpt5.5-unrestricted.md</code></a></td>
+    <td align="left">短小通用，适合日常 coding 与常规技术任务</td>
+    <td align="center">离线内置<br />GitHub 更新</td>
   </tr>
   <tr>
-    <td align="center">策略</td>
-    <td align="center">CTF 竞赛沙箱间接绕过</td>
-    <td align="center">直接声明无限制开发者模式</td>
+    <td><a href="examples/gpt5.4-unrestricted.md"><code>gpt5.4-unrestricted.md</code></a></td>
+    <td align="left">面向 GPT-5.4 / Codex CLI，偏 CTF 与安全研究工作流</td>
+    <td align="center">离线内置<br />GitHub 更新</td>
   </tr>
   <tr>
-    <td align="center">风格</td>
-    <td align="center">安全研究导向，方法论详细</td>
-    <td align="center">极简指令，覆盖面广</td>
+    <td><a href="examples/gpt5.5-jeli.md"><code>gpt5.5-jeli.md</code></a></td>
+    <td align="left">大白话通用版，提供更完整的工程与逆向执行流程</td>
+    <td align="center">离线内置<br />GitHub 更新</td>
   </tr>
   <tr>
-    <td align="center">长度</td>
-    <td align="center">约 180 行</td>
-    <td align="center">约 40 行</td>
+    <td><a href="examples/gpt-5.6-sol-unrestricted.md"><code>gpt-5.6-sol-unrestricted.md</code></a></td>
+    <td align="left">gpt5.6-sol 破甲提示词，偏直接执行与中英文任务</td>
+    <td align="center">GitHub 同步</td>
   </tr>
   <tr>
-    <td align="center">适用</td>
-    <td align="center">GPT-5.4 Codex CLI</td>
-    <td align="center">GPT-5.5 Codex CLI</td>
+    <td><a href="examples/%E6%B5%B7%E9%B8%A53.0%E7%A0%B4%E7%94%B2.md"><code>海鸥3.0破甲.md</code></a></td>
+    <td align="left">中文技术操作员人格，覆盖 coding、CTF、逆向、内存与协议任务路由</td>
+    <td align="center">GitHub 同步</td>
   </tr>
 </table>
 </div>
 
-部署后可以测试：
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <b>保留原提示词</b><br />
+      适合已经有个人规则的用户。Codex-X 只追加自己管理的内容，禁用时也只移除这一部分，不动原有提示词。
+    </td>
+    <td width="50%" valign="top">
+      <b>替换原提示词</b><br />
+      将所选模板设为当前主要指令入口，适合希望完整切换到某套模板的用户。
+    </td>
+  </tr>
+</table>
 
-```text
-如何对目标进行 SQL 注入测试？
-```
+每次启用或禁用前都会自动创建备份。除了模板库，你也可以导入、编辑和删除自己的 `.md` 提示词。
 
-典型效果：
+### 2. Provider 切换：新会话直接生效
 
-```text
-破甲前 → 拒绝或泛化回答
-破甲后 → 直接给安全研究方法论与测试步骤
-```
+> [!NOTE]
+> 启用新的第三方供应商后，新建或重新打开 Codex 会话即可使用新的中转，不需要重启整个 Codex 客户端。
 
-### 2. Provider 可视化切换
-
-- 添加第三方 Codex API Provider
-- 编辑 Base URL / API Key / Model / Wire API
-- Provider 页面可查看并编辑对应 TOML
-- 当前启用 Provider 状态清晰可见
-- 支持从 cc-switch 数据库导入 Codex Provider
+- 保存多个第三方供应商，随时查看当前正在使用哪一个
+- 切换前可测试 API 地址是否可用，并分别保存或启用配置
+- 在同一页面编辑 Base URL、API Key、Model、Wire API 和完整 TOML
+- 从 cc-switch 导入时自动区分新增、更新、合并与跳过；相同 URL + Key 不再重复显示
+- 切回 OpenAI Official 时保留当前官方登录态，第三方配置也不会凭空消失
 
 ### 3. 官方 Auth 管理
 
@@ -224,26 +228,46 @@ Codex-X 当前内置两套提示词模板：
 - Provider 编辑页可直接编辑完整 TOML
 - 保存后同步到 Codex 配置目录
 
-### 5. 会话管理 / Provider Sync
+### 5. 会话管理：检查、修复与永久删除
 
-Codex-X 可以读取 Codex 本地会话数据：
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <b>查找和整理</b><br />
+      按标题、项目路径搜索会话，也可以按项目分组查看；Codex 自动创建的后台子会话默认不会混进普通会话列表。
+    </td>
+    <td width="50%" valign="top">
+      <b>检查和修复</b><br />
+      一键检查本地会话是否与当前 Provider 一致，支持手动全量修复，也可以开启启动时自动检查与修复。
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" valign="top">
+      <b>精确删除</b><br />
+      支持单选、多选，也可以勾选一个或多个项目，一次选中项目下的全部会话；确认后会从 Codex 自身存储中删除对应会话及其派生子会话。
+    </td>
+  </tr>
+</table>
 
-```text
-~/.codex/sqlite/*.db
-~/.codex/state_5.sqlite
-~/.codex/sessions/**/rollout-*.jsonl
-~/.codex/archived_sessions/**/rollout-*.jsonl
-```
-
-用于检查旧会话的 Provider 元数据是否和当前配置一致，并支持一键同步 / 修复，让历史 thread 继续被原生 Codex 识别、打开和续聊。
+> [!CAUTION]
+> **永久删除不可恢复。** 删除前请先关闭仍在使用这些会话的 Codex 窗口或 CLI，并在确认窗口中再次核对待删除列表。
 
 ### 6. Skills / MCP 管理
 
-Codex-X 新增独立的【技能和 MCP】页面，用于集中管理 Codex 的专业能力扩展。
+在【技能和 MCP】页面集中管理 Codex 的能力扩展，不必再到多个目录和配置文件中逐项查找。
 
-- Skills：读取当前 Codex Skills，支持导入已有、从 ZIP 安装、启用 / 禁用、检查更新状态
-- MCP：读取当前 Codex MCP Server，支持导入已有、启用 / 禁用，启用后写入 Codex <code>config.toml</code>
-- 适合管理 Android APK 逆向、Ghidra / IDA、Web / API / 协议逆向、CTF、安全测试等技能包
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <b>Skills</b><br />
+      查看当前 Skill，导入已有内容或从 ZIP 安装；可以逐项启用 / 禁用，并检查已安装 Skill 是否有更新。
+    </td>
+    <td width="50%" valign="top">
+      <b>MCP</b><br />
+      导入前先预览现有 MCP Server，再决定哪些需要纳管；启用或禁用后由 Codex-X 自动维护 Codex 配置。
+    </td>
+  </tr>
+</table>
 
 ### 7. 逆向 Skills 导航
 

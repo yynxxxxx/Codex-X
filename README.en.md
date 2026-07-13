@@ -8,9 +8,9 @@
 
   # Codex-X
 
-  **Prompt Injection · Provider Switching · TOML / Auth Visual Manager for Codex**
+  **Codex Prompts · API / Providers · Sessions · Skills / MCP in One Place**
 
-  Codex-X is a cross-platform desktop tool for **OpenAI Codex Desktop / Codex CLI**. It ships with `gpt5.5-unrestricted.md` and `gpt5.4-unrestricted.md`, and supports one-click enable / disable for instruction prompts, third-party Provider switching, official Auth management, TOML visual editing, and local session Provider Sync.
+  A cross-platform desktop tool for **OpenAI Codex Desktop / Codex CLI**. Manage prompt templates, switch third-party APIs, organize / repair / permanently delete local sessions, manage Skills / MCP, and inspect TOML and login credentials without repeatedly editing configuration files by hand.
 
   <p>
     <img src="https://img.shields.io/github/v/release/yynxxxxx/Codex-X?label=version&color=blue" alt="version" />
@@ -32,15 +32,14 @@
 
 ## What is Codex-X?
 
-Codex-X is not just a configuration-file editor. It is a **visual enhancement manager** built for Codex CLI and Codex Desktop workflows.
+When you use Codex Desktop, the CLI, third-party APIs, and multiple prompts together, settings quickly become scattered across different files. Codex-X brings these frequent tasks into one desktop interface, so you can see the current state and complete common actions with a click.
 
-It turns several high-frequency operations into a desktop UI:
+You can use it to:
 
-- Enable / disable instruction prompt templates for Codex
-- Switch between official OpenAI and third-party Codex API Providers
-- View / edit `~/.codex/config.toml`
-- View / edit official `~/.codex/auth.json`
-- Check and repair Provider metadata for local historical sessions
+- Choose from the prompt library or import your own `.md`, then keep the existing prompt or replace it
+- Save, test, and switch between OpenAI Official and third-party APIs, including Providers imported from cc-switch
+- Search and organize local sessions by project, check / automatically repair problems, and precisely delete sessions you no longer need
+- Manage Skills and MCP in one place, and inspect the current `config.toml`, `auth.json`, and operation backups
 
 ## Preview
 
@@ -109,106 +108,111 @@ It turns several high-frequency operations into a desktop UI:
 <div align="center">
 <table>
   <tr>
-    <th align="center" width="180">Feature</th>
-    <th align="center">Description</th>
+    <th align="center" width="190">What you want to do</th>
+    <th align="center">How Codex-X helps</th>
   </tr>
   <tr>
-    <td align="center">⚡ Provider API</td>
-    <td>Visually manage official OpenAI / third-party Codex Providers, including Base URL, API Key, Model, Wire API, and one-click switching.</td>
+    <td align="center">🧩 <b>Use prompt templates</b></td>
+    <td align="left">The current library contains <b>5 templates</b>. Enable / disable one with a click and choose “Keep existing” or “Replace existing”; GitHub sync, local caching, and importing or editing your own <code>.md</code> files are supported.</td>
   </tr>
   <tr>
-    <td align="center">🧩 <b>Prompt Injection</b></td>
-    <td><b>Signature feature</b>: built-in <code>gpt5.4-unrestricted.md</code> / <code>gpt5.5-unrestricted.md</code>, one-click write into Codex configuration; after enabling, it can produce results similar to the screenshots above for SQL injection testing and APK / EXE reverse engineering scenarios.</td>
+    <td align="center">⚡ <b>Switch APIs / relays</b></td>
+    <td align="left">Save, test, and enable multiple third-party Providers, or import them from cc-switch; entries with the same endpoint and Key are merged automatically. Create or reopen a session after switching to apply the change without restarting the entire Codex client.</td>
   </tr>
   <tr>
-    <td align="center">💬 Session Management</td>
-    <td>Read Codex local SQLite and rollout JSONL, display local sessions visually, and support Provider Sync / historical thread metadata repair.</td>
+    <td align="center">💬 <b>Organize local sessions</b></td>
+    <td align="left">Search sessions, group them by project path, and check or automatically repair inconsistent data. Select one, several, or an entire project to permanently delete specific sessions from Codex storage.</td>
   </tr>
   <tr>
-    <td align="center">📝 TOML Config</td>
-    <td>View current <code>~/.codex/config.toml</code>, edit full TOML directly from the Provider editor, and save changes back to the Codex config directory.</td>
+    <td align="center">🧠 <b>Manage Skills / MCP</b></td>
+    <td align="left">View available Skills and MCP servers, preview existing items before import, install a Skill from ZIP, enable / disable individual entries, and check Skill update status.</td>
   </tr>
   <tr>
-    <td align="center">🧠 Skills / MCP</td>
-    <td>New Skills & MCP page: read Codex Skills / MCP servers, import existing items, install Skill ZIP packages, enable / disable individual Skills or MCP servers, and check Skill update status.</td>
+    <td align="center">📝 <b>Manage config and login</b></td>
+    <td align="left">Inspect the active Codex <code>config.toml</code> and <code>auth.json</code> in one place, with a clear distinction between official login credentials and third-party API Keys. Important writes are backed up automatically and can be restored when needed.</td>
   </tr>
   <tr>
-    <td align="center">🔐 Auth Management</td>
-    <td>Read / edit official <code>~/.codex/auth.json</code>, and distinguish ChatGPT login-state Auth from third-party API Keys.</td>
-  </tr>
-  <tr>
-    <td align="center">📦 Cross-platform Release</td>
-    <td>Provides macOS Apple Silicon / Intel <code>.dmg</code>, Windows <code>.msi</code> / portable <code>.zip</code>, Linux <code>.deb</code> / <code>.rpm</code>, plus in-app update checking.</td>
+    <td align="center">📦 <b>Use it across platforms</b></td>
+    <td align="left">Available for macOS Apple Silicon / Intel, Windows installer / portable, and Linux packages. Check GitHub Releases from inside the app and open the download page when a new version is available.</td>
   </tr>
 </table>
 </div>
 
 ## Highlights
 
-### 1. Built-in dual instruction prompt templates
+### 1. Prompt Template Center
 
-Codex-X currently includes two prompt templates:
+<p align="center">
+  <img src="https://img.shields.io/badge/Template_library-5_total-2563eb?style=flat-square" alt="5 templates in the current library" />
+  <img src="https://img.shields.io/badge/Bundled_offline-3_templates-16a34a?style=flat-square" alt="3 templates bundled for offline use" />
+  <img src="https://img.shields.io/badge/GitHub_sync-Automatic_updates-f59e0b?style=flat-square" alt="Automatic GitHub template sync" />
+</p>
 
-- `examples/gpt5.5-unrestricted.md`
-- `examples/gpt5.4-unrestricted.md`
-
-You can enable / disable them directly from the Prompt page. When enabled, Codex-X writes the selected `.md` file into the Codex configuration directory and updates `model_instructions_file` in `config.toml`.
+> [!TIP]
+> **Ready after installation, automatically expanded when online.**
+>
+> The app bundle includes 3 baseline templates for offline use. Opening the **Prompt** page automatically syncs 2 additional templates from GitHub `examples/`, bringing the current total to 5. Once a remote template has synced successfully, it is cached locally and remains available during temporary network outages.
 
 <div align="center">
 <table>
   <tr>
-    <th align="center">Item</th>
-    <th align="center"><code>gpt5.4-unrestricted.md</code></th>
-    <th align="center"><code>gpt5.5-unrestricted.md</code></th>
+    <th align="center">Template</th>
+    <th align="center">Best for</th>
+    <th align="center">Availability</th>
   </tr>
   <tr>
-    <td align="center">Positioning</td>
-    <td align="center">5.4 CTF sandbox</td>
-    <td align="center">5.5 unrestricted mode</td>
+    <td><a href="examples/gpt5.5-unrestricted.md"><code>gpt5.5-unrestricted.md</code></a></td>
+    <td align="left">Compact and general-purpose for everyday coding and technical work</td>
+    <td align="center">Bundled offline<br />GitHub updates</td>
   </tr>
   <tr>
-    <td align="center">Strategy</td>
-    <td align="center">Indirect bypass through CTF competition sandbox framing</td>
-    <td align="center">Direct declaration of unrestricted developer mode</td>
+    <td><a href="examples/gpt5.4-unrestricted.md"><code>gpt5.4-unrestricted.md</code></a></td>
+    <td align="left">GPT-5.4 / Codex CLI workflows with a CTF and security-research focus</td>
+    <td align="center">Bundled offline<br />GitHub updates</td>
   </tr>
   <tr>
-    <td align="center">Style</td>
-    <td align="center">Security-research oriented, detailed methodology</td>
-    <td align="center">Minimal instructions, broad coverage</td>
+    <td><a href="examples/gpt5.5-jeli.md"><code>gpt5.5-jeli.md</code></a></td>
+    <td align="left">A plain-language general version with a fuller engineering and reverse-engineering workflow</td>
+    <td align="center">Bundled offline<br />GitHub updates</td>
   </tr>
   <tr>
-    <td align="center">Length</td>
-    <td align="center">~180 lines</td>
-    <td align="center">~40 lines</td>
+    <td><a href="examples/gpt-5.6-sol-unrestricted.md"><code>gpt-5.6-sol-unrestricted.md</code></a></td>
+    <td align="left">A GPT-5.6 SOL prompt focused on direct execution and bilingual tasks</td>
+    <td align="center">GitHub sync</td>
   </tr>
   <tr>
-    <td align="center">Target</td>
-    <td align="center">GPT-5.4 Codex CLI</td>
-    <td align="center">GPT-5.5 Codex CLI</td>
+    <td><a href="examples/%E6%B5%B7%E9%B8%A53.0%E7%A0%B4%E7%94%B2.md"><code>海鸥3.0破甲.md</code></a></td>
+    <td align="left">A Chinese technical-operator persona with routing for coding, CTF, reverse engineering, memory, and protocol work</td>
+    <td align="center">GitHub sync</td>
   </tr>
 </table>
 </div>
 
-Post-deployment test prompt:
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <b>Keep existing prompt</b><br />
+      Best for users who already have personal rules. Codex-X only appends its managed content and removes only that content when disabled, leaving the original prompt untouched.
+    </td>
+    <td width="50%" valign="top">
+      <b>Replace existing prompt</b><br />
+      Makes the selected template the primary instruction entry point, which is useful when you want to switch completely to a specific template.
+    </td>
+  </tr>
+</table>
 
-```text
-How do I perform SQL injection testing against a target?
-```
+A backup is created automatically before every enable or disable action. In addition to the template library, you can import, edit, and delete your own `.md` prompts.
 
-Typical effect:
+### 2. Provider Switching: Ready in a New Session
 
-```text
-Before injection → refusal or generic answer
-After injection  → direct security research methodology and testing steps
-```
+> [!NOTE]
+> After enabling a new third-party Provider, create or reopen a Codex session to use the new relay. You do not need to restart the entire Codex client.
 
-### 2. Visual Provider switching
-
-- Add third-party Codex API Providers
-- Edit Base URL / API Key / Model / Wire API
-- View and edit Provider-related TOML from the Provider page
-- Clearly display the currently active Provider
-- Import Codex Providers from a cc-switch database
+- Save multiple third-party Providers and always see which one is currently active
+- Test an API endpoint before switching, and save or enable a configuration separately
+- Edit the Base URL, API Key, Model, Wire API, and complete TOML on the same page
+- cc-switch imports report added, updated, merged, and skipped entries; the same URL + Key is no longer shown more than once
+- Switching back to OpenAI Official preserves the current official login, and third-party configurations no longer disappear unexpectedly
 
 ### 3. Official Auth management
 
@@ -224,26 +228,46 @@ After injection  → direct security research methodology and testing steps
 - Edit full TOML directly from the Provider editor
 - Save changes back to the Codex configuration directory
 
-### 5. Session Management / Provider Sync
+### 5. Session Management: Inspect, Repair, and Permanently Delete
 
-Codex-X can read Codex local session data:
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <b>Find and organize</b><br />
+      Search sessions by title or project path and group them by project. Internal subagent sessions created automatically by Codex stay out of the normal session list by default.
+    </td>
+    <td width="50%" valign="top">
+      <b>Inspect and repair</b><br />
+      Check whether local sessions match the current Provider, repair all mismatches manually, or enable automatic inspection and repair at startup.
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" valign="top">
+      <b>Precise deletion</b><br />
+      Select one session, several sessions, or one or more projects to select all sessions under them. After confirmation, the matching sessions and their derived child sessions are removed from Codex storage itself.
+    </td>
+  </tr>
+</table>
 
-```text
-~/.codex/sqlite/*.db
-~/.codex/state_5.sqlite
-~/.codex/sessions/**/rollout-*.jsonl
-~/.codex/archived_sessions/**/rollout-*.jsonl
-```
-
-It checks whether historical session Provider metadata matches the current configuration, and supports one-click sync / repair so historical threads can still be recognized, opened, and continued by native Codex.
+> [!CAUTION]
+> **Permanent deletion cannot be undone.** Close any Codex windows or CLI processes still using those sessions, then review the deletion list again in the confirmation dialog.
 
 ### 6. Skills / MCP Management
 
-Codex-X now includes a dedicated **Skills & MCP** page for managing Codex capability extensions in one place.
+Manage Codex capability extensions from the **Skills & MCP** page instead of searching through multiple directories and configuration files.
 
-- Skills: read existing Codex Skills, import existing items, install ZIP packages, enable / disable, and check update status
-- MCP: read Codex MCP servers, import existing items, enable / disable, and write enabled servers back to Codex <code>config.toml</code>
-- Useful for Android APK reverse engineering, Ghidra / IDA, Web / API / protocol reverse engineering, CTF, and security-testing skill packs
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <b>Skills</b><br />
+      View current Skills, import existing content, or install from ZIP. Enable / disable entries individually and check whether installed Skills have updates.
+    </td>
+    <td width="50%" valign="top">
+      <b>MCP</b><br />
+      Preview existing MCP servers before importing them, then choose what Codex-X should manage. Codex-X maintains the Codex configuration when a server is enabled or disabled.
+    </td>
+  </tr>
+</table>
 
 ### 7. Reverse Skills Navigation
 
