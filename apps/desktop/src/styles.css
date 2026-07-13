@@ -1741,7 +1741,7 @@ html, body, #root {
 }
 .session-row {
   display: grid;
-  grid-template-columns: 24px minmax(260px, 1fr) 96px 92px 92px 72px;
+  grid-template-columns: 24px minmax(260px, 1fr) 96px 92px 92px 104px;
   gap: 12px;
   align-items: center;
   min-height: 56px;
@@ -2116,7 +2116,7 @@ html, body, #root {
 }
 .session-column-head,
 .session-row {
-  grid-template-columns: 24px minmax(260px, 1fr) 96px 92px 92px 72px;
+  grid-template-columns: 24px minmax(260px, 1fr) 96px 92px 92px 104px;
   gap: 12px;
 }
 .session-column-head {

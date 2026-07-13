@@ -222,6 +222,9 @@ impl PromptInjectionMode {
 #[serde(rename_all = "camelCase")]
 struct ImportResult {
     imported: usize,
+    added: usize,
+    updated: usize,
+    merged: usize,
     skipped: usize,
     warnings: Vec<String>,
     providers: Vec<SavedProvider>,
@@ -314,6 +317,8 @@ struct SessionSyncStatus {
     mismatched_session_meta: usize,
     sqlite_dbs: usize,
     sqlite_threads: usize,
+    top_level_threads: usize,
+    subagent_threads: usize,
     mismatched_threads: usize,
     needs_sync: bool,
     backup_dir: Option<String>,
@@ -415,6 +420,8 @@ struct RolloutScan {
 struct SqliteScan {
     sqlite_dbs: usize,
     sqlite_threads: usize,
+    top_level_threads: usize,
+    subagent_threads: usize,
     mismatched_threads: usize,
     warnings: Vec<String>,
 }
@@ -446,13 +453,30 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 fn app_home() -> Result<PathBuf> {
-    if let Ok(value) = std::env::var("CODEXX_HOME") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed));
-        }
+    #[cfg(test)]
+    {
+        use std::sync::OnceLock;
+        static TEST_APP_HOME: OnceLock<PathBuf> = OnceLock::new();
+        Ok(TEST_APP_HOME
+            .get_or_init(|| {
+                std::env::temp_dir().join(format!(
+                    "codex-x-test-home-{}-{}",
+                    std::process::id(),
+                    Local::now().timestamp_nanos_opt().unwrap_or_default()
+                ))
+            })
+            .clone())
     }
-    Ok(home_dir()?.join(".codexx"))
+    #[cfg(not(test))]
+    {
+        if let Ok(value) = std::env::var("CODEXX_HOME") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(PathBuf::from(trimmed));
+            }
+        }
+        Ok(home_dir()?.join(".codexx"))
+    }
 }
 
 fn db_path() -> Result<PathBuf> {
@@ -489,7 +513,7 @@ fn open_db() -> Result<Connection> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
     }
-    let conn = Connection::open(&path).map_err(|e| CodexxError::Database(e.to_string()))?;
+    let mut conn = Connection::open(&path).map_err(|e| CodexxError::Database(e.to_string()))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS providers (
             id TEXT PRIMARY KEY,
@@ -581,6 +605,7 @@ fn open_db() -> Result<Connection> {
         [],
     )
     .map_err(|e| CodexxError::Database(e.to_string()))?;
+    merge_duplicate_provider_identities(&mut conn)?;
     Ok(conn)
 }
 
@@ -588,26 +613,153 @@ fn now_rfc3339() -> String {
     Local::now().to_rfc3339()
 }
 
-fn list_saved_providers_inner() -> Result<Vec<SavedProvider>> {
-    let conn = open_db()?;
+#[derive(Debug, Clone)]
+struct StoredProvider {
+    provider: SavedProvider,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ProviderIdentity {
+    Credential([u8; 32]),
+    Unauthenticated { base_url: String, name: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderUpsertMode {
+    Manual,
+    Imported,
+    Detected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderUpsertKind {
+    Added,
+    Updated,
+    Merged,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderUpsertResult {
+    provider: SavedProvider,
+    kind: ProviderUpsertKind,
+}
+
+fn canonical_provider_base_url(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(parsed) = ureq::get(trimmed).request_url() {
+        let url = parsed.as_url();
+        if let Some(host) = url.host_str() {
+            let mut canonical = format!("{}://", url.scheme().to_ascii_lowercase());
+            if !url.username().is_empty() {
+                canonical.push_str(url.username());
+                if let Some(password) = url.password() {
+                    canonical.push(':');
+                    canonical.push_str(password);
+                }
+                canonical.push('@');
+            }
+            if host.contains(':') && !host.starts_with('[') {
+                canonical.push('[');
+                canonical.push_str(&host.to_ascii_lowercase());
+                canonical.push(']');
+            } else {
+                canonical.push_str(&host.to_ascii_lowercase());
+            }
+            if let Some(port) = url.port() {
+                canonical.push(':');
+                canonical.push_str(&port.to_string());
+            }
+            let path = url.path().trim_end_matches('/');
+            if !path.is_empty() {
+                canonical.push_str(path);
+            }
+            if let Some(query) = url.query() {
+                canonical.push('?');
+                canonical.push_str(query);
+            }
+            return canonical;
+        }
+    }
+
+    trimmed.trim_end_matches('/').to_string()
+}
+
+fn provider_identity(provider: &SavedProvider) -> Option<ProviderIdentity> {
+    use sha2::{Digest, Sha256};
+
+    let base_url = canonical_provider_base_url(&provider.base_url);
+    if base_url.is_empty() {
+        return None;
+    }
+    let explicit_api_key = provider
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let toml_api_key = provider.toml_config.as_deref().and_then(|text| {
+        let doc = text.parse::<DocumentMut>().ok()?;
+        let provider_id = doc
+            .get("model_provider")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        experimental_bearer_token_from_doc(&doc, provider_id)
+    });
+    if let Some(api_key) = explicit_api_key.or(toml_api_key.as_deref()) {
+        // Hash the complete endpoint/credential tuple so neither the key nor a
+        // reusable key-only fingerprint is persisted, logged, or sent to the UI.
+        let mut hasher = Sha256::new();
+        hasher.update(b"codex-x/provider-identity/v1\0");
+        hasher.update(base_url.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(api_key.as_bytes());
+        let digest: [u8; 32] = hasher.finalize().into();
+        return Some(ProviderIdentity::Credential(digest));
+    }
+
+    let name = provider
+        .provider_name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    (!name.is_empty()).then_some(ProviderIdentity::Unauthenticated { base_url, name })
+}
+
+fn saved_provider_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedProvider> {
+    Ok(SavedProvider {
+        id: row.get(0)?,
+        provider_name: row.get(1)?,
+        base_url: row.get(2)?,
+        model: row.get(3)?,
+        api_key: row.get(4)?,
+        toml_config: row.get(5)?,
+        wire_api: row.get(6)?,
+        requires_openai_auth: row.get::<_, i64>(7)? != 0,
+    })
+}
+
+fn stored_providers_on_connection(conn: &Connection) -> Result<Vec<StoredProvider>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, provider_name, base_url, model, api_key, toml_config, wire_api, requires_openai_auth
+            "SELECT id, provider_name, base_url, model, api_key, toml_config, wire_api,
+                    requires_openai_auth, created_at, updated_at
              FROM providers
-             ORDER BY created_at ASC, updated_at ASC",
+             ORDER BY created_at ASC, updated_at ASC, id ASC",
         )
         .map_err(|e| CodexxError::Database(e.to_string()))?;
     let rows = stmt
         .query_map([], |row| {
-            Ok(SavedProvider {
-                id: row.get(0)?,
-                provider_name: row.get(1)?,
-                base_url: row.get(2)?,
-                model: row.get(3)?,
-                api_key: row.get(4)?,
-                toml_config: row.get(5)?,
-                wire_api: row.get(6)?,
-                requires_openai_auth: row.get::<_, i64>(7)? != 0,
+            Ok(StoredProvider {
+                provider: saved_provider_from_row(row)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         })
         .map_err(|e| CodexxError::Database(e.to_string()))?;
@@ -619,47 +771,39 @@ fn list_saved_providers_inner() -> Result<Vec<SavedProvider>> {
     Ok(providers)
 }
 
-fn existing_provider_id_by_identity(provider: &SavedProvider) -> Result<Option<String>> {
+fn list_saved_providers_on_connection(conn: &Connection) -> Result<Vec<SavedProvider>> {
+    Ok(stored_providers_on_connection(conn)?
+        .into_iter()
+        .map(|stored| stored.provider)
+        .collect())
+}
+
+fn list_saved_providers_inner() -> Result<Vec<SavedProvider>> {
     let conn = open_db()?;
-    let name = provider.provider_name.trim().to_ascii_lowercase();
-    let base_url = provider
-        .base_url
-        .trim()
-        .trim_end_matches('/')
-        .to_ascii_lowercase();
+    list_saved_providers_on_connection(&conn)
+}
+
+fn provider_by_id_on_connection(conn: &Connection, id: &str) -> Result<Option<SavedProvider>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id FROM providers
-             WHERE lower(trim(provider_name)) = ?1
-               AND lower(rtrim(trim(base_url), '/')) = ?2
-             ORDER BY updated_at DESC, created_at DESC
-             LIMIT 1",
+            "SELECT id, provider_name, base_url, model, api_key, toml_config, wire_api,
+                    requires_openai_auth
+             FROM providers WHERE id = ?1 LIMIT 1",
         )
         .map_err(|e| CodexxError::Database(e.to_string()))?;
-    stmt.query_row(params![name, base_url], |row| row.get(0))
+    stmt.query_row([id], saved_provider_from_row)
         .map(Some)
-        .or_else(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+        .or_else(|error| {
+            if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
                 Ok(None)
             } else {
-                Err(e)
+                Err(error)
             }
         })
         .map_err(|e| CodexxError::Database(e.to_string()))
 }
 
-fn save_imported_provider_inner(mut provider: SavedProvider) -> Result<SavedProvider> {
-    if let Some(existing_id) = existing_provider_id_by_identity(&provider)? {
-        // cc-switch can regenerate provider ids when importing from deep links.
-        // For Codex-X users this should update the existing card/key instead of
-        // creating a visually identical stale duplicate.
-        provider.id = existing_id;
-    }
-    save_provider_inner(provider)
-}
-
-fn save_provider_inner(provider: SavedProvider) -> Result<SavedProvider> {
-    let conn = open_db()?;
+fn write_provider_on_connection(conn: &Connection, provider: &SavedProvider) -> Result<()> {
     let now = now_rfc3339();
     conn.execute(
         "INSERT INTO providers
@@ -687,13 +831,265 @@ fn save_provider_inner(provider: SavedProvider) -> Result<SavedProvider> {
         ],
     )
     .map_err(|e| CodexxError::Database(e.to_string()))?;
+    Ok(())
+}
 
-    // Re-read to return the normalized persisted row.
-    let providers = list_saved_providers_inner()?;
-    providers
-        .into_iter()
-        .find(|p| p.id == provider.id)
-        .ok_or_else(|| CodexxError::Database("provider saved but not found".to_string()))
+fn unique_provider_id_on_connection(conn: &Connection, preferred: &str) -> Result<String> {
+    if provider_by_id_on_connection(conn, preferred)?.is_none() {
+        return Ok(preferred.to_string());
+    }
+    let mut index = 2usize;
+    loop {
+        let candidate = format!("{preferred}-{index}");
+        if provider_by_id_on_connection(conn, &candidate)?.is_none() {
+            return Ok(candidate);
+        }
+        index += 1;
+    }
+}
+
+fn preserve_existing_provider_config(
+    mut incoming: SavedProvider,
+    existing: &SavedProvider,
+) -> SavedProvider {
+    incoming.id = existing.id.clone();
+    if !existing.provider_name.trim().is_empty() {
+        incoming.provider_name = existing.provider_name.clone();
+    }
+    if !existing.base_url.trim().is_empty() {
+        incoming.base_url = existing.base_url.clone();
+    }
+    if !existing.model.trim().is_empty() {
+        incoming.model = existing.model.clone();
+    }
+    if existing
+        .api_key
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        incoming.api_key = existing.api_key.clone();
+    }
+    if existing
+        .toml_config
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        incoming.toml_config = existing.toml_config.clone();
+    }
+    if !existing.wire_api.trim().is_empty() {
+        incoming.wire_api = existing.wire_api.clone();
+    }
+    incoming.requires_openai_auth = existing.requires_openai_auth;
+    incoming
+}
+
+fn upsert_provider_on_connection(
+    conn: &Connection,
+    mut provider: SavedProvider,
+    mode: ProviderUpsertMode,
+) -> Result<ProviderUpsertResult> {
+    let requested_id = provider.id.clone();
+    let identity = provider_identity(&provider);
+    let stored = stored_providers_on_connection(conn)?;
+    let identity_match = identity.as_ref().and_then(|identity| {
+        stored
+            .iter()
+            .find(|candidate| provider_identity(&candidate.provider).as_ref() == Some(identity))
+    });
+    let exact_id_match = stored
+        .iter()
+        .find(|candidate| candidate.provider.id == requested_id);
+
+    let target = match mode {
+        ProviderUpsertMode::Manual => exact_id_match.or(identity_match),
+        ProviderUpsertMode::Imported | ProviderUpsertMode::Detected => identity_match,
+    };
+    let kind = if let Some(target) = target {
+        let existing = &target.provider;
+        let same_id = existing.id == requested_id;
+        provider.id = existing.id.clone();
+        if mode != ProviderUpsertMode::Manual {
+            provider = preserve_existing_provider_config(provider, existing);
+        }
+        if same_id {
+            ProviderUpsertKind::Updated
+        } else {
+            ProviderUpsertKind::Merged
+        }
+    } else {
+        if exact_id_match.is_some() {
+            provider.id = unique_provider_id_on_connection(conn, &provider.id)?;
+        }
+        ProviderUpsertKind::Added
+    };
+
+    write_provider_on_connection(conn, &provider)?;
+    let provider = provider_by_id_on_connection(conn, &provider.id)?
+        .ok_or_else(|| CodexxError::Database("provider saved but not found".to_string()))?;
+    Ok(ProviderUpsertResult { provider, kind })
+}
+
+fn merge_duplicate_provider_identities(conn: &mut Connection) -> Result<usize> {
+    let rows = stored_providers_on_connection(conn)?;
+    let mut groups: HashMap<ProviderIdentity, Vec<StoredProvider>> = HashMap::new();
+    for row in rows {
+        if let Some(identity @ ProviderIdentity::Credential(_)) = provider_identity(&row.provider) {
+            groups.entry(identity).or_default().push(row);
+        }
+    }
+    let duplicate_groups = groups
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .collect::<Vec<_>>();
+    if duplicate_groups.is_empty() {
+        return Ok(0);
+    }
+
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    let mut merged = 0usize;
+    for mut group in duplicate_groups {
+        group.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.provider.id.cmp(&right.provider.id))
+        });
+        let mut survivor = group[0].clone();
+        for duplicate in group.iter().skip(1) {
+            if survivor.provider.provider_name.trim().is_empty()
+                && !duplicate.provider.provider_name.trim().is_empty()
+            {
+                survivor.provider.provider_name = duplicate.provider.provider_name.clone();
+            }
+            if survivor.provider.model.trim().is_empty()
+                && !duplicate.provider.model.trim().is_empty()
+            {
+                survivor.provider.model = duplicate.provider.model.clone();
+            }
+            if survivor
+                .provider
+                .toml_config
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+                && duplicate
+                    .provider
+                    .toml_config
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            {
+                survivor.provider.toml_config = duplicate.provider.toml_config.clone();
+            }
+            if duplicate.updated_at > survivor.updated_at {
+                survivor.updated_at = duplicate.updated_at.clone();
+            }
+        }
+        survivor.provider.base_url = canonical_provider_base_url(&survivor.provider.base_url);
+        survivor.provider.api_key = survivor
+            .provider
+            .api_key
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        transaction
+            .execute(
+                "UPDATE providers SET provider_name = ?2, base_url = ?3, model = ?4,
+                        api_key = ?5, toml_config = ?6, wire_api = ?7,
+                        requires_openai_auth = ?8, updated_at = ?9
+                 WHERE id = ?1",
+                params![
+                    survivor.provider.id,
+                    survivor.provider.provider_name,
+                    survivor.provider.base_url,
+                    survivor.provider.model,
+                    survivor.provider.api_key,
+                    survivor.provider.toml_config,
+                    survivor.provider.wire_api,
+                    if survivor.provider.requires_openai_auth {
+                        1
+                    } else {
+                        0
+                    },
+                    survivor.updated_at,
+                ],
+            )
+            .map_err(|e| CodexxError::Database(e.to_string()))?;
+        for duplicate in group.iter().skip(1) {
+            transaction
+                .execute(
+                    "DELETE FROM providers WHERE id = ?1",
+                    [&duplicate.provider.id],
+                )
+                .map_err(|e| CodexxError::Database(e.to_string()))?;
+            merged += 1;
+        }
+    }
+    transaction
+        .commit()
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    Ok(merged)
+}
+
+fn normalize_saved_provider(provider: SavedProvider) -> Result<SavedProvider> {
+    let raw_id = provider.id.trim();
+    if raw_id.is_empty() {
+        return Err(CodexxError::Config("provider id 不能为空".to_string()));
+    }
+    let normalized = SavedProvider {
+        id: custom_provider_id(raw_id),
+        provider_name: provider.provider_name.trim().to_string(),
+        base_url: canonical_provider_base_url(&provider.base_url),
+        model: provider.model.trim().to_string(),
+        api_key: provider
+            .api_key
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        toml_config: provider
+            .toml_config
+            .map(|value| value.trim_end().to_string())
+            .filter(|value| !value.trim().is_empty()),
+        wire_api: if provider.wire_api.trim().is_empty() {
+            "responses".to_string()
+        } else {
+            provider.wire_api.trim().to_string()
+        },
+        requires_openai_auth: provider.requires_openai_auth,
+    };
+    if normalized.provider_name.is_empty() {
+        return Err(CodexxError::Config("供应商名称不能为空".to_string()));
+    }
+    if normalized.base_url.is_empty() {
+        return Err(CodexxError::Config("base_url 不能为空".to_string()));
+    }
+    if normalized.model.is_empty() {
+        return Err(CodexxError::Config("model 不能为空".to_string()));
+    }
+    Ok(normalized)
+}
+
+fn save_manual_provider_on_connection(
+    conn: &Connection,
+    provider: SavedProvider,
+) -> Result<SavedProvider> {
+    let requested_id = provider.id.trim().to_string();
+    let provider = normalize_saved_provider(provider)?;
+    if requested_id != provider.id && provider_by_id_on_connection(conn, &provider.id)?.is_some() {
+        return Err(CodexxError::Config(format!(
+            "供应商 ID {} 规范化后与现有供应商冲突，请更换名称或 ID",
+            requested_id
+        )));
+    }
+    Ok(upsert_provider_on_connection(conn, provider, ProviderUpsertMode::Manual)?.provider)
+}
+
+fn save_provider_inner(provider: SavedProvider) -> Result<SavedProvider> {
+    let conn = open_db()?;
+    save_manual_provider_on_connection(&conn, provider)
+}
+
+fn save_detected_provider_inner(provider: SavedProvider) -> Result<SavedProvider> {
+    let provider = normalize_saved_provider(provider)?;
+    let conn = open_db()?;
+    Ok(upsert_provider_on_connection(&conn, provider, ProviderUpsertMode::Detected)?.provider)
 }
 
 fn delete_provider_inner(id: &str) -> Result<()> {
@@ -2761,6 +3157,47 @@ struct CcSwitchCodexRow {
     id: String,
     name: String,
     settings_config: String,
+    category: Option<String>,
+}
+
+fn is_official_ccswitch_row(row: &CcSwitchCodexRow) -> bool {
+    row.id.trim().eq_ignore_ascii_case("codex-official")
+        || row
+            .category
+            .as_deref()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("official"))
+}
+
+fn read_ccswitch_codex_rows(conn: &Connection) -> Result<Vec<CcSwitchCodexRow>> {
+    let provider_columns = table_column_set(conn, "providers")?;
+    let category_column = if provider_columns.contains("category") {
+        "category"
+    } else {
+        "NULL"
+    };
+    let provider_query = format!(
+        "SELECT id, name, settings_config, {category_column} FROM providers
+         WHERE app_type = 'codex' ORDER BY sort_index ASC, created_at ASC"
+    );
+    let mut stmt = conn
+        .prepare(&provider_query)
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CcSwitchCodexRow {
+                id: row.get::<_, String>(0)?,
+                name: row.get::<_, String>(1)?,
+                settings_config: row.get::<_, String>(2)?,
+                category: row.get::<_, Option<String>>(3)?,
+            })
+        })
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(|e| CodexxError::Database(e.to_string()))?);
+    }
+    Ok(result)
 }
 
 #[derive(Debug, Clone)]
@@ -3101,27 +3538,13 @@ fn import_ccswitch_codex_providers_inner(path: Option<String>) -> Result<ImportR
         CodexxError::Database(format!("打开 cc-switch 数据库失败 {}: {e}", db.display()))
     })?;
 
-    let mut stmt = conn
-        .prepare("SELECT id, name, settings_config FROM providers WHERE app_type = 'codex' ORDER BY sort_index ASC, created_at ASC")
-        .map_err(|e| CodexxError::Database(e.to_string()))?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(CcSwitchCodexRow {
-                id: row.get::<_, String>(0)?,
-                name: row.get::<_, String>(1)?,
-                settings_config: row.get::<_, String>(2)?,
-            })
-        })
-        .map_err(|e| CodexxError::Database(e.to_string()))?;
-
-    let mut rows_vec = Vec::new();
-    for row in rows {
-        rows_vec.push(row.map_err(|e| CodexxError::Database(e.to_string()))?);
-    }
+    let rows_vec = read_ccswitch_codex_rows(&conn)?;
 
     let mut global_sections: HashMap<String, CcSwitchCodexSection> = HashMap::new();
     for row in &rows_vec {
+        if is_official_ccswitch_row(row) {
+            continue;
+        }
         let Ok(settings) = serde_json::from_str::<Value>(&row.settings_config) else {
             continue;
         };
@@ -3136,13 +3559,38 @@ fn import_ccswitch_codex_providers_inner(path: Option<String>) -> Result<ImportR
     }
 
     let mut imported = 0usize;
+    let mut added = 0usize;
+    let mut updated = 0usize;
+    let mut merged = 0usize;
     let mut skipped = 0usize;
     let mut warnings = Vec::new();
+    let mut local_conn = open_db()?;
+    let transaction = local_conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
 
     for row in rows_vec {
+        if is_official_ccswitch_row(&row) {
+            skipped += 1;
+            warnings.push(format!(
+                "跳过 {} ({})：官方认证不作为第三方供应商导入",
+                row.name, row.id
+            ));
+            continue;
+        }
         match build_ccswitch_codex_provider(&row, &global_sections) {
             Some(provider) => {
-                save_imported_provider_inner(provider)?;
+                let provider = normalize_saved_provider(provider)?;
+                let result = upsert_provider_on_connection(
+                    &transaction,
+                    provider,
+                    ProviderUpsertMode::Imported,
+                )?;
+                match result.kind {
+                    ProviderUpsertKind::Added => added += 1,
+                    ProviderUpsertKind::Updated => updated += 1,
+                    ProviderUpsertKind::Merged => merged += 1,
+                }
                 imported += 1;
             }
             None => {
@@ -3154,12 +3602,19 @@ fn import_ccswitch_codex_providers_inner(path: Option<String>) -> Result<ImportR
             }
         }
     }
+    transaction
+        .commit()
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    let providers = list_saved_providers_on_connection(&local_conn)?;
 
     Ok(ImportResult {
         imported,
+        added,
+        updated,
+        merged,
         skipped,
         warnings,
-        providers: list_saved_providers_inner()?,
+        providers,
     })
 }
 
@@ -3189,6 +3644,94 @@ fn config_path(codex_dir: &Path) -> PathBuf {
 
 fn auth_path(codex_dir: &Path) -> PathBuf {
     codex_dir.join("auth.json")
+}
+
+fn live_auth_api_key(codex_dir: &Path) -> Result<Option<String>> {
+    let path = auth_path(codex_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path).map_err(|e| io_err(&path, e))?;
+    let auth: Value = serde_json::from_str(&text).map_err(|e| json_err(&path, e))?;
+    Ok(auth
+        .get("OPENAI_API_KEY")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToString::to_string))
+}
+
+fn strip_provider_bearer_tokens(doc: &mut DocumentMut) {
+    doc.as_table_mut().remove("experimental_bearer_token");
+    if let Some(providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    {
+        for (_, item) in providers.iter_mut() {
+            if let Some(table) = item.as_table_mut() {
+                table.remove("experimental_bearer_token");
+            }
+        }
+    }
+}
+
+fn detected_live_custom_provider(codex_dir: &Path) -> Result<Option<SavedProvider>> {
+    let cfg = config_path(codex_dir);
+    let text = read_to_string_if_exists(&cfg)?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut doc = parse_toml_document(&cfg, &text)?;
+    let Some(provider_id) = string_value(&doc, "model_provider") else {
+        return Ok(None);
+    };
+    if reserved_codex_provider_id(&provider_id) {
+        return Ok(None);
+    }
+    let Some(model) = string_value(&doc, "model") else {
+        return Ok(None);
+    };
+    let Some(provider_table) = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|providers| providers.get(provider_id.as_str()))
+        .and_then(|item| item.as_table())
+    else {
+        return Ok(None);
+    };
+    let Some(section) = codex_section_from_table(&provider_id, provider_table, Some(model.clone()))
+    else {
+        return Ok(None);
+    };
+
+    let api_key = match experimental_bearer_token_from_doc(&doc, Some(&provider_id)) {
+        Some(api_key) => Some(api_key),
+        None => live_auth_api_key(codex_dir)?,
+    };
+    strip_provider_bearer_tokens(&mut doc);
+    let provider_name = section
+        .name
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| provider_id.clone());
+    let toml_config = doc.to_string().trim_end().to_string();
+
+    Ok(Some(SavedProvider {
+        id: custom_provider_id(&provider_id),
+        provider_name,
+        base_url: section.base_url,
+        model,
+        api_key,
+        toml_config: (!toml_config.is_empty()).then_some(toml_config),
+        wire_api: section.wire_api,
+        requires_openai_auth: section.requires_openai_auth,
+    }))
+}
+
+fn persist_detected_live_custom_provider(codex_dir: &Path) -> Result<()> {
+    if let Some(provider) = detected_live_custom_provider(codex_dir)? {
+        save_detected_provider_inner(provider)?;
+    }
+    Ok(())
 }
 
 fn agents_path(codex_dir: &Path) -> PathBuf {
@@ -4019,6 +4562,89 @@ fn table_column_set(conn: &Connection, table: &str) -> Result<HashSet<String>> {
     Ok(cols)
 }
 
+fn sqlite_subagent_thread_ids(
+    conn: &Connection,
+    thread_cols: &HashSet<String>,
+) -> Result<HashSet<String>> {
+    let mut edge_child_ids = HashSet::new();
+
+    if sqlite_has_table(conn, "thread_spawn_edges")? {
+        let edge_cols = table_column_set(conn, "thread_spawn_edges")?;
+        if edge_cols.contains("child_thread_id") {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT DISTINCT e.child_thread_id
+                     FROM thread_spawn_edges e
+                     INNER JOIN threads t ON t.id = e.child_thread_id",
+                )
+                .map_err(|e| CodexxError::Database(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| CodexxError::Database(e.to_string()))?;
+            for row in rows {
+                edge_child_ids.insert(row.map_err(|e| CodexxError::Database(e.to_string()))?);
+            }
+        }
+    }
+
+    let mut ids = edge_child_ids;
+    if thread_cols.contains("thread_source") || thread_cols.contains("source") {
+        let thread_source_col = sql_select_column(thread_cols, "thread_source", "NULL");
+        let source_col = sql_select_column(thread_cols, "source", "NULL");
+        let query = format!("SELECT \"id\", {thread_source_col}, {source_col} FROM threads");
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|e| CodexxError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(|e| CodexxError::Database(e.to_string()))?;
+        for row in rows {
+            let (id, thread_source, source) =
+                row.map_err(|e| CodexxError::Database(e.to_string()))?;
+            if let Some(thread_source) = thread_source
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if thread_source.eq_ignore_ascii_case("subagent") {
+                    ids.insert(id);
+                } else {
+                    ids.remove(&id);
+                }
+                continue;
+            }
+
+            if let Some(source) = source
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let source_is_subagent = source.eq_ignore_ascii_case("subagent")
+                    || serde_json::from_str::<Value>(source)
+                        .ok()
+                        .is_some_and(|value| {
+                            value
+                                .as_object()
+                                .is_some_and(|object| object.contains_key("subagent"))
+                        });
+                if source_is_subagent {
+                    ids.insert(id);
+                } else {
+                    ids.remove(&id);
+                }
+            }
+        }
+    }
+
+    Ok(ids)
+}
+
 fn scan_sqlite(codex_dir: &Path, target_provider: &str) -> Result<SqliteScan> {
     let mut scan = SqliteScan::default();
     for path in sqlite_candidate_paths(codex_dir) {
@@ -4055,7 +4681,16 @@ fn scan_sqlite(codex_dir: &Path, target_provider: &str) -> Result<SqliteScan> {
                 |row| row.get(0),
             )
             .map_err(|e| CodexxError::Database(e.to_string()))?;
+        let subagent_threads = if cols.contains("id") {
+            sqlite_subagent_thread_ids(&conn, &cols)?
+                .len()
+                .min(total.max(0) as usize)
+        } else {
+            0
+        };
         scan.sqlite_threads += total.max(0) as usize;
+        scan.top_level_threads += (total.max(0) as usize).saturating_sub(subagent_threads);
+        scan.subagent_threads += subagent_threads;
         scan.mismatched_threads += mismatch.max(0) as usize;
     }
     Ok(scan)
@@ -4088,6 +4723,7 @@ fn list_session_previews(
         if !cols.contains("id") {
             continue;
         }
+        let subagent_thread_ids = sqlite_subagent_thread_ids(&conn, &cols)?;
 
         let title_col = sql_select_column(&cols, "title", "NULL");
         let first_message_col = sql_select_column(&cols, "first_user_message", "NULL");
@@ -4111,8 +4747,7 @@ fn list_session_previews(
         };
 
         let query = format!(
-            "SELECT \"id\", {title_col}, {first_message_col}, {preview_col}, {provider_col}, {model_col}, {cwd_col}, {rollout_col}, {updated_ms_col}, {updated_col}, {archived_col}, {has_user_event_col} FROM threads ORDER BY {order_col} DESC LIMIT {}",
-            limit.max(1)
+            "SELECT \"id\", {title_col}, {first_message_col}, {preview_col}, {provider_col}, {model_col}, {cwd_col}, {rollout_col}, {updated_ms_col}, {updated_col}, {archived_col}, {has_user_event_col} FROM threads ORDER BY {order_col} DESC"
         );
         let mut stmt = conn
             .prepare(&query)
@@ -4167,8 +4802,14 @@ fn list_session_previews(
 
         for row in rows {
             let session = row.map_err(|e| CodexxError::Database(e.to_string()))?;
+            if subagent_thread_ids.contains(&session.id) {
+                continue;
+            }
             if seen.insert(session.id.clone()) {
                 sessions.push(session);
+                if sessions.len() >= limit.max(1) {
+                    break;
+                }
             }
         }
     }
@@ -4512,7 +5153,7 @@ fn session_sync_status_inner(
     let target = current_model_provider(&codex_dir, target_provider)?;
     let rollouts = scan_rollouts(&codex_dir, &target, false, None)?;
     let sqlite = scan_sqlite(&codex_dir, &target)?;
-    let session_limit = sqlite.sqlite_threads.max(50).min(1000);
+    let session_limit = sqlite.top_level_threads.max(50).min(1000);
     let (sessions, session_warnings) = list_session_previews(&codex_dir, &target, session_limit)?;
     let mut warnings = rollouts.warnings;
     warnings.extend(sqlite.warnings);
@@ -4526,6 +5167,8 @@ fn session_sync_status_inner(
         mismatched_session_meta: rollouts.mismatched_session_meta,
         sqlite_dbs: sqlite.sqlite_dbs,
         sqlite_threads: sqlite.sqlite_threads,
+        top_level_threads: sqlite.top_level_threads,
+        subagent_threads: sqlite.subagent_threads,
         mismatched_threads: sqlite.mismatched_threads,
         needs_sync: rollouts.mismatched_session_meta > 0 || sqlite.mismatched_threads > 0,
         backup_dir: None,
@@ -4734,6 +5377,75 @@ fn active_session_ids_present(
         }
     }
     Ok(present)
+}
+
+#[derive(Default)]
+struct ActiveSessionStorageSnapshot {
+    all_ids: HashSet<String>,
+    subagent_ids: HashSet<String>,
+    mismatched_ids: HashSet<String>,
+}
+
+fn active_session_storage_snapshot(
+    active_database_paths: &[PathBuf],
+    target_provider: &str,
+) -> Result<ActiveSessionStorageSnapshot> {
+    let mut snapshot = ActiveSessionStorageSnapshot::default();
+    for path in active_database_paths {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| {
+            CodexxError::Database(format!(
+                "准备删除会话时无法读取活动会话库 {}: {error}",
+                path.display()
+            ))
+        })?;
+        if !sqlite_has_table(&conn, "threads")? {
+            return Err(CodexxError::Database(format!(
+                "活动会话库缺少 threads 表: {}",
+                path.display()
+            )));
+        }
+        let cols = table_column_set(&conn, "threads")?;
+        if !cols.contains("id") {
+            return Err(CodexxError::Database(format!(
+                "活动会话库 threads 表缺少 id 字段: {}",
+                path.display()
+            )));
+        }
+
+        let mut ids_stmt = conn
+            .prepare("SELECT id FROM threads")
+            .map_err(|error| CodexxError::Database(error.to_string()))?;
+        let ids = ids_stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| CodexxError::Database(error.to_string()))?;
+        for id in ids {
+            snapshot
+                .all_ids
+                .insert(id.map_err(|error| CodexxError::Database(error.to_string()))?);
+        }
+        snapshot
+            .subagent_ids
+            .extend(sqlite_subagent_thread_ids(&conn, &cols)?);
+
+        if cols.contains("model_provider") {
+            let mut mismatch_stmt = conn
+                .prepare("SELECT id FROM threads WHERE COALESCE(model_provider, '') <> ?1")
+                .map_err(|error| CodexxError::Database(error.to_string()))?;
+            let mismatches = mismatch_stmt
+                .query_map([target_provider], |row| row.get::<_, String>(0))
+                .map_err(|error| CodexxError::Database(error.to_string()))?;
+            for id in mismatches {
+                snapshot
+                    .mismatched_ids
+                    .insert(id.map_err(|error| CodexxError::Database(error.to_string()))?);
+            }
+        }
+    }
+    Ok(snapshot)
 }
 
 #[cfg(test)]
@@ -5464,6 +6176,8 @@ fn delete_codex_sessions_inner(input: SessionDeleteInput) -> Result<SessionDelet
     }
     let verification_ids = expected_ids.clone();
     let status_before = session_sync_status_inner(Some(codex_dir.display().to_string()), None)?;
+    let storage_before =
+        active_session_storage_snapshot(&active_database_paths, &status_before.target_provider)?;
     // Validate and collect every filesystem target before the official API can
     // make the deletion irreversible.
     let expected_rollout_paths = selected_rollout_paths(&codex_dir, &expected_ids)?;
@@ -5528,17 +6242,27 @@ fn delete_codex_sessions_inner(input: SessionDeleteInput) -> Result<SessionDelet
             let message = format!("删除后刷新会话状态失败: {error}");
             counts.errors.push(message.clone());
             let mut fallback = status_before;
-            let deleted_mismatched = fallback
-                .sessions
-                .iter()
-                .filter(|item| counts.deleted_ids.contains(&item.id) && item.needs_sync)
+            let deleted_active_ids = counts
+                .deleted_ids
+                .intersection(&storage_before.all_ids)
+                .cloned()
+                .collect::<HashSet<_>>();
+            let deleted_mismatched = deleted_active_ids
+                .intersection(&storage_before.mismatched_ids)
                 .count();
+            let deleted_subagents = deleted_active_ids
+                .intersection(&storage_before.subagent_ids)
+                .count();
+            let deleted_top_level = deleted_active_ids.len().saturating_sub(deleted_subagents);
             fallback
                 .sessions
                 .retain(|item| !counts.deleted_ids.contains(&item.id));
             fallback.sqlite_threads = fallback
                 .sqlite_threads
-                .saturating_sub(counts.deleted_ids.len());
+                .saturating_sub(deleted_active_ids.len());
+            fallback.top_level_threads =
+                fallback.top_level_threads.saturating_sub(deleted_top_level);
+            fallback.subagent_threads = fallback.subagent_threads.saturating_sub(deleted_subagents);
             fallback.mismatched_threads = fallback
                 .mismatched_threads
                 .saturating_sub(deleted_mismatched);
@@ -6051,39 +6775,7 @@ async fn list_saved_providers() -> Result<Vec<SavedProvider>> {
 }
 
 fn save_provider_command_inner(provider: SavedProvider) -> Result<SavedProvider> {
-    let normalized = SavedProvider {
-        id: custom_provider_id(&provider.id),
-        provider_name: provider.provider_name.trim().to_string(),
-        base_url: provider.base_url.trim().trim_end_matches('/').to_string(),
-        model: provider.model.trim().to_string(),
-        api_key: provider
-            .api_key
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        toml_config: provider
-            .toml_config
-            .map(|s| s.trim_end().to_string())
-            .filter(|s| !s.trim().is_empty()),
-        wire_api: if provider.wire_api.trim().is_empty() {
-            "responses".to_string()
-        } else {
-            provider.wire_api.trim().to_string()
-        },
-        requires_openai_auth: provider.requires_openai_auth,
-    };
-    if normalized.id.is_empty() {
-        return Err(CodexxError::Config("provider id 不能为空".to_string()));
-    }
-    if normalized.provider_name.is_empty() {
-        return Err(CodexxError::Config("供应商名称不能为空".to_string()));
-    }
-    if normalized.base_url.is_empty() {
-        return Err(CodexxError::Config("base_url 不能为空".to_string()));
-    }
-    if normalized.model.is_empty() {
-        return Err(CodexxError::Config("model 不能为空".to_string()));
-    }
-    save_provider_inner(normalized)
+    save_provider_inner(provider)
 }
 
 #[tauri::command]
@@ -6173,7 +6865,15 @@ fn apply_official_config(
     })
 }
 
-fn switch_official_provider_inner(config_dir: Option<String>) -> Result<ActionResult> {
+fn switch_official_provider_with_pre_persist<F>(
+    config_dir: Option<String>,
+    pre_persist: F,
+) -> Result<ActionResult>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    let codex_dir = resolve_codex_dir(config_dir.clone())?;
+    pre_persist(&codex_dir)?;
     // Switching to official must not overwrite auth.json with a stale cc-switch
     // ChatGPT token. Codex desktop/CLI owns the live official login flow; after
     // the user logs in, Codex-X should simply refresh and display ~/.codex/auth.json.
@@ -6184,6 +6884,10 @@ fn switch_official_provider_inner(config_dir: Option<String>) -> Result<ActionRe
         "switch-official",
         "已切换到 OpenAI Official（auth.json 保持当前 live 状态）",
     )
+}
+
+fn switch_official_provider_inner(config_dir: Option<String>) -> Result<ActionResult> {
+    switch_official_provider_with_pre_persist(config_dir, persist_detected_live_custom_provider)
 }
 
 #[tauri::command]
@@ -6386,9 +7090,16 @@ async fn disable_external_instruction(config_dir: Option<String>) -> Result<Acti
         .map_err(|e| CodexxError::Config(format!("禁用外部提示词失败: {e}")))?
 }
 
-fn save_provider_toml_config_inner(input: ProviderTomlInput) -> Result<ActionResult> {
+fn save_provider_toml_config_with_pre_persist<F>(
+    input: ProviderTomlInput,
+    pre_persist: F,
+) -> Result<ActionResult>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
     let codex_dir = resolve_codex_dir(input.config_dir.clone())?;
     fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
+    pre_persist(&codex_dir)?;
     let cfg = config_path(&codex_dir);
     let auth = auth_path(&codex_dir);
     let backup_id = create_backup(&codex_dir, "save-provider-toml")?;
@@ -6431,6 +7142,10 @@ fn save_provider_toml_config_inner(input: ProviderTomlInput) -> Result<ActionRes
         backup_id,
         state,
     })
+}
+
+fn save_provider_toml_config_inner(input: ProviderTomlInput) -> Result<ActionResult> {
+    save_provider_toml_config_with_pre_persist(input, persist_detected_live_custom_provider)
 }
 
 #[tauri::command]
@@ -6539,9 +7254,13 @@ async fn test_provider_connection(
         .map_err(|e| CodexxError::Config(format!("测试连接失败: {e}")))?
 }
 
-fn switch_provider_inner(input: ProviderInput) -> Result<ActionResult> {
+fn switch_provider_with_pre_persist<F>(input: ProviderInput, pre_persist: F) -> Result<ActionResult>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
     let codex_dir = resolve_codex_dir(input.config_dir.clone())?;
     fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
+    pre_persist(&codex_dir)?;
     let cfg = config_path(&codex_dir);
     let auth = auth_path(&codex_dir);
     let backup_id = create_backup(&codex_dir, "switch-provider")?;
@@ -6580,15 +7299,18 @@ fn switch_provider_inner(input: ProviderInput) -> Result<ActionResult> {
     provider_table["wire_api"] = value(input.wire_api.unwrap_or_else(|| "responses".to_string()));
     provider_table["requires_openai_auth"] = value(input.requires_openai_auth.unwrap_or(true));
 
-    // Do not put the API key into config.toml by default. cc-switch stores the
-    // third-party key in auth.json, which is what Codex's current desktop/CLI
-    // builds reliably consume for custom providers.
-    write_text(&cfg, &doc.to_string())?;
-
     let api_key = input
         .api_key
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    if let Some(api_key) = api_key.as_deref() {
+        // New threads reload config.toml, while a running app-server may retain
+        // the auth.json credential it loaded at startup. The provider-scoped
+        // token makes provider switches effective without restarting Codex.
+        set_provider_bearer_token(&mut doc, api_key);
+    }
+    write_text(&cfg, &doc.to_string())?;
+
     if let Some(api_key) = api_key {
         let auth_value = json!({
             "OPENAI_API_KEY": api_key,
@@ -6604,6 +7326,10 @@ fn switch_provider_inner(input: ProviderInput) -> Result<ActionResult> {
         backup_id,
         state,
     })
+}
+
+fn switch_provider_inner(input: ProviderInput) -> Result<ActionResult> {
+    switch_provider_with_pre_persist(input, persist_detected_live_custom_provider)
 }
 
 #[tauri::command]
@@ -6772,6 +7498,444 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("create temp codex dir");
         dir
+    }
+
+    fn provider_test_connection() -> Connection {
+        let conn = Connection::open_in_memory().expect("open provider test database");
+        conn.execute_batch(
+            "CREATE TABLE providers (
+                id TEXT PRIMARY KEY,
+                provider_name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_key TEXT,
+                toml_config TEXT,
+                wire_api TEXT NOT NULL DEFAULT 'responses',
+                requires_openai_auth INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .expect("create providers table");
+        conn
+    }
+
+    fn provider_fixture(
+        id: &str,
+        name: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+        model: &str,
+        toml_config: Option<&str>,
+    ) -> SavedProvider {
+        SavedProvider {
+            id: id.to_string(),
+            provider_name: name.to_string(),
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            api_key: api_key.map(ToString::to_string),
+            toml_config: toml_config.map(ToString::to_string),
+            wire_api: "responses".to_string(),
+            requires_openai_auth: true,
+        }
+    }
+
+    fn seed_provider(
+        conn: &Connection,
+        provider: &SavedProvider,
+        created_at: &str,
+        updated_at: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO providers
+                (id, provider_name, base_url, model, api_key, toml_config, wire_api,
+                 requires_openai_auth, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                provider.id,
+                provider.provider_name,
+                provider.base_url,
+                provider.model,
+                provider.api_key,
+                provider.toml_config,
+                provider.wire_api,
+                if provider.requires_openai_auth { 1 } else { 0 },
+                created_at,
+                updated_at,
+            ],
+        )
+        .expect("seed provider");
+    }
+
+    #[test]
+    fn provider_base_url_canonicalization_preserves_path_case() {
+        assert_eq!(
+            canonical_provider_base_url("  HTTP://Example.COM:80/V1///  "),
+            "http://example.com/V1"
+        );
+        assert_eq!(
+            canonical_provider_base_url("https://EXAMPLE.com:443/v1/#ignored"),
+            "https://example.com/v1"
+        );
+        assert_eq!(
+            canonical_provider_base_url("https://example.com:8443/V1/?Region=US#ignored"),
+            "https://example.com:8443/V1?Region=US"
+        );
+    }
+
+    #[test]
+    fn provider_identity_uses_url_and_effective_credential_not_model_or_name() {
+        let direct = provider_fixture(
+            "direct",
+            "Magic AI",
+            "https://EXAMPLE.com:443/v1/",
+            Some("sk-same"),
+            "gpt-5.6-sol",
+            None,
+        );
+        let toml = provider_fixture(
+            "toml",
+            "Renamed Provider",
+            "https://example.com/v1",
+            None,
+            "gpt-5.5",
+            Some(
+                r#"model_provider = "custom"
+[model_providers.custom]
+experimental_bearer_token = "sk-same"
+"#,
+            ),
+        );
+        let different_key = provider_fixture(
+            "different",
+            "Magic AI",
+            "https://example.com/v1",
+            Some("sk-other"),
+            "gpt-5.5",
+            None,
+        );
+        assert_eq!(provider_identity(&direct), provider_identity(&toml));
+        assert_ne!(
+            provider_identity(&direct),
+            provider_identity(&different_key)
+        );
+
+        let anonymous_a = provider_fixture(
+            "anonymous-a",
+            "  Acme\u{2003}API  ",
+            "https://example.com/v1/",
+            None,
+            "one",
+            None,
+        );
+        let anonymous_b = provider_fixture(
+            "anonymous-b",
+            "acme api",
+            "https://EXAMPLE.com/v1",
+            None,
+            "two",
+            None,
+        );
+        assert_eq!(
+            provider_identity(&anonymous_a),
+            provider_identity(&anonymous_b)
+        );
+    }
+
+    #[test]
+    fn manual_provider_save_upserts_same_url_and_key_but_keeps_different_keys() {
+        let conn = provider_test_connection();
+        let first = normalize_saved_provider(provider_fixture(
+            "first",
+            "First Name",
+            "https://example.com/v1/",
+            Some("sk-same"),
+            "model-a",
+            None,
+        ))
+        .expect("normalize first");
+        let added = upsert_provider_on_connection(&conn, first, ProviderUpsertMode::Manual)
+            .expect("add first");
+        assert_eq!(added.kind, ProviderUpsertKind::Added);
+
+        let renamed = normalize_saved_provider(provider_fixture(
+            "second",
+            "Second Name",
+            "HTTPS://EXAMPLE.COM:443/v1",
+            Some("sk-same"),
+            "model-b",
+            None,
+        ))
+        .expect("normalize renamed");
+        let merged = upsert_provider_on_connection(&conn, renamed, ProviderUpsertMode::Manual)
+            .expect("merge same identity");
+        assert_eq!(merged.kind, ProviderUpsertKind::Merged);
+        assert_eq!(merged.provider.id, "first");
+        assert_eq!(merged.provider.provider_name, "Second Name");
+        assert_eq!(merged.provider.model, "model-b");
+
+        let other_key = normalize_saved_provider(provider_fixture(
+            "third",
+            "Second Name",
+            "https://example.com/v1",
+            Some("sk-other"),
+            "model-b",
+            None,
+        ))
+        .expect("normalize other key");
+        let second_add =
+            upsert_provider_on_connection(&conn, other_key, ProviderUpsertMode::Manual)
+                .expect("keep different credential");
+        assert_eq!(second_add.kind, ProviderUpsertKind::Added);
+        assert_eq!(list_saved_providers_on_connection(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn imported_provider_merge_preserves_existing_local_profile_and_toml() {
+        let conn = provider_test_connection();
+        let local_toml = r#"model_provider = "custom"
+model = "local-model"
+[model_providers.custom]
+base_url = "https://example.com/v1"
+experimental_bearer_token = "sk-same"
+"#;
+        let local = normalize_saved_provider(provider_fixture(
+            "local",
+            "Local Name",
+            "https://example.com/v1",
+            Some("sk-same"),
+            "local-model",
+            Some(local_toml),
+        ))
+        .expect("normalize local");
+        upsert_provider_on_connection(&conn, local, ProviderUpsertMode::Manual)
+            .expect("save local");
+
+        let imported = normalize_saved_provider(provider_fixture(
+            "cc-switch-id",
+            "CC Name",
+            "https://EXAMPLE.com:443/v1/",
+            Some("sk-same"),
+            "cc-model",
+            None,
+        ))
+        .expect("normalize import");
+        let result =
+            upsert_provider_on_connection(&conn, imported.clone(), ProviderUpsertMode::Imported)
+                .expect("merge import");
+        assert_eq!(result.kind, ProviderUpsertKind::Merged);
+        assert_eq!(result.provider.id, "local");
+        assert_eq!(result.provider.provider_name, "Local Name");
+        assert_eq!(result.provider.model, "local-model");
+        assert_eq!(
+            result.provider.toml_config.as_deref(),
+            Some(local_toml.trim_end())
+        );
+        assert_eq!(list_saved_providers_on_connection(&conn).unwrap().len(), 1);
+
+        let repeated = upsert_provider_on_connection(&conn, imported, ProviderUpsertMode::Imported)
+            .expect("repeat identical import");
+        assert_eq!(repeated.provider.id, "local");
+        assert_eq!(
+            repeated.provider.toml_config.as_deref(),
+            Some(local_toml.trim_end())
+        );
+        assert_eq!(list_saved_providers_on_connection(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn provider_migration_merges_only_exact_nonempty_credentials() {
+        let mut conn = provider_test_connection();
+        let first = provider_fixture(
+            "first-id",
+            "Local Name",
+            "HTTPS://EXAMPLE.com:443/v1/",
+            Some("sk-same"),
+            "local-model",
+            None,
+        );
+        let duplicate = provider_fixture(
+            "later-id",
+            "Imported Name",
+            "https://example.com/v1",
+            Some("sk-same"),
+            "imported-model",
+            Some("local preserved toml"),
+        );
+        let different_key = provider_fixture(
+            "different-key",
+            "Local Name",
+            "https://example.com/v1",
+            Some("sk-other"),
+            "other-model",
+            None,
+        );
+        let anonymous_a = provider_fixture(
+            "anonymous-a",
+            "No Key",
+            "https://example.com/v1",
+            None,
+            "one",
+            None,
+        );
+        let anonymous_b = provider_fixture(
+            "anonymous-b",
+            " no   key ",
+            "https://example.com/v1/",
+            None,
+            "two",
+            None,
+        );
+        seed_provider(
+            &conn,
+            &first,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        seed_provider(
+            &conn,
+            &duplicate,
+            "2026-02-01T00:00:00Z",
+            "2026-02-01T00:00:00Z",
+        );
+        seed_provider(
+            &conn,
+            &different_key,
+            "2026-03-01T00:00:00Z",
+            "2026-03-01T00:00:00Z",
+        );
+        seed_provider(
+            &conn,
+            &anonymous_a,
+            "2026-04-01T00:00:00Z",
+            "2026-04-01T00:00:00Z",
+        );
+        seed_provider(
+            &conn,
+            &anonymous_b,
+            "2026-05-01T00:00:00Z",
+            "2026-05-01T00:00:00Z",
+        );
+
+        assert_eq!(merge_duplicate_provider_identities(&mut conn).unwrap(), 1);
+        let rows = list_saved_providers_on_connection(&conn).unwrap();
+        assert_eq!(rows.len(), 4);
+        let survivor = rows.iter().find(|row| row.id == "first-id").unwrap();
+        assert_eq!(survivor.provider_name, "Local Name");
+        assert_eq!(survivor.model, "local-model");
+        assert_eq!(
+            survivor.toml_config.as_deref(),
+            Some("local preserved toml")
+        );
+        assert!(rows.iter().any(|row| row.id == "different-key"));
+        assert!(rows.iter().any(|row| row.id == "anonymous-a"));
+        assert!(rows.iter().any(|row| row.id == "anonymous-b"));
+        assert!(!rows.iter().any(|row| row.id == "later-id"));
+    }
+
+    #[test]
+    fn provider_slug_collision_does_not_overwrite_an_unrelated_id() {
+        let conn = provider_test_connection();
+        let existing = provider_fixture(
+            "collision-id",
+            "Existing",
+            "https://first.example/v1",
+            Some("sk-first"),
+            "first",
+            None,
+        );
+        seed_provider(
+            &conn,
+            &existing,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        let collision = provider_fixture(
+            "Collision ID",
+            "Unrelated",
+            "https://second.example/v1",
+            Some("sk-second"),
+            "second",
+            None,
+        );
+        assert!(save_manual_provider_on_connection(&conn, collision).is_err());
+        let stored = provider_by_id_on_connection(&conn, "collision-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.provider_name, "Existing");
+        assert_eq!(stored.base_url, "https://first.example/v1");
+        assert_eq!(list_saved_providers_on_connection(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn detected_provider_id_collision_gets_a_unique_id() {
+        let conn = provider_test_connection();
+        let existing = normalize_saved_provider(provider_fixture(
+            "custom",
+            "Existing",
+            "https://first.example/v1",
+            Some("sk-first"),
+            "first",
+            None,
+        ))
+        .unwrap();
+        upsert_provider_on_connection(&conn, existing, ProviderUpsertMode::Manual).unwrap();
+        let detected = normalize_saved_provider(provider_fixture(
+            "custom",
+            "Detected",
+            "https://second.example/v1",
+            Some("sk-second"),
+            "second",
+            None,
+        ))
+        .unwrap();
+        let result = upsert_provider_on_connection(&conn, detected, ProviderUpsertMode::Detected)
+            .expect("save collision safely");
+        assert_eq!(result.kind, ProviderUpsertKind::Added);
+        assert_eq!(result.provider.id, "custom-2");
+        assert_eq!(list_saved_providers_on_connection(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn ccswitch_row_reader_supports_legacy_schema_without_category() {
+        let conn = Connection::open_in_memory().expect("open legacy cc-switch database");
+        conn.execute_batch(
+            "CREATE TABLE providers (
+                id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                settings_config TEXT NOT NULL,
+                sort_index INTEGER,
+                created_at INTEGER,
+                PRIMARY KEY (id, app_type)
+            );
+            INSERT INTO providers (id, app_type, name, settings_config, sort_index, created_at)
+            VALUES ('legacy', 'codex', 'Legacy', '{}', 0, 1);",
+        )
+        .expect("seed legacy cc-switch database");
+        let rows = read_ccswitch_codex_rows(&conn).expect("read legacy rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "legacy");
+        assert_eq!(rows[0].category, None);
+
+        let official = CcSwitchCodexRow {
+            id: "codex-official".to_string(),
+            name: "OpenAI Official".to_string(),
+            settings_config: "{}".to_string(),
+            category: None,
+        };
+        assert!(is_official_ccswitch_row(&official));
+    }
+
+    #[test]
+    fn test_app_home_is_stable_and_does_not_use_real_codexx_home() {
+        let first = app_home().expect("resolve test app home");
+        let second = app_home().expect("resolve test app home again");
+        let real = home_dir().expect("resolve real home").join(".codexx");
+
+        assert_eq!(first, second);
+        assert_ne!(first, real);
+        assert!(first.starts_with(std::env::temp_dir()));
     }
 
     #[test]
@@ -7231,7 +8395,7 @@ description: Keep long investigations aligned.
     }
 
     #[test]
-    fn switch_provider_writes_ccswitch_custom_provider_and_api_key_auth_mode() {
+    fn switch_provider_writes_scoped_bearer_and_api_key_auth_mode() {
         let codex_dir = temp_codex_dir("switch-provider");
         let result = switch_provider_inner(ProviderInput {
             config_dir: Some(codex_dir.display().to_string()),
@@ -7254,7 +8418,14 @@ description: Keep long investigations aligned.
         assert!(config_text.contains("name = \"MagicAI\""));
         assert!(config_text.contains("base_url = \"https://example.com/v1\""));
         assert!(config_text.contains("requires_openai_auth = true"));
-        assert!(!config_text.contains("experimental_bearer_token = \"sk-test\""));
+        let config_doc = config_text
+            .parse::<DocumentMut>()
+            .expect("parse switched config");
+        assert_eq!(
+            config_doc["model_providers"]["custom"]["experimental_bearer_token"].as_str(),
+            Some("sk-test")
+        );
+        assert!(config_doc.get("experimental_bearer_token").is_none());
 
         let auth_text = fs::read_to_string(auth_path(&codex_dir)).expect("read auth");
         let auth: Value = serde_json::from_str(&auth_text).expect("parse auth");
@@ -7266,6 +8437,68 @@ description: Keep long investigations aligned.
             auth.get("auth_mode").and_then(Value::as_str),
             Some("apikey")
         );
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn switch_provider_persists_detected_custom_before_overwrite() {
+        let codex_dir = temp_codex_dir("switch-provider-persist-current");
+        write_text(
+            &config_path(&codex_dir),
+            r#"model_provider = "custom"
+model = "model-a"
+
+[model_providers.custom]
+name = "Provider A"
+base_url = "https://a.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "sk-a-scoped"
+"#,
+        )
+        .expect("write provider A config");
+        write_text(&auth_path(&codex_dir), "{ invalid auth")
+            .expect("write malformed provider A auth");
+
+        let persisted = std::cell::RefCell::new(None);
+        let result = switch_provider_with_pre_persist(
+            ProviderInput {
+                config_dir: Some(codex_dir.display().to_string()),
+                _provider_id: Some("provider-b".to_string()),
+                provider_name: "Provider B".to_string(),
+                base_url: "https://b.example.com/v1".to_string(),
+                model: "model-b".to_string(),
+                api_key: Some("sk-b".to_string()),
+                wire_api: Some("responses".to_string()),
+                requires_openai_auth: Some(false),
+            },
+            |dir| {
+                *persisted.borrow_mut() = detected_live_custom_provider(dir)?;
+                Ok(())
+            },
+        )
+        .expect("switch to provider B");
+
+        let provider_a = persisted.into_inner().expect("provider A persisted");
+        assert_eq!(provider_a.provider_name, "Provider A");
+        assert_eq!(provider_a.base_url, "https://a.example.com/v1");
+        assert_eq!(provider_a.model, "model-a");
+        assert_eq!(provider_a.api_key.as_deref(), Some("sk-a-scoped"));
+        assert!(!provider_a
+            .toml_config
+            .as_deref()
+            .unwrap_or_default()
+            .contains("experimental_bearer_token"));
+        assert_eq!(result.state.model.as_deref(), Some("model-b"));
+        assert!(result
+            .state
+            .config_text
+            .contains("https://b.example.com/v1"));
+        assert!(!result
+            .state
+            .config_text
+            .contains("https://a.example.com/v1"));
 
         let _ = fs::remove_dir_all(codex_dir);
     }
@@ -7290,6 +8523,51 @@ description: Keep long investigations aligned.
         assert!(config_text.contains("model_provider = \"custom\""));
         assert!(config_text.contains("[model_providers.custom]"));
         assert!(!config_text.contains("[model_providers.openai]"));
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn switch_official_persists_detected_custom_before_overwrite() {
+        let codex_dir = temp_codex_dir("switch-official-persist-current");
+        write_text(
+            &config_path(&codex_dir),
+            r#"model_provider = "custom"
+model = "model-a"
+
+[model_providers.custom]
+name = "Provider A"
+base_url = "https://a.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+        )
+        .expect("write provider A config");
+        write_json(
+            &auth_path(&codex_dir),
+            &json!({"OPENAI_API_KEY": "sk-a-auth", "auth_mode": "apikey"}),
+        )
+        .expect("write provider A auth");
+
+        let persisted = std::cell::RefCell::new(None);
+        let result = switch_official_provider_with_pre_persist(
+            Some(codex_dir.display().to_string()),
+            |dir| {
+                *persisted.borrow_mut() = detected_live_custom_provider(dir)?;
+                Ok(())
+            },
+        )
+        .expect("switch to official");
+
+        let provider_a = persisted.into_inner().expect("provider A persisted");
+        assert_eq!(provider_a.provider_name, "Provider A");
+        assert_eq!(provider_a.base_url, "https://a.example.com/v1");
+        assert_eq!(provider_a.api_key.as_deref(), Some("sk-a-auth"));
+        assert_eq!(result.state.model_provider.as_deref(), Some("openai"));
+        assert!(!result
+            .state
+            .config_text
+            .contains("https://a.example.com/v1"));
 
         let _ = fs::remove_dir_all(codex_dir);
     }
@@ -7366,6 +8644,7 @@ experimental_bearer_token = "sk-from-config"
             id: "openai".to_string(),
             name: "Proxy".to_string(),
             settings_config,
+            category: None,
         };
         let provider = build_ccswitch_codex_provider(&row, &HashMap::new()).expect("provider");
         assert_eq!(provider.id, "openai-custom");
@@ -7391,6 +8670,7 @@ requires_openai_auth = true
 "#,
             })
             .to_string(),
+            category: None,
         };
         let magic_row = CcSwitchCodexRow {
             id: "magicai-1782956845071".to_string(),
@@ -7414,6 +8694,7 @@ requires_openai_auth = true
 "#,
             })
             .to_string(),
+            category: None,
         };
 
         let mut sections = HashMap::new();
@@ -7461,6 +8742,68 @@ requires_openai_auth = false
         let config_text = fs::read_to_string(config_path(&codex_dir)).expect("read config");
         assert!(config_text.contains("[model_providers.proxy]"));
         assert!(config_text.contains("experimental_bearer_token = \"sk-provider-table\""));
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn save_provider_toml_persists_detected_custom_before_overwrite() {
+        let codex_dir = temp_codex_dir("save-provider-toml-persist-current");
+        write_text(
+            &config_path(&codex_dir),
+            r#"model_provider = "custom"
+model = "model-a"
+
+[model_providers.custom]
+name = "Provider A"
+base_url = "https://a.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "sk-a"
+"#,
+        )
+        .expect("write provider A config");
+
+        let persisted = std::cell::RefCell::new(None);
+        let result = save_provider_toml_config_with_pre_persist(
+            ProviderTomlInput {
+                config_dir: Some(codex_dir.display().to_string()),
+                config_text: r#"model_provider = "custom"
+model = "model-b"
+
+[model_providers.custom]
+name = "Provider B"
+base_url = "https://b.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = false
+"#
+                .to_string(),
+                api_key: Some("sk-b".to_string()),
+            },
+            |dir| {
+                *persisted.borrow_mut() = detected_live_custom_provider(dir)?;
+                Ok(())
+            },
+        )
+        .expect("save provider B toml");
+
+        let provider_a = persisted.into_inner().expect("provider A persisted");
+        assert_eq!(provider_a.provider_name, "Provider A");
+        assert_eq!(provider_a.base_url, "https://a.example.com/v1");
+        assert_eq!(provider_a.api_key.as_deref(), Some("sk-a"));
+        assert_eq!(result.state.model.as_deref(), Some("model-b"));
+        assert!(result
+            .state
+            .config_text
+            .contains("https://b.example.com/v1"));
+        assert!(result
+            .state
+            .config_text
+            .contains("experimental_bearer_token = \"sk-b\""));
+        assert!(!result
+            .state
+            .config_text
+            .contains("https://a.example.com/v1"));
 
         let _ = fs::remove_dir_all(codex_dir);
     }
@@ -7566,6 +8909,84 @@ requires_openai_auth = false
         assert_eq!(
             active_session_ids_present(&[database], &ids).expect("verify active database"),
             HashSet::from([present_id.to_string()])
+        );
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn session_previews_hide_subagents_without_deduplicating_root_titles() {
+        let codex_dir = temp_codex_dir("session-preview-subagents");
+        let database = codex_dir.join("state_5.sqlite");
+        let root_a = "019f6000-0000-7000-8000-000000000001";
+        let root_b = "019f6000-0000-7000-8000-000000000002";
+        let child = "019f6000-0000-7000-8000-000000000003";
+        let orphan_subagent = "019f6000-0000-7000-8000-000000000004";
+        let forked_user = "019f6000-0000-7000-8000-000000000005";
+        let rollout = codex_dir.join("sessions/rollout.jsonl");
+        seed_thread_database(
+            &database,
+            &[
+                (root_a, &rollout),
+                (root_b, &rollout),
+                (child, &rollout),
+                (forked_user, &rollout),
+            ],
+            Some((root_a, child)),
+        );
+        let conn = Connection::open(&database).expect("open thread database");
+        conn.execute_batch(
+            "ALTER TABLE threads ADD COLUMN title TEXT;
+             ALTER TABLE threads ADD COLUMN source TEXT;
+             ALTER TABLE threads ADD COLUMN thread_source TEXT;
+             UPDATE threads SET title = 'same title';",
+        )
+        .expect("extend thread schema");
+        conn.execute(
+            "UPDATE threads SET thread_source = 'subagent' WHERE id = ?1",
+            [child],
+        )
+        .expect("mark child subagent");
+        conn.execute(
+            "UPDATE threads SET thread_source = 'user' WHERE id = ?1",
+            [forked_user],
+        )
+        .expect("mark forked user thread");
+        conn.execute(
+            "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id) VALUES (?1, ?2)",
+            (root_a, forked_user),
+        )
+        .expect("insert user fork edge");
+        conn.execute(
+            "INSERT INTO threads (id, model_provider, rollout_path, title, source)
+             VALUES (?1, 'openai', ?2, 'same title', ?3)",
+            params![
+                orphan_subagent,
+                rollout.display().to_string(),
+                r#"{"subagent":{"thread_spawn":{"depth":1}}}"#
+            ],
+        )
+        .expect("insert source-marked subagent");
+        drop(conn);
+
+        let scan = scan_sqlite(&codex_dir, "openai").expect("scan sqlite");
+        assert_eq!(scan.sqlite_threads, 5);
+        assert_eq!(scan.top_level_threads, 3);
+        assert_eq!(scan.subagent_threads, 2);
+
+        let (previews, warnings) =
+            list_session_previews(&codex_dir, "openai", 50).expect("list previews");
+        assert!(warnings.is_empty());
+        assert_eq!(
+            previews
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                root_a.to_string(),
+                root_b.to_string(),
+                forked_user.to_string()
+            ])
         );
 
         let _ = fs::remove_dir_all(codex_dir);

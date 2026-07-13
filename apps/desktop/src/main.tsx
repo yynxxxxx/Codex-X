@@ -132,6 +132,9 @@ type ActionResult = {
 
 type ImportResult = {
   imported: number;
+  added: number;
+  updated: number;
+  merged: number;
   skipped: number;
   warnings: string[];
   providers: SavedProvider[];
@@ -178,6 +181,8 @@ type SessionSyncStatus = {
   mismatchedSessionMeta: number;
   sqliteDbs: number;
   sqliteThreads: number;
+  topLevelThreads: number;
+  subagentThreads: number;
   mismatchedThreads: number;
   needsSync: boolean;
   backupDir?: string | null;
@@ -674,6 +679,81 @@ function extractOpenAiApiKey(authText?: string) {
   }
 }
 
+function normalizeProviderBaseUrl(value?: string | null) {
+  const raw = (value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    const credentials = parsed.username
+      ? `${parsed.username}${parsed.password ? `:${parsed.password}` : ""}@`
+      : "";
+    const path = parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.protocol.toLowerCase()}//${credentials}${parsed.host.toLowerCase()}${path}${parsed.search}`;
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
+}
+
+function normalizeProviderName(value?: string | null) {
+  return (value || "").trim().replace(/\s+/gu, " ").toLowerCase();
+}
+
+function parseTomlStringValue(value: string) {
+  const raw = value.trim();
+  if (raw.startsWith('"')) {
+    try {
+      return JSON.parse(raw) as string;
+    } catch {
+      const end = raw.lastIndexOf('"');
+      return end > 0 ? raw.slice(1, end) : raw.slice(1);
+    }
+  }
+  if (raw.startsWith("'")) {
+    const end = raw.lastIndexOf("'");
+    return end > 0 ? raw.slice(1, end) : raw.slice(1);
+  }
+  return raw.replace(/\s+#.*$/, "").trim();
+}
+
+function extractTomlProviderApiKey(configText: string | undefined, providerId?: string) {
+  if (!configText?.trim()) return "";
+  const targetSection = providerId ? `model_providers.${providerId}` : "";
+  let currentSection = "";
+  let topLevelValue = "";
+  let firstProviderValue = "";
+
+  for (const line of configText.replace(/\r\n?/g, "\n").split("\n")) {
+    const section = line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/);
+    if (section) {
+      currentSection = section[1].trim();
+      continue;
+    }
+    const token = line.match(/^\s*experimental_bearer_token\s*=\s*(.+?)\s*$/);
+    if (!token) continue;
+    const value = parseTomlStringValue(token[1]).trim();
+    if (!value) continue;
+    if (!currentSection) topLevelValue = value;
+    if (currentSection.startsWith("model_providers.") && !firstProviderValue) firstProviderValue = value;
+    if (targetSection && currentSection === targetSection) return value;
+  }
+
+  return topLevelValue || (!providerId ? firstProviderValue : "");
+}
+
+function savedProviderApiKey(provider: SavedProvider) {
+  return (provider.apiKey || "").trim() || extractTomlProviderApiKey(provider.tomlConfig);
+}
+
+function providerIdentityKey(baseUrl?: string | null, apiKey?: string | null, providerName?: string | null) {
+  const normalizedUrl = normalizeProviderBaseUrl(baseUrl);
+  if (!normalizedUrl) return "";
+  const normalizedKey = (apiKey || "").trim();
+  return JSON.stringify([
+    normalizedUrl,
+    normalizedKey ? `key:${normalizedKey}` : `name:${normalizeProviderName(providerName)}`,
+  ]);
+}
+
 function buildProviderTomlPreview(provider: SavedProvider, state: CodexState | null) {
   const model = provider.model.trim() || "gpt-5.5";
   const name = provider.providerName.trim() || "your-provider";
@@ -782,16 +862,6 @@ function uniqueBuiltinPromptStatuses(statuses: BuiltinPromptStatus[]) {
       return true;
     });
   return selected.sort((a, b) => a.index - b.index).map(({ item }) => item);
-}
-
-function normalizedProviderToml(text?: string) {
-  return (text || "")
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .filter((line) => !/^\s*experimental_bearer_token\s*=/.test(line))
-    .map((line) => line.trimEnd())
-    .join("\n")
-    .trim();
 }
 
 function JsonPreview({ text }: { text: string }) {
@@ -916,7 +986,7 @@ function compactPath(value?: string | null, max = 58) {
 }
 
 function shortId(value: string) {
-  return value.length > 8 ? value.slice(0, 8) : value;
+  return value.length > 13 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
 }
 
 function App() {
@@ -1098,31 +1168,23 @@ function App() {
   const currentProvider = state?.providers.find((p) => p.isCurrent);
   const liveProviderId = (state?.modelProvider || "openai").trim();
   const liveCustomProvider = React.useMemo(() => (state?.providers || []).find((item) => item.id === "custom"), [state?.providers]);
+  const liveProviderApiKey = React.useMemo(() => {
+    const configKey = extractTomlProviderApiKey(state?.configText, liveProviderId);
+    const authKey = extractOpenAiApiKey(state?.authText).trim();
+    return configKey || authKey;
+  }, [liveProviderId, state?.authText, state?.configText]);
   const inferredActiveProviderId = React.useMemo(() => {
     if (liveProviderId !== "custom") return "";
-    if (state?.activeSavedProviderId && savedProviders.some((item) => item.id === state.activeSavedProviderId)) {
-      return state.activeSavedProviderId;
-    }
-    const liveToml = normalizedProviderToml(state?.configText);
-    const exactTomlMatches = liveToml
-      ? savedProviders.filter((item) => item.tomlConfig && normalizedProviderToml(item.tomlConfig) === liveToml)
-      : [];
-    if (exactTomlMatches.length) {
-      const rememberedExact = exactTomlMatches.find((item) => item.id === activeProviderId);
-      return rememberedExact?.id || exactTomlMatches[0].id;
-    }
-    const liveBaseUrl = (liveCustomProvider?.baseUrl || "").replace(/\/+$/, "");
-    const liveWireApi = liveCustomProvider?.wireApi || "responses";
-    const liveModel = state?.model || "";
+    const liveIdentity = providerIdentityKey(liveCustomProvider?.baseUrl, liveProviderApiKey, liveCustomProvider?.name || liveCustomProvider?.id);
+    if (!liveIdentity) return "";
     const identityMatches = savedProviders.filter((item) =>
-      item.baseUrl.replace(/\/+$/, "") === liveBaseUrl &&
-      (item.model || "") === liveModel &&
-      (item.wireApi || "responses") === liveWireApi,
+      providerIdentityKey(item.baseUrl, savedProviderApiKey(item), item.providerName) === liveIdentity,
     );
     const remembered = identityMatches.find((item) => item.id === activeProviderId);
     if (remembered) return remembered.id;
-    return identityMatches.length === 1 ? identityMatches[0].id : "";
-  }, [activeProviderId, liveCustomProvider?.baseUrl, liveCustomProvider?.wireApi, liveProviderId, savedProviders, state?.activeSavedProviderId, state?.configText, state?.model]);
+    const backendMatch = identityMatches.find((item) => item.id === state?.activeSavedProviderId);
+    return backendMatch?.id || identityMatches[0]?.id || "";
+  }, [activeProviderId, liveCustomProvider?.baseUrl, liveCustomProvider?.id, liveCustomProvider?.name, liveProviderApiKey, liveProviderId, savedProviders, state?.activeSavedProviderId]);
   const effectiveActiveProviderId = liveProviderId === "custom" ? inferredActiveProviderId : liveProviderId;
   const currentInstructionPath = (state?.instructionFile || "").replace(/\\/g, "/");
   const currentInstructionFilename = currentInstructionPath.split("/").pop() || "";
@@ -1152,26 +1214,47 @@ function App() {
       && state.instructionInjectionMode
       && state.instructionInjectionMode !== promptInjectionMode,
   );
+  const canonicalSavedProviders = React.useMemo(() => {
+    const groups = new Map<string, SavedProvider[]>();
+    savedProviders.forEach((provider) => {
+      const identity = providerIdentityKey(provider.baseUrl, savedProviderApiKey(provider), provider.providerName);
+      const key = identity || `id:${provider.id}`;
+      const group = groups.get(key);
+      if (group) group.push(provider);
+      else groups.set(key, [provider]);
+    });
+    return Array.from(groups.values()).map((group) =>
+      group.find((item) => item.id === effectiveActiveProviderId)
+      || group.find((item) => item.id === activeProviderId)
+      || group[0],
+    );
+  }, [activeProviderId, effectiveActiveProviderId, savedProviders]);
+
   const detectedRows = React.useMemo(() => {
-    return (state?.providers || []).map((p) => ({
-      id: `detected-${p.id}`,
-      source: "detected" as const,
-      providerName: p.name || p.id,
-      baseUrl: p.baseUrl || "",
-      model: state?.model || "gpt-5.5",
-      wireApi: p.wireApi || "responses",
-      requiresOpenaiAuth: p.requiresOpenaiAuth ?? false,
-      isCurrent: p.isCurrent,
-    }));
-  }, [state]);
+    return (state?.providers || []).map((p) => {
+      const configKey = extractTomlProviderApiKey(state?.configText, p.id);
+      const apiKey = p.isCurrent ? liveProviderApiKey || configKey : configKey;
+      return {
+        id: `detected-${p.id}`,
+        source: "detected" as const,
+        providerName: p.name || p.id,
+        baseUrl: p.baseUrl || "",
+        model: state?.model || "gpt-5.5",
+        apiKey,
+        wireApi: p.wireApi || "responses",
+        requiresOpenaiAuth: p.requiresOpenaiAuth ?? false,
+        isCurrent: p.isCurrent,
+      };
+    });
+  }, [liveProviderApiKey, state?.configText, state?.model, state?.providers]);
 
   const localRows = React.useMemo(() => {
-    return savedProviders.map((p) => ({
+    return canonicalSavedProviders.map((p) => ({
       ...p,
       source: "local" as const,
       isCurrent: effectiveActiveProviderId === p.id,
     }));
-  }, [savedProviders, effectiveActiveProviderId]);
+  }, [canonicalSavedProviders, effectiveActiveProviderId]);
 
   const providerRows = React.useMemo(() => {
     const officialRow = {
@@ -1180,6 +1263,7 @@ function App() {
       providerName: "OpenAI Official",
       baseUrl: "https://chatgpt.com/codex",
       model: state?.model || "official",
+      apiKey: "",
       wireApi: "official",
       requiresOpenaiAuth: false,
       isCurrent: !state?.modelProvider || state.modelProvider === "openai",
@@ -1187,15 +1271,15 @@ function App() {
     const seen = new Set<string>();
     const rows: Array<typeof officialRow | (typeof detectedRows)[number] | (typeof localRows)[number]> = [officialRow];
     localRows.forEach((row) => {
-      const key = `${row.baseUrl}::${row.model}`;
-      if (key !== "::") seen.add(key);
+      const key = providerIdentityKey(row.baseUrl, savedProviderApiKey(row), row.providerName);
+      if (key) seen.add(key);
       rows.push(row);
     });
     detectedRows.forEach((row) => {
       if (row.id === "detected-custom" && inferredActiveProviderId) return;
-      const key = `${row.baseUrl}::${row.model}`;
-      if (key !== "::" && seen.has(key)) return;
-      if (key !== "::") seen.add(key);
+      const key = providerIdentityKey(row.baseUrl, row.apiKey, row.providerName);
+      if (key && seen.has(key)) return;
+      if (key) seen.add(key);
       rows.push(row);
     });
     return rows;
@@ -1235,7 +1319,7 @@ function App() {
   }, [filteredSessions, lang, sessionGroupByCwd]);
 
   const unsyncedChatCount = Math.max(sessionStatus?.mismatchedThreads ?? 0, sessionStatus?.mismatchedSessionMeta ?? 0);
-  const sessionPreviewTruncated = (sessionStatus?.sqliteThreads ?? 0) > (sessionStatus?.sessions.length ?? 0);
+  const sessionPreviewTruncated = (sessionStatus?.topLevelThreads ?? 0) > (sessionStatus?.sessions.length ?? 0);
   const selectedSessionSet = React.useMemo(() => new Set(selectedSessionIds), [selectedSessionIds]);
   const selectedSessions = React.useMemo(
     () => (sessionStatus?.sessions || []).filter((item) => selectedSessionSet.has(item.id)),
@@ -1686,11 +1770,11 @@ function App() {
       () => invoke<ImportResult>("import_ccswitch_codex_providers", { dbPath: null }),
       (result) => {
         setSavedProviders(result.providers);
-        const warningText = result.warnings.length > 0 ? `，跳过 ${result.skipped}` : "";
+        const warningText = result.skipped > 0 ? `，跳过 ${result.skipped}` : "";
         setToast(
           lang === "zh"
-            ? `已从 cc-switch 导入 ${result.imported} 个供应商${warningText}`
-            : `Imported ${result.imported} provider(s) from cc-switch${warningText}`,
+            ? `cc-switch 导入完成：新增 ${result.added}，更新 ${result.updated}，合并 ${result.merged}${warningText}`
+            : `cc-switch import complete: ${result.added} added, ${result.updated} updated, ${result.merged} merged${warningText}`,
         );
       },
     );
@@ -1956,14 +2040,14 @@ function App() {
     setProviderMode("form");
   };
 
-  const openEditDetectedProvider = (provider: { id: string; providerName: string; baseUrl: string; model: string; wireApi: string; requiresOpenaiAuth: boolean }) => {
-    setEditingProviderId(customProviderId(provider.providerName || provider.baseUrl));
+  const openEditDetectedProvider = (provider: { id: string; providerName: string; baseUrl: string; model: string; apiKey?: string; wireApi: string; requiresOpenaiAuth: boolean }) => {
+    setEditingProviderId(null);
     const next = {
       id: customProviderId(provider.providerName || provider.baseUrl),
       providerName: provider.providerName,
       baseUrl: provider.baseUrl,
       model: provider.model,
-      apiKey: extractOpenAiApiKey(state?.authText),
+      apiKey: provider.apiKey || extractOpenAiApiKey(state?.authText),
       tomlConfig: "",
       wireApi: provider.wireApi || "responses",
       requiresOpenaiAuth: provider.requiresOpenaiAuth,
@@ -2480,17 +2564,17 @@ function App() {
                         {providerRows.map((p) => {
                           const local = p.source === "official"
                             ? undefined
-                            : savedProviders.find((item) =>
+                            : canonicalSavedProviders.find((item) =>
                               p.source === "local"
                                 ? item.id === p.id
-                                : item.baseUrl === p.baseUrl && item.model === p.model,
+                                : providerIdentityKey(item.baseUrl, savedProviderApiKey(item), item.providerName) === providerIdentityKey(p.baseUrl, p.apiKey, p.providerName),
                             );
                           const switchable: SavedProvider | null = p.source === "official" ? null : local || {
                             id: customProviderId(p.providerName),
                             providerName: p.providerName,
                             baseUrl: p.baseUrl,
                             model: p.model,
-                            apiKey: "",
+                            apiKey: p.apiKey || "",
                             tomlConfig: "",
                             wireApi: p.wireApi,
                             requiresOpenaiAuth: p.requiresOpenaiAuth,
@@ -2509,7 +2593,7 @@ function App() {
                               <div className="provider-actions">
                                 <button className="secondary-btn small" onClick={() => switchable ? switchProvider(switchable) : switchOfficialProvider()} disabled={loading || p.isCurrent}>{lang === "zh" ? "启用" : "Enable"}</button>
                                 {p.source !== "official" && (
-                                  <button className="icon-btn small" title={lang === "zh" ? "测试连接" : "Test connection"} onClick={() => void testProvider(`${p.source}-${p.id}`, p.baseUrl, local?.apiKey || (p.source === "local" ? p.apiKey : null))} disabled={loading || providerTestingId === `${p.source}-${p.id}`}>
+                                  <button className="icon-btn small" title={lang === "zh" ? "测试连接" : "Test connection"} onClick={() => void testProvider(`${p.source}-${p.id}`, p.baseUrl, local?.apiKey || p.apiKey || null)} disabled={loading || providerTestingId === `${p.source}-${p.id}`}>
                                     {providerTestingId === `${p.source}-${p.id}` ? <Loader2 size={15} className="spin" /> : <Activity size={15} />}
                                   </button>
                                 )}
@@ -2672,7 +2756,12 @@ function App() {
 
                 <div className={cx("session-compact-summary", sessionStatus?.needsSync ? "needs-sync" : "synced")}>
                   <span className="session-summary-status">{sessionStatus?.needsSync ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />} {sessionStatus?.needsSync ? (lang === "zh" ? "发现未同步" : "Unsynced") : (lang === "zh" ? "会话已同步" : "Synced")}</span>
-                  <span>{lang === "zh" ? `${sessionStatus?.sqliteThreads ?? 0} 条会话` : `${sessionStatus?.sqliteThreads ?? 0} sessions`}</span>
+                  <span>{lang === "zh" ? `${sessionStatus?.topLevelThreads ?? 0} 条会话` : `${sessionStatus?.topLevelThreads ?? 0} sessions`}</span>
+                  {(sessionStatus?.subagentThreads ?? 0) > 0 && (
+                    <span>{lang === "zh"
+                      ? `已折叠 ${sessionStatus?.subagentThreads ?? 0} 个内部子会话`
+                      : `${sessionStatus?.subagentThreads ?? 0} internal subthreads collapsed`}</span>
+                  )}
                   {sessionStatus?.needsSync && <span className="session-summary-warning">{lang === "zh" ? `${unsyncedChatCount} 条需修复` : `${unsyncedChatCount} need repair`}</span>}
                 </div>
 
@@ -2683,7 +2772,7 @@ function App() {
                       <h4>{lang === "zh" ? "会话列表" : "Sessions"}</h4>
                     </div>
                     <span title={sessionPreviewTruncated ? (lang === "zh" ? `当前加载最近 ${sessionStatus?.sessions.length ?? 0} 条` : `Latest ${sessionStatus?.sessions.length ?? 0} loaded`) : undefined}>
-                      {lang === "zh" ? `展示 ${filteredSessions.length} / ${sessionStatus?.sqliteThreads ?? 0} 条` : `${filteredSessions.length} / ${sessionStatus?.sqliteThreads ?? 0} shown`}
+                      {lang === "zh" ? `展示 ${filteredSessions.length} / ${sessionStatus?.topLevelThreads ?? 0} 条` : `${filteredSessions.length} / ${sessionStatus?.topLevelThreads ?? 0} shown`}
                     </span>
                   </div>
 
@@ -2783,7 +2872,7 @@ function App() {
                                 <span className="session-meta-time" title={item.updatedAtMs ? new Date(item.updatedAtMs).toLocaleString() : undefined}>{formatSessionTime(item.updatedAtMs)}</span>
                                 <code className="session-meta-provider" title={item.modelProvider || undefined}>{item.modelProvider || "unknown"}</code>
                                 <span className="session-meta-model" title={item.model || undefined}>{item.model || "-"}</span>
-                                <small className="session-meta-id">#{shortId(item.id)}</small>
+                                <small className="session-meta-id" title={item.id}>#{shortId(item.id)}</small>
                               </label>
                             ))}
                           </div>
