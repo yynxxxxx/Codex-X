@@ -23,6 +23,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INGEST_TOKEN: ${{ secrets.STAR_HISTORY_INGEST_TOKEN }}
           REPOSITORY: ${{ github.repository }}
+          CAMO_PURGE_URLS: ${{ vars.STAR_HISTORY_CAMO_URLS }}
           STAR_HISTORY_ENDPOINT: ${{ vars.STAR_HISTORY_ENDPOINT }}
         run: |
           set -euo pipefail
@@ -57,3 +58,19 @@ jobs:
             --header "Content-Type: application/json" \
             --data-binary "@${payload_file}" \
             "${STAR_HISTORY_ENDPOINT}"
+
+          while IFS= read -r camo_url; do
+            test -n "${camo_url}" || continue
+            case "${camo_url}" in
+              https://camo.githubusercontent.com/*) ;;
+              *) echo "::warning::Skipped an invalid Camo purge URL"; continue ;;
+            esac
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --retry 2 \
+              --request PURGE \
+              "${camo_url}" > /dev/null \
+              || echo "::warning::GitHub Camo purge failed and will be retried on the next refresh"
+          done <<< "${CAMO_PURGE_URLS}"
