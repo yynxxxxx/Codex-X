@@ -369,3 +369,10 @@ xattr -dr com.apple.quarantine /Applications/Codex-X.app
 <a href="https://www.star-history.com/?repos=yynxxxxx%2FCodex-X&type=date&legend=top-left">
   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=yynxxxxx%2Fcodex-x&amp;type=date&amp;legend=top-left&amp;sealed_token=Vqvz67Jv_WIePGePCN8RdJaY5oCyqqCZUSFWs4M4dAxP8JXFZlYEWbI8YcU6SFgpqOqqJifzpOTIlMg4ee8NaCkHpCSqv1r5pxewR-tQlmxswaZlhedd6A" width="900" />
 </a>
+
+<br />
+
+> [!IMPORTANT]
+> **使用声明**
+>
+> 本项目仅用于大模型与智能体相关技术的学习、研究与交流，软件本身不包含主动破坏性功能。请在合法、合规并获得授权的范围内使用，禁止将其用于攻击、侵害他人权益或其他违法用途。使用者应自行判断使用边界，并对相关行为与后果承担责任。
