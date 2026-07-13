@@ -5,7 +5,6 @@ import {
   renderUnavailableSvg,
 } from "./history.js";
 
-const GITHUB_API_VERSION = "2022-11-28";
 const RENDER_VERSION = "2";
 const MAX_WEBHOOK_BYTES = 1024 * 1024;
 const encoder = new TextEncoder();
@@ -133,80 +132,27 @@ async function readTextWithLimit(request, maxBytes) {
   return new TextDecoder().decode(body);
 }
 
-async function githubRequest(path, token, accept = "application/vnd.github+json") {
-  let lastError;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const response = await fetch(`https://api.github.com/${path}`, {
-        headers: {
-          Accept: accept,
-          Authorization: `Bearer ${token}`,
-          "User-Agent": "codex-star-history",
-          "X-GitHub-Api-Version": GITHUB_API_VERSION,
-        },
-      });
-      if (response.ok) return response;
-      const reset = response.headers.get("X-RateLimit-Reset");
-      lastError = new Error(`GitHub API ${response.status}${reset ? ` (rate reset ${reset})` : ""}`);
-      if (response.status !== 429 && response.status < 500) throw lastError;
-    } catch (error) {
-      lastError = error;
-      if (attempt === 2) break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250 * (2 ** attempt)));
+async function ingestRepositorySnapshot(env, repository, snapshot, rebuild = false) {
+  const createdAt = Date.parse(snapshot?.createdAt || "");
+  const checkedAt = Date.parse(snapshot?.checkedAt || "");
+  const currentStars = Number(snapshot?.currentStars);
+  if (!Number.isFinite(createdAt) || !Number.isFinite(checkedAt)) {
+    throw new Error("Snapshot timestamps are invalid");
   }
-  throw lastError || new Error("GitHub API request failed");
-}
-
-function lastPageFromLink(linkHeader) {
-  for (const part of String(linkHeader || "").split(",")) {
-    if (!part.includes('rel="last"')) continue;
-    const match = part.match(/[?&]page=(\d+)/);
-    if (match) return Math.max(1, Number(match[1]));
-  }
-  return 1;
-}
-
-async function fetchStargazerPage(repository, page, token) {
-  const response = await githubRequest(
-    `repos/${repository}/stargazers?per_page=100&page=${page}`,
-    token,
-    "application/vnd.github.star+json",
-  );
-  const items = await response.json();
-  return { items, link: response.headers.get("Link") };
-}
-
-async function fetchAllStargazers(repository, token) {
-  const first = await fetchStargazerPage(repository, 1, token);
-  const lastPage = lastPageFromLink(first.link);
-  if (lastPage > 45) throw new Error("Initial backfill exceeds the Worker subrequest budget");
-  const pages = [first.items];
-  const pageNumbers = Array.from({ length: Math.max(0, lastPage - 1) }, (_, index) => index + 2);
-
-  for (let offset = 0; offset < pageNumbers.length; offset += 4) {
-    const chunk = pageNumbers.slice(offset, offset + 4);
-    const responses = await Promise.all(chunk.map((page) => fetchStargazerPage(repository, page, token)));
-    pages.push(...responses.map((response) => response.items));
+  if (!Number.isInteger(currentStars) || currentStars < 0) {
+    throw new Error("Snapshot star count is invalid");
   }
 
-  return pages.flat();
-}
-
-async function refreshRepository(env, repository, githubToken, rebuild = false) {
-  const metadataResponse = await githubRequest(`repos/${repository}`, githubToken);
-  const metadata = await metadataResponse.json();
-  const checkedAt = new Date().toISOString();
   const existing = await env.STAR_HISTORY.get(datasetKey(repository), "json");
   let dataset;
 
   if (!existing?.baseline?.length || rebuild) {
-    const stargazers = await fetchAllStargazers(repository, githubToken);
+    if (!Array.isArray(snapshot?.stargazers)) throw new Error("Snapshot stargazers are missing");
     dataset = buildBaseline({
       repository,
-      createdAt: metadata.created_at,
-      currentStars: metadata.stargazers_count,
-      stargazers,
+      createdAt,
+      currentStars,
+      stargazers: snapshot.stargazers,
       checkedAt,
     });
     const tolerance = Math.max(5, Math.ceil(dataset.currentStars * 0.01));
@@ -215,7 +161,7 @@ async function refreshRepository(env, repository, githubToken, rebuild = false) 
     }
   } else {
     dataset = mergeObservation(existing, {
-      currentStars: metadata.stargazers_count,
+      currentStars,
       checkedAt,
     });
   }
@@ -261,14 +207,12 @@ async function serveChart(request, env, chart) {
 
 async function handleRefresh(request, env) {
   if (!(await authorizeRefresh(request, env))) return jsonResponse({ error: "Unauthorized" }, 401);
-  const githubToken = request.headers.get("X-GitHub-Token")?.trim();
-  if (!githubToken) return jsonResponse({ error: "Missing X-GitHub-Token" }, 400);
   const payload = await request.json().catch(() => null);
   const repository = allowedRepository(env, payload?.repository);
   if (!repository) return jsonResponse({ error: "Repository is not allowed" }, 403);
 
   try {
-    const dataset = await refreshRepository(env, repository, githubToken, payload?.rebuild === true);
+    const dataset = await ingestRepositorySnapshot(env, repository, payload, payload?.rebuild === true);
     return jsonResponse({
       ok: true,
       repository,
@@ -278,8 +222,12 @@ async function handleRefresh(request, env) {
       consistencyDelta: dataset.source?.consistencyDelta ?? 0,
     });
   } catch (error) {
-    console.error("Star history refresh failed", repository, error instanceof Error ? error.message : String(error));
-    return jsonResponse({ error: "GitHub refresh failed; previous chart data was preserved" }, 502);
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("Star history refresh failed", repository, detail);
+    return jsonResponse({
+      error: "Snapshot refresh failed; previous chart data was preserved",
+      detail,
+    }, 502);
   }
 }
 
@@ -353,7 +301,7 @@ export default {
         headers: {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Authorization, Content-Type, X-GitHub-Token, X-Hub-Signature-256, X-GitHub-Event, X-GitHub-Delivery",
+          "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Hub-Signature-256, X-GitHub-Event, X-GitHub-Delivery",
         },
       });
     }

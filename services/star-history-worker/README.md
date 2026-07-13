@@ -5,7 +5,7 @@ Cloudflare Worker that serves near-real-time Star History SVGs for:
 - `yynxxxxx/Codex-X`
 - `yynxxxxx/Codex-5.5-codex-instruct-5.5`
 
-The Worker stores only aggregated timestamps and counts in KV. Repository-scoped GitHub Actions refresh the authoritative count every 15 minutes with their short-lived `GITHUB_TOKEN`; GitHub `star` webhooks provide faster updates between scheduled reconciliations.
+The Worker stores only aggregated timestamps and counts in KV. Repository-scoped GitHub Actions collect the authenticated history inside GitHub every 15 minutes and send a minimized snapshot to the Worker; GitHub `star` webhooks provide faster updates between scheduled reconciliations. The short-lived `GITHUB_TOKEN` never leaves the Actions runner.
 
 ## Endpoints
 

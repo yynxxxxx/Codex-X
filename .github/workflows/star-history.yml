@@ -20,7 +20,7 @@ jobs:
     steps:
       - name: Send authenticated repository snapshot
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INGEST_TOKEN: ${{ secrets.STAR_HISTORY_INGEST_TOKEN }}
           REPOSITORY: ${{ github.repository }}
           STAR_HISTORY_ENDPOINT: ${{ vars.STAR_HISTORY_ENDPOINT }}
@@ -28,7 +28,34 @@ jobs:
           set -euo pipefail
           test -n "${INGEST_TOKEN}"
           test -n "${STAR_HISTORY_ENDPOINT}"
-          payload=$(jq -cn --arg repository "${REPOSITORY}" '{repository: $repository}')
+          metadata_file="${RUNNER_TEMP}/star-history-metadata.json"
+          stargazers_file="${RUNNER_TEMP}/star-history-stargazers.json"
+          payload_file="${RUNNER_TEMP}/star-history-payload.json"
+
+          gh api \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${REPOSITORY}" > "${metadata_file}"
+          gh api \
+            --paginate \
+            --slurp \
+            --header "Accept: application/vnd.github.star+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/${REPOSITORY}/stargazers?per_page=100" > "${stargazers_file}"
+
+          jq -n \
+            --arg repository "${REPOSITORY}" \
+            --slurpfile metadata "${metadata_file}" \
+            --slurpfile pages "${stargazers_file}" \
+            '($pages[0] | add // [] | map(select(.starred_at != null and .user.id != null)) | sort_by(.user.id, .starred_at) | group_by(.user.id) | map(min_by(.starred_at))) as $stars
+            | {
+                repository: $repository,
+                createdAt: $metadata[0].created_at,
+                checkedAt: (now | todateiso8601),
+                currentStars: $metadata[0].stargazers_count,
+                stargazers: [$stars[] | {user: {id: .user.id}, starred_at: .starred_at}]
+              }' > "${payload_file}"
+
           curl \
             --fail-with-body \
             --retry 3 \
@@ -37,7 +64,6 @@ jobs:
             --max-time 240 \
             --request POST \
             --header "Authorization: Bearer ${INGEST_TOKEN}" \
-            --header "X-GitHub-Token: ${GITHUB_TOKEN}" \
             --header "Content-Type: application/json" \
-            --data "${payload}" \
+            --data-binary "@${payload_file}" \
             "${STAR_HISTORY_ENDPOINT}"

@@ -76,6 +76,37 @@ test("health returns 503 when the last authoritative refresh is stale", async ()
   assert.equal(payload.repositories[0].stale, true);
 });
 
+test("refresh ingests an Actions snapshot and stores aggregated history", async () => {
+  const env = testEnv();
+  const payload = {
+    repository: "yynxxxxx/Codex-X",
+    createdAt: "2026-01-01T00:00:00Z",
+    checkedAt: "2026-01-03T00:00:00Z",
+    currentStars: 2,
+    stargazers: [
+      { user: { id: 1 }, starred_at: "2026-01-01T12:00:00Z" },
+      { user: { id: 1 }, starred_at: "2026-01-02T12:00:00Z" },
+      { user: { id: 2 }, starred_at: "2026-01-02T13:00:00Z" },
+    ],
+  };
+  const response = await worker.fetch(new Request("https://example.test/v1/refresh", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.INGEST_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  }), env);
+  const result = await response.json();
+  const stored = await env.STAR_HISTORY.get("repository:yynxxxxx/codex-x", "json");
+
+  assert.equal(response.status, 200);
+  assert.equal(result.stars, 2);
+  assert.equal(stored.source.uniqueStargazers, 2);
+  assert.equal(stored.baseline.at(-1).count, 2);
+  assert.equal("stargazers" in stored, false);
+});
+
 test("webhook events use unique keys and duplicate deliveries stay idempotent", async () => {
   const env = testEnv(baseline("2026-01-02T00:00:00Z"));
   const payload = JSON.stringify({
