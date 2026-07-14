@@ -9,50 +9,25 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
-use thiserror::Error;
 
 mod constants;
+mod error;
+mod file_io;
+mod paths;
 mod platform;
+mod sqlite_utils;
 
 use constants::*;
+use error::{CodexxError, Result};
+use file_io::{
+    atomic_write, io_err, json_err, parse_toml_document, read_to_string_if_exists, write_json,
+    write_text,
+};
+use paths::{app_home, home_dir};
+use sqlite_utils::{sql_select_column, sqlite_has_table, table_column_set};
 use toml_edit::{value, DocumentMut, Item, Table};
 
-#[derive(Debug, Error)]
-enum CodexxError {
-    #[error("无法获取用户主目录")]
-    NoHomeDir,
-    #[error("IO error at {path}: {source}")]
-    Io {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("TOML parse error at {path}: {message}")]
-    Toml { path: String, message: String },
-    #[error("JSON error at {path}: {source}")]
-    Json {
-        path: String,
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("配置错误: {0}")]
-    Config(String),
-    #[error("SQLite error: {0}")]
-    Database(String),
-}
-
-type Result<T> = std::result::Result<T, CodexxError>;
-
 static BUILTIN_PROMPT_CACHE_LOCK: Mutex<()> = Mutex::new(());
-
-impl serde::Serialize for CodexxError {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -425,59 +400,6 @@ struct SqliteScan {
     subagent_threads: usize,
     mismatched_threads: usize,
     warnings: Vec<String>,
-}
-
-fn sql_select_column(cols: &HashSet<String>, name: &str, fallback: &str) -> String {
-    if cols.contains(name) {
-        format!("\"{}\"", name.replace('"', "\"\""))
-    } else {
-        fallback.to_string()
-    }
-}
-
-fn io_err(path: &Path, source: std::io::Error) -> CodexxError {
-    CodexxError::Io {
-        path: path.display().to_string(),
-        source,
-    }
-}
-
-fn json_err(path: &Path, source: serde_json::Error) -> CodexxError {
-    CodexxError::Json {
-        path: path.display().to_string(),
-        source,
-    }
-}
-
-fn home_dir() -> Result<PathBuf> {
-    dirs::home_dir().ok_or(CodexxError::NoHomeDir)
-}
-
-fn app_home() -> Result<PathBuf> {
-    #[cfg(test)]
-    {
-        use std::sync::OnceLock;
-        static TEST_APP_HOME: OnceLock<PathBuf> = OnceLock::new();
-        Ok(TEST_APP_HOME
-            .get_or_init(|| {
-                std::env::temp_dir().join(format!(
-                    "codex-x-test-home-{}-{}",
-                    std::process::id(),
-                    Local::now().timestamp_nanos_opt().unwrap_or_default()
-                ))
-            })
-            .clone())
-    }
-    #[cfg(not(test))]
-    {
-        if let Ok(value) = std::env::var("CODEXX_HOME") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Ok(PathBuf::from(trimmed));
-            }
-        }
-        Ok(home_dir()?.join(".codexx"))
-    }
 }
 
 fn db_path() -> Result<PathBuf> {
@@ -3817,57 +3739,6 @@ fn read_ccswitch_official_auth_inner(
     }))
 }
 
-fn read_to_string_if_exists(path: &Path) -> Result<String> {
-    if !path.exists() {
-        return Ok(String::new());
-    }
-    fs::read_to_string(path).map_err(|e| io_err(path, e))
-}
-
-fn parse_toml_document(path: &Path, text: &str) -> Result<DocumentMut> {
-    if text.trim().is_empty() {
-        return Ok(DocumentMut::new());
-    }
-    text.parse::<DocumentMut>().map_err(|e| CodexxError::Toml {
-        path: path.display().to_string(),
-        message: e.to_string(),
-    })
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
-    }
-    let tmp = path.with_extension(format!(
-        "tmp.{}.{}.{}",
-        std::process::id(),
-        Local::now().timestamp_nanos_opt().unwrap_or_default(),
-        WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
-    ));
-    {
-        let mut file = fs::File::create(&tmp).map_err(|e| io_err(&tmp, e))?;
-        file.write_all(bytes).map_err(|e| io_err(&tmp, e))?;
-        file.sync_all().map_err(|e| io_err(&tmp, e))?;
-    }
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path).map_err(|e| io_err(path, e))?;
-    }
-    fs::rename(&tmp, path).map_err(|e| io_err(path, e))?;
-    Ok(())
-}
-
-fn write_text(path: &Path, text: &str) -> Result<()> {
-    atomic_write(path, text.as_bytes())
-}
-
-fn write_json(path: &Path, value: &Value) -> Result<()> {
-    let text = serde_json::to_string_pretty(value).map_err(|e| json_err(path, e))?;
-    write_text(path, &(text + "\n"))
-}
-
 fn managed_agents_bounds(content: &str) -> Result<Option<(usize, usize)>> {
     let begins = content
         .match_indices(AGENTS_MANAGED_BEGIN)
@@ -4690,36 +4561,6 @@ fn sqlite_session_db_paths(codex_dir: &Path) -> Vec<PathBuf> {
         paths.push(legacy);
     }
     paths
-}
-
-fn sqlite_has_table(conn: &Connection, table: &str) -> Result<bool> {
-    conn.query_row(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
-        [table],
-        |_| Ok(()),
-    )
-    .map(|_| true)
-    .or_else(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => Ok(false),
-        other => Err(CodexxError::Database(other.to_string())),
-    })
-}
-
-fn table_column_set(conn: &Connection, table: &str) -> Result<HashSet<String>> {
-    let mut stmt = conn
-        .prepare(&format!(
-            "PRAGMA table_info(\"{}\")",
-            table.replace('"', "\"\"")
-        ))
-        .map_err(|e| CodexxError::Database(e.to_string()))?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| CodexxError::Database(e.to_string()))?;
-    let mut cols = HashSet::new();
-    for row in rows {
-        cols.insert(row.map_err(|e| CodexxError::Database(e.to_string()))?);
-    }
-    Ok(cols)
 }
 
 fn sqlite_subagent_thread_ids(
