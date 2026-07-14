@@ -989,17 +989,16 @@ pub(crate) fn delete_codex_sessions_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn temp_codex_dir() -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "codex-x-delete-verification-{}-{nonce}",
-            std::process::id()
+            "codex-x-delete-verification-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
         ));
+        let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("create test codex dir");
         path
     }
