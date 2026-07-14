@@ -7155,38 +7155,49 @@ async fn save_provider_toml_config(input: ProviderTomlInput) -> Result<ActionRes
         .map_err(|e| CodexxError::Config(format!("保存供应商 TOML 失败: {e}")))?
 }
 
-fn provider_test_request(
-    agent: &ureq::Agent,
-    url: &str,
-    api_key: Option<&str>,
-) -> std::result::Result<ureq::Response, ureq::Error> {
-    let request = agent.get(url);
-    if let Some(api_key) = api_key.filter(|s| !s.trim().is_empty()) {
-        request.set("Authorization", &format!("Bearer {}", api_key.trim()))
-    } else {
-        request
-    }
-    .call()
-}
-
-fn provider_status_result(status: u16, duration_ms: u128) -> ProviderConnectionResult {
+fn provider_status_result(status: u16, duration_ms: u128, detail: &str) -> ProviderConnectionResult {
     ProviderConnectionResult {
         ok: (200..300).contains(&status),
         status: Some(status),
         message: if (200..300).contains(&status) {
             format!("{duration_ms} ms")
         } else if status == 401 || status == 403 {
-            format!("HTTP {status} · {duration_ms} ms（认证失败或无权限）")
+            format!("HTTP {status} · {duration_ms} ms（认证失败或无权限）{detail}")
+        } else if status == 404 {
+            format!("HTTP {status} · {duration_ms} ms（端点不存在，请确认 base_url 是否包含 /v1）{detail}")
         } else {
-            format!("HTTP {status} · {duration_ms} ms")
+            format!("HTTP {status} · {duration_ms} ms{detail}")
         },
         duration_ms,
     }
 }
 
+// 从上游响应体提取错误摘要：优先 JSON error.message/error/message，HTML 或空体跳过。
+fn extract_upstream_error(body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() || body.starts_with('<') {
+        return String::new();
+    }
+    if body.starts_with('{') || body.starts_with('[') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+            let msg = v
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .or_else(|| v.get("error").and_then(|e| e.as_str()))
+                .or_else(|| v.get("message").and_then(|m| m.as_str()));
+            if let Some(msg) = msg {
+                return format!("：{msg}");
+            }
+        }
+    }
+    format!("：{}", body.chars().take(150).collect::<String>())
+}
+
 fn test_provider_connection_inner(
     base_url: String,
     api_key: Option<String>,
+    model: String,
 ) -> Result<ProviderConnectionResult> {
     let base = base_url.trim().trim_end_matches('/').to_string();
     if base.is_empty() {
@@ -7197,50 +7208,52 @@ fn test_provider_connection_inner(
             "base_url 必须以 http:// 或 https:// 开头".to_string(),
         ));
     }
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(CodexxError::Config("model 不能为空".to_string()));
+    }
+
+    // 向模型发送最小请求（content: "hi"）判断连通性；端点为 {base}/responses（base_url 应含 /v1）。
+    let url = format!("{base}/responses");
+    let body = serde_json::json!({
+        "model": model,
+        "input": [{"role": "user", "content": "hi"}],
+        "stream": false,
+    })
+    .to_string();
 
     let api_key = api_key.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(6))
+        .timeout(Duration::from_secs(20))
         .build();
-    let models_url = format!("{base}/models");
     let started = Instant::now();
 
-    match provider_test_request(&agent, &models_url, api_key) {
-        Ok(response) => {
-            return Ok(provider_status_result(
-                response.status(),
-                started.elapsed().as_millis(),
+    let request = agent.post(&url).set("Content-Type", "application/json");
+    let request = match api_key {
+        Some(key) => request.set("Authorization", &format!("Bearer {}", key)),
+        None => request,
+    };
+    match request.send_string(&body) {
+        Ok(response) => Ok(provider_status_result(
+            response.status(),
+            started.elapsed().as_millis(),
+            "",
+        )),
+        Err(ureq::Error::Status(status, response)) => {
+            let elapsed = started.elapsed().as_millis();
+            let body = response.into_string().unwrap_or_default();
+            Ok(provider_status_result(
+                status,
+                elapsed,
+                &extract_upstream_error(&body),
             ))
         }
-        Err(ureq::Error::Status(status, _)) => {
-            // /models exists but rejected the request. This is not a successful
-            // provider test; notably HTTP 403 must not be shown as “连接正常”.
-            return Ok(provider_status_result(
-                status,
-                started.elapsed().as_millis(),
-            ));
-        }
-        Err(_models_error) => {
-            // Network-level failure on /models: try the base endpoint once so
-            // users can distinguish DNS/TLS failures from a provider with no
-            // models route.
-            match provider_test_request(&agent, &base, api_key) {
-                Ok(response) => Ok(provider_status_result(
-                    response.status(),
-                    started.elapsed().as_millis(),
-                )),
-                Err(ureq::Error::Status(status, _)) => Ok(provider_status_result(
-                    status,
-                    started.elapsed().as_millis(),
-                )),
-                Err(_base_error) => Ok(ProviderConnectionResult {
-                    ok: false,
-                    status: None,
-                    message: format!("请求失败 · {} ms", started.elapsed().as_millis()),
-                    duration_ms: started.elapsed().as_millis(),
-                }),
-            }
-        }
+        Err(e) => Ok(ProviderConnectionResult {
+            ok: false,
+            status: None,
+            message: format!("请求失败: {e} · {} ms", started.elapsed().as_millis()),
+            duration_ms: started.elapsed().as_millis(),
+        }),
     }
 }
 
@@ -7248,8 +7261,11 @@ fn test_provider_connection_inner(
 async fn test_provider_connection(
     base_url: String,
     api_key: Option<String>,
+    model: String,
 ) -> Result<ProviderConnectionResult> {
-    tauri::async_runtime::spawn_blocking(move || test_provider_connection_inner(base_url, api_key))
+    tauri::async_runtime::spawn_blocking(move || {
+        test_provider_connection_inner(base_url, api_key, model)
+    })
         .await
         .map_err(|e| CodexxError::Config(format!("测试连接失败: {e}")))?
 }

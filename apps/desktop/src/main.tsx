@@ -698,6 +698,10 @@ function normalizeProviderName(value?: string | null) {
   return (value || "").trim().replace(/\s+/gu, " ").toLowerCase();
 }
 
+function isHttpBaseUrl(value?: string | null) {
+  return /^https?:\/\//i.test((value || "").trim());
+}
+
 function parseTomlStringValue(value: string) {
   const raw = value.trim();
   if (raw.startsWith('"')) {
@@ -760,7 +764,7 @@ function buildProviderTomlPreview(provider: SavedProvider, state: CodexState | n
   // Codex live config follows cc-switch: all third-party providers are applied as `custom`.
   const providerKey = "custom";
   const baseUrl = provider.baseUrl.trim().replace(/\/+$/, "") || "https://example.com/v1";
-  const wireApi = provider.wireApi || "responses";
+  const wireApi = "responses";
   const apiKey = provider.apiKey?.trim();
   const source = state?.configText?.trimEnd() || "";
   const sourceLines = source ? source.split("\n") : [];
@@ -1033,7 +1037,9 @@ function App() {
   const [bootVisible, setBootVisible] = React.useState(true);
   const [bootLeaving, setBootLeaving] = React.useState(false);
   const [bootHintIndex, setBootHintIndex] = React.useState(0);
-  const [toast, setToast] = React.useState<string>("");
+  const [toast, setToastState] = React.useState<{ text: string; kind: "ok" | "error" } | null>(null);
+  const setToast = React.useCallback((text: string) => setToastState(text ? { text, kind: "ok" as const } : null), []);
+  const setToastError = React.useCallback((text: string) => setToastState(text ? { text, kind: "error" as const } : null), []);
   const [error, setError] = React.useState<string>("");
   const [providerForm, setProviderForm] = React.useState<SavedProvider>(defaultProviderForm);
   const [providerTomlDraft, setProviderTomlDraft] = React.useState("");
@@ -1679,7 +1685,7 @@ function App() {
     model: providerForm.model.trim(),
     apiKey: (providerForm.apiKey || "").trim(),
     tomlConfig: (providerTomlDraft || providerForm.tomlConfig || buildProviderTomlPreview(providerForm, state)).trimEnd(),
-    wireApi: providerForm.wireApi || "responses",
+    wireApi: "responses",
     requiresOpenaiAuth: providerForm.requiresOpenaiAuth,
   });
 
@@ -1689,8 +1695,12 @@ function App() {
     return providerList;
   };
 
-  const saveProviderOnly = () =>
-    call(
+  const saveProviderOnly = () => {
+    if (!isHttpBaseUrl(providerForm.baseUrl)) {
+      setToastError(lang === "zh" ? "API 请求地址必须以 http:// 或 https:// 开头" : "Base URL must start with http:// or https://");
+      return;
+    }
+    return call(
       async () => {
         const saved = await invoke<SavedProvider>("save_provider", { provider: normalizedProviderForm() });
         const providerList = await invoke<SavedProvider[]>("list_saved_providers");
@@ -1704,6 +1714,7 @@ function App() {
         setToast(lang === "zh" ? "供应商配置已保存" : "Provider saved");
       },
     );
+  };
 
   const switchProvider = (provider: SavedProvider) =>
     call(
@@ -1726,7 +1737,7 @@ function App() {
             baseUrl: provider.baseUrl,
             model: provider.model,
             apiKey: provider.apiKey || "",
-            wireApi: provider.wireApi,
+            wireApi: "responses",
             requiresOpenaiAuth: provider.requiresOpenaiAuth,
           },
         });
@@ -1738,16 +1749,26 @@ function App() {
       },
     );
 
-  const testProvider = async (id: string, baseUrl: string, apiKey?: string | null) => {
+  const testProvider = async (id: string, baseUrl: string, apiKey?: string | null, model?: string) => {
+    if (!isHttpBaseUrl(baseUrl)) {
+      setToastError(lang === "zh" ? "API 请求地址必须以 http:// 或 https:// 开头" : "Base URL must start with http:// or https://");
+      return;
+    }
     setProviderTestingId(id);
     setError("");
     try {
-      const result = await invoke<ProviderConnectionResult>("test_provider_connection", { baseUrl, apiKey: apiKey || null });
-      setToast(result.ok
-        ? (lang === "zh" ? `连接正常\n${result.durationMs} ms` : `Connection OK\n${result.durationMs} ms`)
-        : (lang === "zh" ? `连接失败\n${result.message}` : `Connection failed\n${result.message}`));
+      const result = await invoke<ProviderConnectionResult>("test_provider_connection", {
+        baseUrl,
+        apiKey: apiKey || null,
+        model: model || "",
+      });
+      if (result.ok) {
+        setToast(lang === "zh" ? `连接正常\n${result.durationMs} ms` : `Connection OK\n${result.durationMs} ms`);
+      } else {
+        setToastError(lang === "zh" ? `连接失败\n${result.message}` : `Connection failed\n${result.message}`);
+      }
     } catch (e) {
-      setError(String(e));
+      setToastError(lang === "zh" ? `连接失败\n${String(e)}` : `Connection failed\n${String(e)}`);
     } finally {
       setProviderTestingId("");
     }
@@ -2176,11 +2197,12 @@ function App() {
   ];
 
   const toastLayer = toast ? (() => {
-    const [title, ...rest] = toast.split("\n");
+    const isError = toast.kind === "error";
+    const [title, ...rest] = toast.text.split("\n");
     const message = rest.join("\n").trim();
     return (
-      <div className="toast ok" onAnimationEnd={() => setToast("")}>
-        <div className="toast-icon"><CheckCircle2 size={16} /></div>
+      <div className={`toast ${isError ? "error" : "ok"}`} onAnimationEnd={() => setToast("")}>
+        <div className="toast-icon">{isError ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}</div>
         <div className="toast-copy">
           <strong>{title}</strong>
           {message && <span>{message}</span>}
@@ -2593,7 +2615,7 @@ function App() {
                               <div className="provider-actions">
                                 <button className="secondary-btn small" onClick={() => switchable ? switchProvider(switchable) : switchOfficialProvider()} disabled={loading || p.isCurrent}>{lang === "zh" ? "启用" : "Enable"}</button>
                                 {p.source !== "official" && (
-                                  <button className="icon-btn small" title={lang === "zh" ? "测试连接" : "Test connection"} onClick={() => void testProvider(`${p.source}-${p.id}`, p.baseUrl, local?.apiKey || p.apiKey || null)} disabled={loading || providerTestingId === `${p.source}-${p.id}`}>
+                                  <button className="icon-btn small" title={lang === "zh" ? "测试连通性" : "Test connection"} onClick={() => void testProvider(`${p.source}-${p.id}`, p.baseUrl, local?.apiKey || p.apiKey || null, p.model)} disabled={loading || providerTestingId === `${p.source}-${p.id}`}>
                                     {providerTestingId === `${p.source}-${p.id}` ? <Loader2 size={15} className="spin" /> : <Activity size={15} />}
                                   </button>
                                 )}
@@ -2678,12 +2700,6 @@ function App() {
                           <Field label={lang === "zh" ? "API 请求地址" : t.provider.baseUrl}><input value={providerForm.baseUrl} onChange={(e) => setProviderForm({ ...providerForm, baseUrl: e.target.value })} /></Field>
                           <Field label={t.provider.name}><input value={providerForm.providerName} onChange={(e) => setProviderForm({ ...providerForm, providerName: e.target.value, id: editingProviderId || customProviderId(e.target.value) })} /></Field>
                           <Field label={t.provider.model}><input value={providerForm.model} onChange={(e) => setProviderForm({ ...providerForm, model: e.target.value })} /></Field>
-                          <Field label={t.provider.wireApi}>
-                            <select value={providerForm.wireApi} onChange={(e) => setProviderForm({ ...providerForm, wireApi: e.target.value })}>
-                              <option value="responses">responses</option>
-                              <option value="chat">chat</option>
-                            </select>
-                          </Field>
                           <label className="check-row"><input type="checkbox" checked={providerForm.requiresOpenaiAuth} onChange={(e) => setProviderForm({ ...providerForm, requiresOpenaiAuth: e.target.checked })} /><span>{t.provider.requiresAuth}</span></label>
                         </div>
                       </section>
@@ -2716,6 +2732,14 @@ function App() {
                       </section>
 
                       <div className="form-actions provider-save-actions">
+                        <button
+                          className="secondary-btn big"
+                          onClick={() => void testProvider("form", providerForm.baseUrl, providerForm.apiKey, providerForm.model)}
+                          disabled={loading || providerTestingId === "form"}
+                        >
+                          {providerTestingId === "form" ? <Loader2 size={18} className="spin" /> : <Activity size={18} />}
+                          {providerTestingId === "form" ? (lang === "zh" ? "测试中..." : "Testing...") : (lang === "zh" ? "测试连通性" : "Test connection")}
+                        </button>
                         <button className="primary-btn big lively-btn" onClick={saveProviderConfig} disabled={loading}>{loading ? <Loader2 size={18} className="spin" /> : <CheckCircle2 size={18} />} {loading ? (lang === "zh" ? "保存中..." : "Saving...") : t.provider.saveAndSwitch}</button>
                       </div>
                     </div>
