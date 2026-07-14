@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub(super) struct BackupSnapshot {
-    pub(super) live_path: PathBuf,
+    live_path: PathBuf,
     backup_path: PathBuf,
     existed: bool,
 }
@@ -17,15 +17,6 @@ pub(super) struct BackupSnapshot {
 #[derive(Debug)]
 pub(super) struct ProviderSyncBackup {
     pub(super) dir: PathBuf,
-    snapshots: Vec<BackupSnapshot>,
-}
-
-impl ProviderSyncBackup {
-    pub(super) fn snapshot(&self, live_path: &Path) -> Option<&BackupSnapshot> {
-        self.snapshots
-            .iter()
-            .find(|snapshot| snapshot.live_path == live_path)
-    }
 }
 
 pub(crate) fn provider_sync_backup_root(codex_dir: &Path) -> PathBuf {
@@ -240,76 +231,5 @@ pub(super) fn create_provider_sync_backup(
             })).collect::<Vec<_>>(),
         }),
     )?;
-    Ok(ProviderSyncBackup {
-        dir: backup_dir,
-        snapshots,
-    })
-}
-
-pub(super) fn restore_sqlite_snapshot(snapshot: &BackupSnapshot) -> Result<()> {
-    use rusqlite::backup::{Backup, StepResult};
-
-    if !snapshot.existed {
-        return Err(CodexxError::Database(format!(
-            "SQLite 原始快照不存在: {}",
-            snapshot.live_path.display()
-        )));
-    }
-    let from = Connection::open_with_flags(
-        &snapshot.backup_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| {
-        CodexxError::Database(format!(
-            "打开 SQLite 恢复源失败 {}: {error}",
-            snapshot.backup_path.display()
-        ))
-    })?;
-    let mut to = Connection::open_with_flags(
-        &snapshot.live_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| {
-        CodexxError::Database(format!(
-            "打开 SQLite 恢复目标失败 {}: {error}",
-            snapshot.live_path.display()
-        ))
-    })?;
-    to.busy_timeout(Duration::from_secs(5))
-        .map_err(|error| CodexxError::Database(error.to_string()))?;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    {
-        let sqlite_backup = Backup::new(&from, &mut to)
-            .map_err(|error| CodexxError::Database(format!("初始化 SQLite 恢复失败: {error}")))?;
-        loop {
-            if Instant::now() >= deadline {
-                return Err(CodexxError::Database(format!(
-                    "SQLite 恢复超时: {}",
-                    snapshot.live_path.display()
-                )));
-            }
-            match sqlite_backup
-                .step(128)
-                .map_err(|error| CodexxError::Database(format!("恢复 SQLite 失败: {error}")))?
-            {
-                StepResult::Done => break,
-                StepResult::More => {}
-                StepResult::Busy | StepResult::Locked => {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                _ => {}
-            }
-        }
-    }
-    let quick_check: String = to
-        .query_row("PRAGMA quick_check", [], |row| row.get(0))
-        .map_err(|error| CodexxError::Database(format!("校验 SQLite 恢复失败: {error}")))?;
-    if quick_check != "ok" {
-        return Err(CodexxError::Database(format!(
-            "SQLite 恢复校验失败 {}: {quick_check}",
-            snapshot.live_path.display()
-        )));
-    }
-    let _ = to.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
-    Ok(())
+    Ok(ProviderSyncBackup { dir: backup_dir })
 }

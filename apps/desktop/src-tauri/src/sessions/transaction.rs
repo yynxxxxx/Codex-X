@@ -1,4 +1,3 @@
-use super::backup::{restore_sqlite_snapshot, ProviderSyncBackup};
 use super::global_state::{
     apply_global_state_update_with_journal, restore_global_write, GlobalStateWrite,
 };
@@ -73,6 +72,21 @@ fn sqlite_data_version(conn: &Connection) -> Result<i64> {
         .map_err(|error| CodexxError::Database(error.to_string()))
 }
 
+fn create_sqlite_rollback_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TEMP TABLE codexx_session_rollback (
+            id TEXT PRIMARY KEY,
+            model_provider TEXT,
+            has_user_event INTEGER,
+            cwd TEXT,
+            provider_changed INTEGER NOT NULL DEFAULT 0,
+            has_user_event_changed INTEGER NOT NULL DEFAULT 0,
+            cwd_changed INTEGER NOT NULL DEFAULT 0
+         );",
+    )
+    .map_err(|error| CodexxError::Database(error.to_string()))
+}
+
 pub(super) fn prepare_sqlite_updates(sqlite_paths: &[PathBuf]) -> Result<Vec<PendingSqliteUpdate>> {
     let mut pending = Vec::new();
     let mut seen_databases = HashSet::new();
@@ -101,11 +115,15 @@ pub(super) fn prepare_sqlite_updates(sqlite_paths: &[PathBuf]) -> Result<Vec<Pen
                 continue;
             }
             let columns = table_column_set(&conn, "threads")?;
-            if !columns.contains("model_provider") {
+            if !columns.contains("id") || !columns.contains("model_provider") {
                 continue;
             }
             conn.execute_batch("BEGIN IMMEDIATE")
                 .map_err(|error| CodexxError::Database(error.to_string()))?;
+            if let Err(error) = create_sqlite_rollback_table(&conn) {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(error);
+            }
             let observer = match (|| -> Result<Connection> {
                 let observer = Connection::open_with_flags(
                     &identity,
@@ -153,6 +171,19 @@ fn apply_sqlite_updates(
     target_provider: &str,
 ) -> Result<()> {
     for update in pending.iter_mut() {
+        update
+            .conn
+            .execute(
+                "INSERT INTO temp.codexx_session_rollback
+                    (id, model_provider, provider_changed)
+                 SELECT id, model_provider, 1 FROM threads
+                 WHERE COALESCE(model_provider, '') <> ?1
+                 ON CONFLICT(id) DO UPDATE SET
+                    model_provider = excluded.model_provider,
+                    provider_changed = 1",
+                [target_provider],
+            )
+            .map_err(|error| CodexxError::Database(error.to_string()))?;
         update.counts.provider_rows = update
             .conn
             .execute(
@@ -163,6 +194,19 @@ fn apply_sqlite_updates(
 
         if update.columns.contains("id") && update.columns.contains("has_user_event") {
             for thread_id in &rollouts.thread_ids_with_user_events {
+                update
+                    .conn
+                    .execute(
+                        "INSERT INTO temp.codexx_session_rollback
+                            (id, has_user_event, has_user_event_changed)
+                         SELECT id, has_user_event, 1 FROM threads
+                         WHERE id = ?1 AND COALESCE(has_user_event, 0) <> 1
+                         ON CONFLICT(id) DO UPDATE SET
+                            has_user_event = excluded.has_user_event,
+                            has_user_event_changed = 1",
+                        [thread_id],
+                    )
+                    .map_err(|error| CodexxError::Database(error.to_string()))?;
                 update.counts.user_event_rows += update
                     .conn
                     .execute(
@@ -174,6 +218,19 @@ fn apply_sqlite_updates(
         }
         if update.columns.contains("id") && update.columns.contains("cwd") {
             for (thread_id, cwd) in &rollouts.cwd_by_thread_id {
+                update
+                    .conn
+                    .execute(
+                        "INSERT INTO temp.codexx_session_rollback
+                            (id, cwd, cwd_changed)
+                         SELECT id, cwd, 1 FROM threads
+                         WHERE id = ?2 AND COALESCE(cwd, '') <> ?1
+                         ON CONFLICT(id) DO UPDATE SET
+                            cwd = excluded.cwd,
+                            cwd_changed = 1",
+                        (cwd, thread_id),
+                    )
+                    .map_err(|error| CodexxError::Database(error.to_string()))?;
                 update.counts.cwd_rows += update
                     .conn
                     .execute(
@@ -226,10 +283,84 @@ where
     Ok(updated)
 }
 
+fn restore_sqlite_update(
+    update: &mut PendingSqliteUpdate,
+    expected_data_version: i64,
+) -> Result<()> {
+    update
+        .conn
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| CodexxError::Database(error.to_string()))?;
+    update.transaction_open = true;
+    let result = (|| -> Result<()> {
+        let current = sqlite_data_version(&update.observer)?;
+        if current != expected_data_version {
+            return Err(CodexxError::Config(format!(
+                "会话数据库已发生变化，已保留备份且未覆盖: {}",
+                update.path.display()
+            )));
+        }
+
+        let mut statements = vec![
+            "UPDATE threads
+             SET model_provider = (
+                SELECT rollback.model_provider
+                FROM temp.codexx_session_rollback AS rollback
+                WHERE rollback.id = threads.id
+             )
+             WHERE id IN (
+                SELECT id FROM temp.codexx_session_rollback WHERE provider_changed = 1
+             )",
+        ];
+        if update.columns.contains("has_user_event") {
+            statements.push(
+                "UPDATE threads
+                 SET has_user_event = (
+                    SELECT rollback.has_user_event
+                    FROM temp.codexx_session_rollback AS rollback
+                    WHERE rollback.id = threads.id
+                 )
+                 WHERE id IN (
+                    SELECT id FROM temp.codexx_session_rollback
+                    WHERE has_user_event_changed = 1
+                 )",
+            );
+        }
+        if update.columns.contains("cwd") {
+            statements.push(
+                "UPDATE threads
+                 SET cwd = (
+                    SELECT rollback.cwd
+                    FROM temp.codexx_session_rollback AS rollback
+                    WHERE rollback.id = threads.id
+                 )
+                 WHERE id IN (
+                    SELECT id FROM temp.codexx_session_rollback WHERE cwd_changed = 1
+                 )",
+            );
+        }
+        statements.push("DROP TABLE temp.codexx_session_rollback");
+        update
+            .conn
+            .execute_batch(&statements.join(";"))
+            .map_err(|error| CodexxError::Database(error.to_string()))?;
+        update
+            .conn
+            .execute_batch("COMMIT")
+            .map_err(|error| CodexxError::Database(error.to_string()))?;
+        update.transaction_open = false;
+        Ok(())
+    })();
+    if result.is_err() && update.transaction_open {
+        let _ = update.conn.execute_batch("ROLLBACK");
+        update.transaction_open = false;
+    }
+    result
+}
+
 pub(super) fn rollback_mutation(
-    backup: &ProviderSyncBackup,
     journal: &MutationJournal,
-    pending_sqlite: &[PendingSqliteUpdate],
+    pending_sqlite: &mut [PendingSqliteUpdate],
 ) -> Vec<String> {
     let mut errors = Vec::new();
     for write in journal.global_writes.iter().rev() {
@@ -239,33 +370,14 @@ pub(super) fn rollback_mutation(
     }
     for attempt in journal.sqlite_restore_attempts.iter().rev() {
         let Some(update) = pending_sqlite
-            .iter()
+            .iter_mut()
             .find(|update| update.path == attempt.path)
         else {
             errors.push(format!("缺少 SQLite 恢复连接: {}", attempt.path.display()));
             continue;
         };
-        match sqlite_data_version(&update.observer) {
-            Ok(current) if current != attempt.expected_data_version => {
-                errors.push(format!(
-                    "会话数据库已发生变化，已保留备份且未覆盖: {}",
-                    attempt.path.display()
-                ));
-                continue;
-            }
-            Ok(_) => {}
-            Err(error) => {
-                errors.push(error.to_string());
-                continue;
-            }
-        }
-        match backup.snapshot(&attempt.path) {
-            Some(snapshot) => {
-                if let Err(error) = restore_sqlite_snapshot(snapshot) {
-                    errors.push(error.to_string());
-                }
-            }
-            None => errors.push(format!("缺少 SQLite 备份: {}", attempt.path.display())),
+        if let Err(error) = restore_sqlite_update(update, attempt.expected_data_version) {
+            errors.push(error.to_string());
         }
     }
     if let Err(error) = restore_session_changes(&journal.applied_rollouts) {

@@ -3,7 +3,11 @@ use crate::sessions::backup::provider_sync_backup_root;
 use crate::sessions::sync::sync_sessions_provider_with_hook;
 use rusqlite::{Connection, OpenFlags};
 use std::fs;
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 fn temp_dir(name: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -240,6 +244,65 @@ fn sqlite_restore_does_not_overwrite_new_codex_writes() {
     fs::remove_dir_all(codex_dir).expect("remove test directory");
 }
 
+#[test]
+fn sqlite_restore_rechecks_after_waiting_for_a_writer() {
+    let codex_dir = temp_dir("sqlite-writer-during-restore");
+    let id = "019f6000-0000-7000-8000-000000000412";
+    let rollout = codex_dir.join(format!("sessions/rollout-test-{id}.jsonl"));
+    write_rollout(&rollout, id);
+    let database = codex_dir.join("state_10.sqlite");
+    create_thread_database(&database, id, &rollout);
+    let mut writer = None;
+
+    let error = sync_sessions_provider_with_hook(
+        Some(codex_dir.display().to_string()),
+        Some("custom".to_string()),
+        |point| match point {
+            MutationPoint::AfterSqliteCommit(0) => {
+                let writer_database = database.clone();
+                let (ready_tx, ready_rx) = mpsc::channel();
+                writer = Some(thread::spawn(move || {
+                    let conn = Connection::open(writer_database).expect("open concurrent writer");
+                    conn.execute_batch(
+                        "BEGIN IMMEDIATE;
+                         CREATE TABLE concurrent_during_restore (value TEXT NOT NULL);
+                         INSERT INTO concurrent_during_restore (value)
+                         VALUES ('keep-writer-commit');",
+                    )
+                    .expect("stage concurrent write");
+                    ready_tx.send(()).expect("signal writer lock");
+                    thread::sleep(Duration::from_millis(150));
+                    conn.execute_batch("COMMIT")
+                        .expect("commit while recovery waits");
+                }));
+                ready_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("wait for concurrent writer lock");
+                Err(CodexxError::Config("持锁写入期间注入失败".to_string()))
+            }
+            _ => Ok(()),
+        },
+    )
+    .expect_err("recovery must recheck after waiting for the writer");
+
+    writer
+        .take()
+        .expect("writer handle")
+        .join()
+        .expect("join concurrent writer");
+    assert!(error.to_string().contains("会话数据库已发生变化"));
+    assert_eq!(thread_provider(&database, id), "custom");
+    let marker: String = Connection::open(&database)
+        .expect("open database after concurrent commit")
+        .query_row("SELECT value FROM concurrent_during_restore", [], |row| {
+            row.get(0)
+        })
+        .expect("read concurrent marker");
+    assert_eq!(marker, "keep-writer-commit");
+
+    fs::remove_dir_all(codex_dir).expect("remove test directory");
+}
+
 #[cfg(unix)]
 #[test]
 fn sqlite_prepare_deduplicates_symlink_aliases() {
@@ -318,7 +381,18 @@ fn injected_failure_restores_sqlite_jsonl_and_global_state() {
     let codex_dir = temp_dir("full-mutation-rollback");
     let id = "019f6000-0000-7000-8000-000000000411";
     let rollout = codex_dir.join(format!("sessions/rollout-test-{id}.jsonl"));
-    let original_rollout = write_rollout(&rollout, id);
+    write_rollout(&rollout, id);
+    let mut rollout_file = fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)
+        .expect("open rollout for user event");
+    writeln!(
+        rollout_file,
+        "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"hello\"}}}}"
+    )
+    .expect("append user event");
+    drop(rollout_file);
+    let original_rollout = fs::read(&rollout).expect("read original rollout");
     let database = codex_dir.join("state_10.sqlite");
     create_thread_database(&database, id, &rollout);
     let wal_guard = Connection::open(&database).expect("open database for WAL mode");
@@ -327,7 +401,10 @@ fn injected_failure_restores_sqlite_jsonl_and_global_state() {
         .expect("enable WAL mode");
     wal_guard
         .execute_batch(
-            "CREATE TABLE rollback_marker (value TEXT NOT NULL);
+            "ALTER TABLE threads ADD COLUMN has_user_event INTEGER DEFAULT 0;
+             ALTER TABLE threads ADD COLUMN cwd TEXT;
+             UPDATE threads SET cwd = '/tmp/wrong';
+             CREATE TABLE rollback_marker (value TEXT NOT NULL);
              INSERT INTO rollback_marker (value) VALUES ('keep-me');",
         )
         .expect("write WAL marker");
@@ -367,6 +444,15 @@ fn injected_failure_restores_sqlite_jsonl_and_global_state() {
     assert!(hook_called);
     assert_eq!(error.to_string(), "配置错误: 测试注入失败");
     assert_eq!(thread_provider(&database, id), "openai");
+    let restored_index: (i64, String) = Connection::open(&database)
+        .expect("open restored session metadata")
+        .query_row(
+            "SELECT has_user_event, cwd FROM threads WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read restored session metadata");
+    assert_eq!(restored_index, (0, "/tmp/wrong".to_string()));
     assert_eq!(sqlite_quick_check(&database), "ok");
     let marker: String = Connection::open(&database)
         .expect("open restored database")

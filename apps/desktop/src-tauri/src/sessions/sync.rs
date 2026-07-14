@@ -175,7 +175,7 @@ where
     let mutation = match mutation {
         Ok(result) => result,
         Err(error) => {
-            let recovery_errors = rollback_mutation(&backup, &journal, &pending_sqlite);
+            let recovery_errors = rollback_mutation(&journal, &mut pending_sqlite);
             return Err(mutation_error(error, recovery_errors));
         }
     };
