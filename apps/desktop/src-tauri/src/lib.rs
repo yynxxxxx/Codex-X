@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 mod app_db;
+mod ccswitch;
 mod constants;
 mod error;
 mod file_io;
@@ -19,7 +20,9 @@ mod platform;
 mod providers;
 mod sessions;
 mod sqlite_utils;
+mod toml_utils;
 
+use ccswitch::{ccswitch_db_candidates, default_ccswitch_db_path};
 use constants::*;
 use error::{CodexxError, Result};
 use file_io::{
@@ -52,6 +55,8 @@ use sessions::{
 };
 use sqlite_utils::table_column_set;
 use toml_edit::{value, DocumentMut, Item, Table};
+use toml_utils::ensure_table;
+pub(crate) use toml_utils::string_value;
 
 static BUILTIN_PROMPT_CACHE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -2564,142 +2569,6 @@ fn build_ccswitch_codex_provider(
     })
 }
 
-fn push_existing_candidate(candidates: &mut Vec<PathBuf>, candidate: Option<PathBuf>) {
-    let Some(path) = candidate else {
-        return;
-    };
-    if !candidates.iter().any(|item| item == &path) {
-        candidates.push(path);
-    }
-}
-
-fn ccswitch_db_candidates() -> Result<Vec<PathBuf>> {
-    let mut candidates = Vec::new();
-
-    if let Ok(value) = std::env::var("CC_SWITCH_HOME") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            push_existing_candidate(
-                &mut candidates,
-                Some(PathBuf::from(trimmed).join("cc-switch.db")),
-            );
-        }
-    }
-
-    let home = home_dir()?;
-    // cc-switch 当前主要使用这个位置，macOS/Windows/Linux 都适用。
-    push_existing_candidate(
-        &mut candidates,
-        Some(home.join(".cc-switch").join("cc-switch.db")),
-    );
-
-    // 兼容 Tauri/AppData 风格位置，防止未来或不同发行版变更数据目录。
-    if let Some(data_dir) = dirs::data_dir() {
-        push_existing_candidate(
-            &mut candidates,
-            Some(data_dir.join("com.ccswitch.desktop").join("cc-switch.db")),
-        );
-        push_existing_candidate(
-            &mut candidates,
-            Some(data_dir.join("cc-switch").join("cc-switch.db")),
-        );
-        push_existing_candidate(
-            &mut candidates,
-            Some(data_dir.join("CC Switch").join("cc-switch.db")),
-        );
-    }
-    if let Some(data_local_dir) = dirs::data_local_dir() {
-        push_existing_candidate(
-            &mut candidates,
-            Some(
-                data_local_dir
-                    .join("com.ccswitch.desktop")
-                    .join("cc-switch.db"),
-            ),
-        );
-        push_existing_candidate(
-            &mut candidates,
-            Some(data_local_dir.join("cc-switch").join("cc-switch.db")),
-        );
-        push_existing_candidate(
-            &mut candidates,
-            Some(data_local_dir.join("CC Switch").join("cc-switch.db")),
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        push_existing_candidate(
-            &mut candidates,
-            Some(
-                home.join("Library")
-                    .join("Application Support")
-                    .join("com.ccswitch.desktop")
-                    .join("cc-switch.db"),
-            ),
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            push_existing_candidate(
-                &mut candidates,
-                Some(
-                    PathBuf::from(appdata)
-                        .join("com.ccswitch.desktop")
-                        .join("cc-switch.db"),
-                ),
-            );
-        }
-        if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-            push_existing_candidate(
-                &mut candidates,
-                Some(
-                    PathBuf::from(localappdata)
-                        .join("com.ccswitch.desktop")
-                        .join("cc-switch.db"),
-                ),
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(xdg_data_home) = std::env::var("XDG_DATA_HOME") {
-            push_existing_candidate(
-                &mut candidates,
-                Some(
-                    PathBuf::from(xdg_data_home)
-                        .join("com.ccswitch.desktop")
-                        .join("cc-switch.db"),
-                ),
-            );
-        }
-        push_existing_candidate(
-            &mut candidates,
-            Some(
-                home.join(".local")
-                    .join("share")
-                    .join("com.ccswitch.desktop")
-                    .join("cc-switch.db"),
-            ),
-        );
-    }
-
-    Ok(candidates)
-}
-
-fn default_ccswitch_db_path() -> Result<PathBuf> {
-    let candidates = ccswitch_db_candidates()?;
-    candidates
-        .iter()
-        .find(|path| path.exists())
-        .cloned()
-        .or_else(|| candidates.into_iter().next())
-        .ok_or_else(|| CodexxError::Config("无法生成 cc-switch 数据库候选路径".to_string()))
-}
-
 fn import_ccswitch_codex_providers_inner(path: Option<String>) -> Result<ImportResult> {
     let db = path
         .map(|s| s.trim().to_string())
@@ -3243,14 +3112,6 @@ fn auth_has_material(path: &Path) -> Result<bool> {
     }))
 }
 
-pub(crate) fn string_value(doc: &DocumentMut, key: &str) -> Option<String> {
-    doc.get(key)
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-}
-
 fn bool_from_item(item: Option<&Item>) -> Option<bool> {
     item.and_then(|i| i.as_bool())
 }
@@ -3477,16 +3338,6 @@ fn set_top_level_defaults(doc: &mut DocumentMut) {
     if doc.get("disable_response_storage").is_none() {
         doc["disable_response_storage"] = value(true);
     }
-}
-
-fn ensure_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table> {
-    if !parent.contains_key(key) {
-        parent[key] = Item::Table(Table::new());
-    }
-    parent
-        .get_mut(key)
-        .and_then(|item| item.as_table_mut())
-        .ok_or_else(|| CodexxError::Config(format!("{key} 不是 TOML table")))
 }
 
 fn set_provider_bearer_token(doc: &mut DocumentMut, token: &str) {
