@@ -54,10 +54,6 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(bytes).map_err(|e| io_err(&tmp, e))?;
         file.sync_all().map_err(|e| io_err(&tmp, e))?;
     }
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path).map_err(|e| io_err(path, e))?;
-    }
     fs::rename(&tmp, path).map_err(|e| io_err(path, e))?;
     Ok(())
 }
@@ -69,4 +65,40 @@ pub(crate) fn write_text(path: &Path, text: &str) -> Result<()> {
 pub(crate) fn write_json(path: &Path, value: &Value) -> Result<()> {
     let text = serde_json::to_string_pretty(value).map_err(|e| json_err(path, e))?;
     write_text(path, &(text + "\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "codex-x-file-io-{name}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("create test directory");
+        path
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_file_without_temp_residue() {
+        let dir = temp_dir("replace");
+        let path = dir.join("state.json");
+        fs::write(&path, b"old").expect("write original file");
+
+        atomic_write(&path, b"new").expect("replace file atomically");
+
+        assert_eq!(fs::read(&path).expect("read replaced file"), b"new");
+        let entries = fs::read_dir(&dir)
+            .expect("read test directory")
+            .map(|entry| entry.expect("read directory entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![path.file_name().unwrap().to_os_string()]);
+
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
 }

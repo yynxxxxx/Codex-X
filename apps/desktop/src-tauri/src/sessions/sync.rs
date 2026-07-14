@@ -4,7 +4,7 @@ use super::storage::{
 };
 use super::types::{RolloutScan, SessionSyncResult, SessionSyncStatus};
 use crate::error::{CodexxError, Result};
-use crate::file_io::{io_err, json_err, write_json};
+use crate::file_io::{io_err, json_err, write_json, write_text};
 use crate::resolve_codex_dir;
 use crate::sqlite_utils::{sqlite_has_table, table_column_set};
 use chrono::Local;
@@ -412,10 +412,10 @@ fn apply_global_state_update(path: &Path) -> Result<usize> {
         }
         let text = serde_json::to_string_pretty(&Value::Object(state))
             .map_err(|error| json_err(path, error))?;
-        fs::write(path, &text).map_err(|error| io_err(path, error))?;
+        write_text(path, &text)?;
         if let Some(parent) = path.parent() {
             let backup = parent.join(".codex-global-state.json.bak");
-            fs::write(&backup, text).map_err(|error| io_err(&backup, error))?;
+            write_text(&backup, &text)?;
         }
     }
     Ok(updated)
@@ -568,4 +568,57 @@ pub(crate) fn sync_sessions_provider_inner(
         updated_threads: sqlite_updates.total(),
         backup_dir: backup_dir.display().to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "codex-x-session-sync-{name}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("create test directory");
+        path
+    }
+
+    #[test]
+    fn global_state_update_keeps_unknown_fields_and_matches_backup() {
+        let dir = temp_dir("global-state");
+        let path = dir.join(".codex-global-state.json");
+        fs::write(
+            &path,
+            r#"{
+  "electron-saved-workspace-roots": "/tmp/project",
+  "unrelated-setting": { "enabled": true }
+}"#,
+        )
+        .expect("write original global state");
+
+        assert_eq!(
+            apply_global_state_update(&path).expect("update global state"),
+            1
+        );
+
+        let main_text = fs::read_to_string(&path).expect("read global state");
+        let backup_path = dir.join(".codex-global-state.json.bak");
+        let backup_text = fs::read_to_string(&backup_path).expect("read global state backup");
+        assert_eq!(main_text, backup_text);
+        let state: Value = serde_json::from_str(&main_text).expect("parse global state");
+        assert_eq!(
+            state.get("electron-saved-workspace-roots"),
+            Some(&json!(["/tmp/project"]))
+        );
+        assert_eq!(
+            state.get("unrelated-setting"),
+            Some(&json!({ "enabled": true }))
+        );
+
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
 }
