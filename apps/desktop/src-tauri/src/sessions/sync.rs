@@ -1,6 +1,7 @@
 use super::storage::{
-    apply_session_changes, current_model_provider, list_session_previews, normalize_workspace_path,
-    restore_session_changes, scan_rollouts, scan_sqlite, sqlite_session_db_paths,
+    apply_session_changes, current_model_provider, discover_sqlite_databases,
+    ensure_sqlite_discovery_writable, list_session_previews_with_paths, normalize_workspace_path,
+    restore_session_changes, scan_rollouts, scan_sqlite_with_paths, SqliteDiscovery,
 };
 use super::types::{RolloutScan, SessionSyncResult, SessionSyncStatus};
 use crate::error::{CodexxError, Result};
@@ -159,6 +160,7 @@ fn create_provider_sync_backup(
     codex_dir: &Path,
     target_provider: &str,
     changed_rollouts: &[PathBuf],
+    sqlite_paths: &[PathBuf],
 ) -> Result<PathBuf> {
     let root = provider_sync_backup_root(codex_dir);
     fs::create_dir_all(&root).map_err(|e| io_err(&root, e))?;
@@ -177,8 +179,8 @@ fn create_provider_sync_backup(
     ] {
         copy_file_to_backup(codex_dir, &backup_dir, &codex_dir.join(name))?;
     }
-    for path in sqlite_session_db_paths(codex_dir) {
-        backup_sqlite_to_backup(codex_dir, &backup_dir, &path)?;
+    for path in sqlite_paths {
+        backup_sqlite_to_backup(codex_dir, &backup_dir, path)?;
     }
     for path in changed_rollouts {
         copy_file_to_backup(codex_dir, &backup_dir, path)?;
@@ -218,12 +220,12 @@ impl SqliteUpdateCounts {
 }
 
 fn apply_sqlite_provider_alignment(
-    codex_dir: &Path,
+    sqlite_paths: &[PathBuf],
     rollouts: &RolloutScan,
     target_provider: &str,
 ) -> Result<SqliteUpdateCounts> {
     let mut updated = SqliteUpdateCounts::default();
-    for path in sqlite_session_db_paths(codex_dir) {
+    for path in sqlite_paths {
         if !path.exists() {
             continue;
         }
@@ -427,13 +429,23 @@ pub(crate) fn session_sync_status_inner(
 ) -> Result<SessionSyncStatus> {
     let codex_dir = resolve_codex_dir(config_dir)?;
     let target = current_model_provider(&codex_dir, target_provider)?;
+    let discovery = discover_sqlite_databases(&codex_dir);
+    session_sync_status_with_discovery(&codex_dir, target, &discovery)
+}
+
+pub(super) fn session_sync_status_with_discovery(
+    codex_dir: &Path,
+    target: String,
+    discovery: &SqliteDiscovery,
+) -> Result<SessionSyncStatus> {
     let rollouts = scan_rollouts(&codex_dir, &target)?;
-    let sqlite = scan_sqlite(&codex_dir, &rollouts, &target)?;
+    let sqlite = scan_sqlite_with_paths(&discovery.session_paths, &rollouts, &target)?;
     let global_state_updates =
         count_global_state_updates(&codex_dir.join(".codex-global-state.json"))?;
     let session_limit = sqlite.sqlite_threads.max(50).min(1000);
+    let preview_paths = discovery.active_first_session_paths();
     let (sessions, session_warnings) =
-        list_session_previews(&codex_dir, &rollouts, &target, session_limit)?;
+        list_session_previews_with_paths(&preview_paths, &rollouts, &target, session_limit)?;
     let mut warnings = rollouts.warnings;
     warnings.extend(sqlite.warnings);
     warnings.extend(session_warnings);
@@ -508,16 +520,15 @@ pub(crate) fn sync_sessions_provider_inner(
     fs::create_dir_all(&codex_dir).map_err(|error| io_err(&codex_dir, error))?;
     let target_provider = current_model_provider(&codex_dir, target_provider)?;
     let _maintenance_lock = acquire_session_maintenance_lock(&codex_dir)?;
+    let discovery = discover_sqlite_databases(&codex_dir);
+    ensure_sqlite_discovery_writable(&discovery)?;
     let rollouts = scan_rollouts(&codex_dir, &target_provider)?;
-    let sqlite = scan_sqlite(&codex_dir, &rollouts, &target_provider)?;
+    let sqlite = scan_sqlite_with_paths(&discovery.session_paths, &rollouts, &target_provider)?;
     let global_state_path = codex_dir.join(".codex-global-state.json");
     let global_state_updates = count_global_state_updates(&global_state_path)?;
 
     if rollouts.changes.is_empty() && sqlite.mismatched_threads == 0 && global_state_updates == 0 {
-        let status = session_sync_status_inner(
-            Some(codex_dir.display().to_string()),
-            Some(target_provider),
-        )?;
+        let status = session_sync_status_with_discovery(&codex_dir, target_provider, &discovery)?;
         return Ok(SessionSyncResult {
             status,
             updated_rollouts: 0,
@@ -531,12 +542,17 @@ pub(crate) fn sync_sessions_provider_inner(
         .iter()
         .map(|change| change.path.clone())
         .collect::<Vec<_>>();
-    let backup_dir = create_provider_sync_backup(&codex_dir, &target_provider, &changed_rollouts)?;
+    let backup_dir = create_provider_sync_backup(
+        &codex_dir,
+        &target_provider,
+        &changed_rollouts,
+        &discovery.session_paths,
+    )?;
     let (applied_rollouts, skipped_rollouts) = apply_session_changes(&rollouts.changes)?;
 
     let apply_result = (|| -> Result<SqliteUpdateCounts> {
         let sqlite_updates =
-            apply_sqlite_provider_alignment(&codex_dir, &rollouts, &target_provider)?;
+            apply_sqlite_provider_alignment(&discovery.session_paths, &rollouts, &target_provider)?;
         apply_global_state_update(&global_state_path)?;
         Ok(sqlite_updates)
     })();
@@ -553,8 +569,7 @@ pub(crate) fn sync_sessions_provider_inner(
     };
     prune_provider_sync_backups(&codex_dir)?;
 
-    let mut status =
-        session_sync_status_inner(Some(codex_dir.display().to_string()), Some(target_provider))?;
+    let mut status = session_sync_status_with_discovery(&codex_dir, target_provider, &discovery)?;
     status.backup_dir = Some(backup_dir.display().to_string());
     if !skipped_rollouts.is_empty() {
         status.warnings.push(format!(

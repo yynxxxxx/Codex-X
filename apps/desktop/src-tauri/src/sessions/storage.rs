@@ -11,6 +11,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use toml_edit::DocumentMut;
@@ -321,19 +322,101 @@ fn configured_sqlite_home(codex_dir: &Path) -> Option<PathBuf> {
         .map(|value| expand_sqlite_home(codex_dir, &value))
 }
 
-fn sqlite_storage_roots(codex_dir: &Path) -> Vec<PathBuf> {
+#[derive(Debug)]
+struct SqliteStorageRoot {
+    path: PathBuf,
+    active_priority: usize,
+    session_priority: usize,
+    allow_custom_names: bool,
+}
+
+fn sqlite_storage_roots(codex_dir: &Path) -> Vec<SqliteStorageRoot> {
     let mut roots = Vec::new();
     if let Some(configured) = configured_sqlite_home(codex_dir) {
-        roots.push(configured);
+        roots.push(SqliteStorageRoot {
+            path: configured,
+            active_priority: 0,
+            session_priority: 0,
+            allow_custom_names: true,
+        });
     }
-    roots.push(codex_dir.to_path_buf());
-    roots.push(codex_dir.join("sqlite"));
+    roots.push(SqliteStorageRoot {
+        path: codex_dir.to_path_buf(),
+        active_priority: 1,
+        session_priority: 2,
+        allow_custom_names: false,
+    });
+    roots.push(SqliteStorageRoot {
+        path: codex_dir.join("sqlite"),
+        active_priority: 2,
+        session_priority: 1,
+        allow_custom_names: true,
+    });
+
     let mut seen = HashSet::new();
-    roots.retain(|path| seen.insert(path.to_string_lossy().to_string()));
+    roots.retain(|root| seen.insert(root.path.clone()));
     roots
 }
 
-fn is_codex_sqlite_storage_file(path: &Path) -> bool {
+const SESSION_TABLES: &[&str] = &["threads", "automation_runs", "inbox_items"];
+const RELATED_TABLES: &[&str] = &[
+    "threads",
+    "thread_dynamic_tools",
+    "thread_spawn_edges",
+    "agent_job_items",
+    "logs",
+    "stage1_outputs",
+    "thread_goals",
+    "thread_turns",
+    "thread_items",
+    "thread_history_projection_state",
+    "local_thread_catalog",
+    "automation_runs",
+    "inbox_items",
+];
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct SqliteDiscovery {
+    pub(super) active_paths: Vec<PathBuf>,
+    pub(super) thread_paths: Vec<PathBuf>,
+    pub(super) session_paths: Vec<PathBuf>,
+    pub(super) related_paths: Vec<PathBuf>,
+    pub(super) unreadable_paths: Vec<PathBuf>,
+}
+
+impl SqliteDiscovery {
+    pub(super) fn active_first_thread_paths(&self) -> Vec<PathBuf> {
+        primary_paths_first(&self.active_paths, &self.thread_paths)
+    }
+
+    pub(super) fn active_first_session_paths(&self) -> Vec<PathBuf> {
+        primary_paths_first(&self.active_paths, &self.session_paths)
+    }
+}
+
+#[derive(Debug)]
+struct DiscoveredSqlite {
+    path: PathBuf,
+    active_priority: usize,
+    session_priority: usize,
+    state_version: Option<u64>,
+    has_threads: bool,
+    has_session_tables: bool,
+    has_related_tables: bool,
+}
+
+fn is_sqlite_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "db" | "sqlite" | "sqlite3"
+            )
+        })
+}
+
+fn is_root_codex_sqlite_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
         return false;
     };
@@ -354,127 +437,180 @@ fn is_codex_sqlite_storage_file(path: &Path) -> bool {
         )
 }
 
-pub(super) fn all_codex_sqlite_paths(codex_dir: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let mut seen = HashSet::new();
-    for root in sqlite_storage_roots(codex_dir) {
-        let Ok(entries) = fs::read_dir(&root) else {
-            continue;
-        };
-        let mut root_paths = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file() && is_codex_sqlite_storage_file(path))
-            .collect::<Vec<_>>();
-        root_paths.sort();
-        for path in root_paths {
-            if seen.insert(path.to_string_lossy().to_string()) {
-                paths.push(path);
-            }
-        }
-    }
-    paths
-}
-
 fn sqlite_state_version(path: &Path) -> Option<u64> {
-    path.file_name()
+    path.file_stem()
         .and_then(|value| value.to_str())
-        .and_then(|name| name.strip_prefix("state_"))
-        .and_then(|value| value.strip_suffix(".sqlite"))
+        .and_then(|stem| stem.strip_prefix("state_"))
         .and_then(|value| value.parse::<u64>().ok())
 }
 
-pub(crate) fn sqlite_candidate_paths(codex_dir: &Path) -> Vec<PathBuf> {
-    for root in sqlite_storage_roots(codex_dir) {
-        let Ok(entries) = fs::read_dir(&root) else {
-            continue;
-        };
-        let mut candidates = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file() && sqlite_state_version(path).is_some())
-            .collect::<Vec<_>>();
-        candidates.sort_by(|a, b| {
-            sqlite_state_version(b)
-                .cmp(&sqlite_state_version(a))
-                .then_with(|| b.file_name().cmp(&a.file_name()))
-        });
-        for path in candidates {
-            let Ok(conn) = Connection::open_with_flags(
-                &path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            ) else {
-                continue;
-            };
-            if sqlite_has_table(&conn, "threads").unwrap_or(false) {
-                return vec![path];
-            }
-        }
+fn sqlite_table_names(path: &Path) -> Option<HashSet<String>> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .ok()?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).ok()?;
+    let mut tables = HashSet::new();
+    for row in rows {
+        tables.insert(row.ok()?);
     }
-    Vec::new()
+    Some(tables)
 }
 
-/// Mirrors Codex++ provider sync: visit every current SQLite session database,
-/// then the legacy root state database. This is intentionally separate from
-/// `sqlite_candidate_paths`, which identifies the single active database used
-/// by destructive session deletion verification.
-pub(crate) fn sqlite_session_db_paths(codex_dir: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Some(configured) = configured_sqlite_home(codex_dir) {
-        roots.push(configured);
-    }
-    roots.push(codex_dir.join("sqlite"));
+fn has_sqlite_header(path: &Path) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 16];
+    file.read_exact(&mut header).is_ok() && &header == b"SQLite format 3\0"
+}
 
-    let mut paths = Vec::new();
+fn primary_paths_first(primary: &[PathBuf], paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut ordered = Vec::with_capacity(paths.len());
     let mut seen = HashSet::new();
-    for root in roots {
-        let Ok(entries) = fs::read_dir(&root) else {
+    for path in primary.iter().chain(paths) {
+        if seen.insert(path.clone()) {
+            ordered.push(path.clone());
+        }
+    }
+    ordered
+}
+
+pub(super) fn ensure_sqlite_discovery_writable(discovery: &SqliteDiscovery) -> Result<()> {
+    if discovery.unreadable_paths.is_empty() {
+        Ok(())
+    } else {
+        Err(CodexxError::Config(
+            "无法读取会话数据库，请关闭 Codex 后重试。".to_string(),
+        ))
+    }
+}
+
+fn ordered_database_paths(
+    databases: &[DiscoveredSqlite],
+    include: impl Fn(&DiscoveredSqlite) -> bool,
+    priority: impl Fn(&DiscoveredSqlite) -> usize,
+) -> Vec<PathBuf> {
+    let mut matches = databases
+        .iter()
+        .filter(|database| include(database))
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        priority(left)
+            .cmp(&priority(right))
+            .then_with(|| {
+                left.path
+                    .file_name()
+                    .is_none_or(|name| name != std::ffi::OsStr::new("codex-dev.db"))
+                    .cmp(
+                        &right
+                            .path
+                            .file_name()
+                            .is_none_or(|name| name != std::ffi::OsStr::new("codex-dev.db")),
+                    )
+            })
+            .then_with(|| left.path.file_name().cmp(&right.path.file_name()))
+    });
+    matches
+        .into_iter()
+        .map(|database| database.path.clone())
+        .collect()
+}
+
+pub(super) fn discover_sqlite_databases(codex_dir: &Path) -> SqliteDiscovery {
+    let mut databases = Vec::new();
+    let mut seen_paths = HashSet::new();
+    let mut unreadable_paths = Vec::new();
+
+    for root in sqlite_storage_roots(codex_dir) {
+        let Ok(entries) = fs::read_dir(&root.path) else {
             continue;
         };
-        let mut candidates = entries
+        let mut paths = entries
             .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file())
-            .filter(|path| {
-                matches!(
-                    path.extension().and_then(|extension| extension.to_str()),
-                    Some("db" | "sqlite" | "sqlite3")
-                )
+            .filter_map(|entry| {
+                let file_type = entry.file_type().ok()?;
+                (file_type.is_file() && !file_type.is_symlink()).then(|| entry.path())
             })
+            .filter(|path| is_sqlite_file(path))
+            .filter(|path| root.allow_custom_names || is_root_codex_sqlite_file(path))
             .collect::<Vec<_>>();
-        candidates.sort_by_key(|path| {
-            (
-                path.file_name()
-                    .is_none_or(|name| name != std::ffi::OsStr::new("codex-dev.db")),
-                path.file_name().map(|name| name.to_os_string()),
-            )
-        });
-        for path in candidates {
-            if !seen.insert(path.clone()) {
+        paths.sort();
+
+        for path in paths {
+            if !seen_paths.insert(path.clone()) {
                 continue;
             }
-            let Ok(conn) = Connection::open_with_flags(
-                &path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            ) else {
+            let codex_named = is_root_codex_sqlite_file(&path);
+            let Some(tables) = sqlite_table_names(&path) else {
+                if has_sqlite_header(&path) {
+                    unreadable_paths.push(path);
+                }
                 continue;
             };
-            let is_session_db = ["threads", "automation_runs", "inbox_items"]
-                .iter()
-                .any(|table| sqlite_has_table(&conn, table).unwrap_or(false));
-            if is_session_db {
-                paths.push(path);
+            let has_threads = tables.contains("threads");
+            let has_session_tables = SESSION_TABLES.iter().any(|table| tables.contains(*table));
+            let has_related_tables = RELATED_TABLES.iter().any(|table| tables.contains(*table))
+                && (has_session_tables || codex_named);
+            if !has_session_tables && !has_related_tables {
+                continue;
             }
+            databases.push(DiscoveredSqlite {
+                state_version: sqlite_state_version(&path),
+                path,
+                active_priority: root.active_priority,
+                session_priority: root.session_priority,
+                has_threads,
+                has_session_tables,
+                has_related_tables,
+            });
         }
     }
 
-    let legacy = codex_dir.join("state_5.sqlite");
-    if legacy.exists() && seen.insert(legacy.clone()) {
-        paths.push(legacy);
+    let active_path = databases
+        .iter()
+        .filter(|database| database.has_threads && database.state_version.is_some())
+        .min_by(|left, right| {
+            left.active_priority
+                .cmp(&right.active_priority)
+                .then_with(|| right.state_version.cmp(&left.state_version))
+                .then_with(|| right.path.file_name().cmp(&left.path.file_name()))
+        })
+        .map(|database| database.path.clone());
+
+    SqliteDiscovery {
+        active_paths: active_path.into_iter().collect(),
+        thread_paths: ordered_database_paths(
+            &databases,
+            |database| database.has_threads,
+            |database| database.session_priority,
+        ),
+        session_paths: ordered_database_paths(
+            &databases,
+            |database| database.has_session_tables,
+            |database| database.session_priority,
+        ),
+        related_paths: ordered_database_paths(
+            &databases,
+            |database| database.has_related_tables,
+            |database| database.active_priority,
+        ),
+        unreadable_paths,
     }
-    paths
 }
 
+pub(crate) fn sqlite_candidate_paths(codex_dir: &Path) -> Vec<PathBuf> {
+    discover_sqlite_databases(codex_dir).active_paths
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn sqlite_session_db_paths(codex_dir: &Path) -> Vec<PathBuf> {
+    discover_sqlite_databases(codex_dir).session_paths
+}
 pub(super) fn sqlite_subagent_thread_ids(
     conn: &Connection,
     thread_cols: &HashSet<String>,
@@ -595,8 +731,18 @@ pub(super) fn sqlite_thread_needs_alignment(
     false
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn scan_sqlite(
     codex_dir: &Path,
+    rollouts: &RolloutScan,
+    target_provider: &str,
+) -> Result<SqliteScan> {
+    let discovery = discover_sqlite_databases(codex_dir);
+    scan_sqlite_with_paths(&discovery.session_paths, rollouts, target_provider)
+}
+
+pub(super) fn scan_sqlite_with_paths(
+    sqlite_paths: &[PathBuf],
     rollouts: &RolloutScan,
     target_provider: &str,
 ) -> Result<SqliteScan> {
@@ -604,7 +750,7 @@ pub(crate) fn scan_sqlite(
     let mut thread_ids = HashSet::new();
     let mut subagent_ids = HashSet::new();
     let mut mismatched_ids = HashSet::new();
-    for path in sqlite_session_db_paths(codex_dir) {
+    for path in sqlite_paths {
         let conn = match Connection::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -675,8 +821,24 @@ pub(crate) fn scan_sqlite(
     Ok(scan)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn list_session_previews(
     codex_dir: &Path,
+    rollouts: &RolloutScan,
+    target_provider: &str,
+    limit: usize,
+) -> Result<(Vec<SessionPreview>, Vec<String>)> {
+    let discovery = discover_sqlite_databases(codex_dir);
+    list_session_previews_with_paths(
+        &discovery.active_first_session_paths(),
+        rollouts,
+        target_provider,
+        limit,
+    )
+}
+
+pub(super) fn list_session_previews_with_paths(
+    sqlite_paths: &[PathBuf],
     rollouts: &RolloutScan,
     target_provider: &str,
     limit: usize,
@@ -684,7 +846,7 @@ pub(crate) fn list_session_previews(
     let mut candidates = Vec::new();
     let mut warnings = Vec::new();
 
-    for path in sqlite_session_db_paths(codex_dir) {
+    for path in sqlite_paths {
         let conn = match Connection::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -810,4 +972,221 @@ pub(crate) fn list_session_previews(
         .take(limit.max(1))
         .collect();
     Ok((sessions, warnings))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_codex_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codex-x-storage-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create test codex dir");
+        path
+    }
+
+    fn create_thread_database(path: &Path, id: &str, provider: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create sqlite parent");
+        }
+        let conn = Connection::open(path).expect("create thread database");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT NOT NULL,
+                title TEXT,
+                updated_at_ms INTEGER
+             );",
+        )
+        .expect("create threads table");
+        conn.execute(
+            "INSERT INTO threads (id, model_provider, title, updated_at_ms)
+             VALUES (?1, ?2, 'test session', 1)",
+            (id, provider),
+        )
+        .expect("insert thread");
+    }
+
+    #[test]
+    fn root_state_10_is_listed_and_synchronized() {
+        let codex_dir = temp_codex_dir("root-state-10");
+        let database = codex_dir.join("state_10.sqlite");
+        let id = "019f6000-0000-7000-8000-000000000301";
+        create_thread_database(&database, id, "openai");
+
+        let discovery = discover_sqlite_databases(&codex_dir);
+        assert_eq!(discovery.active_paths, vec![database.clone()]);
+        assert_eq!(discovery.thread_paths, vec![database.clone()]);
+        let (sessions, warnings) = list_session_previews_with_paths(
+            &discovery.session_paths,
+            &RolloutScan::default(),
+            "custom",
+            50,
+        )
+        .expect("list state_10 session");
+        assert!(warnings.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, id);
+
+        let result = crate::sessions::sync::sync_sessions_provider_inner(
+            Some(codex_dir.display().to_string()),
+            Some("custom".to_string()),
+        )
+        .expect("sync root state_10");
+        assert_eq!(result.updated_threads, 1);
+        let provider: String = Connection::open(&database)
+            .expect("reopen state_10")
+            .query_row(
+                "SELECT model_provider FROM threads WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .expect("read updated provider");
+        assert_eq!(provider, "custom");
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn custom_db_and_sqlite3_share_the_same_discovery() {
+        let codex_dir = temp_codex_dir("custom-extensions");
+        let custom_db = codex_dir.join("sqlite/custom.db");
+        let custom_sqlite3 = codex_dir.join("sqlite/custom.sqlite3");
+        create_thread_database(&custom_db, "019f6000-0000-7000-8000-000000000311", "openai");
+        create_thread_database(
+            &custom_sqlite3,
+            "019f6000-0000-7000-8000-000000000312",
+            "openai",
+        );
+
+        let discovery = discover_sqlite_databases(&codex_dir);
+        let expected = HashSet::from([custom_db, custom_sqlite3]);
+        assert_eq!(
+            discovery.thread_paths.into_iter().collect::<HashSet<_>>(),
+            expected
+        );
+        assert_eq!(
+            discovery.session_paths.into_iter().collect::<HashSet<_>>(),
+            expected
+        );
+        assert_eq!(
+            discovery.related_paths.into_iter().collect::<HashSet<_>>(),
+            expected
+        );
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn invalid_state_database_is_ignored() {
+        let codex_dir = temp_codex_dir("invalid-state");
+        let invalid = codex_dir.join("state_5.sqlite");
+        let valid = codex_dir.join("state_10.sqlite");
+        fs::write(&invalid, b"not a sqlite database").expect("write invalid sqlite");
+        create_thread_database(&valid, "019f6000-0000-7000-8000-000000000321", "openai");
+
+        let discovery = discover_sqlite_databases(&codex_dir);
+        assert_eq!(discovery.active_paths, vec![valid.clone()]);
+        assert_eq!(discovery.thread_paths, vec![valid]);
+        assert!(!discovery.session_paths.contains(&invalid));
+        assert!(!discovery.related_paths.contains(&invalid));
+        assert!(discovery.unreadable_paths.is_empty());
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn sqlite_header_with_unreadable_schema_blocks_mutation() {
+        let codex_dir = temp_codex_dir("unreadable-schema");
+        let unreadable = codex_dir.join("state_5.sqlite");
+        fs::write(&unreadable, b"SQLite format 3\0").expect("write truncated sqlite");
+
+        let discovery = discover_sqlite_databases(&codex_dir);
+        assert_eq!(discovery.unreadable_paths, vec![unreadable]);
+        let error = ensure_sqlite_discovery_writable(&discovery)
+            .expect_err("unreadable sqlite must block mutation");
+        assert_eq!(
+            error.to_string(),
+            "配置错误: 无法读取会话数据库，请关闭 Codex 后重试。"
+        );
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn unrelated_root_sqlite_is_not_classified_as_codex_storage() {
+        let codex_dir = temp_codex_dir("unrelated-root");
+        let unrelated = codex_dir.join("unrelated.sqlite");
+        let conn = Connection::open(&unrelated).expect("create unrelated sqlite");
+        conn.execute("CREATE TABLE logs (thread_id TEXT)", [])
+            .expect("create unrelated logs table");
+        drop(conn);
+
+        let discovery = discover_sqlite_databases(&codex_dir);
+        assert!(!discovery.related_paths.contains(&unrelated));
+        assert!(!discovery.session_paths.contains(&unrelated));
+        assert!(!discovery.thread_paths.contains(&unrelated));
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn unrelated_custom_database_with_only_related_table_is_not_cleaned() {
+        let codex_dir = temp_codex_dir("unrelated-custom");
+        let unrelated = codex_dir.join("sqlite/unrelated.db");
+        fs::create_dir_all(unrelated.parent().expect("sqlite parent"))
+            .expect("create sqlite directory");
+        let conn = Connection::open(&unrelated).expect("create unrelated custom sqlite");
+        conn.execute("CREATE TABLE logs (thread_id TEXT)", [])
+            .expect("create unrelated logs table");
+        drop(conn);
+
+        let discovery = discover_sqlite_databases(&codex_dir);
+        assert!(!discovery.related_paths.contains(&unrelated));
+        assert!(!discovery.session_paths.contains(&unrelated));
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn duplicate_preview_prefers_active_database_at_same_timestamp() {
+        let codex_dir = temp_codex_dir("active-preview-priority");
+        let active = codex_dir.join("state_10.sqlite");
+        let legacy = codex_dir.join("sqlite/state_5.sqlite");
+        let id = "019f6000-0000-7000-8000-000000000351";
+        create_thread_database(&active, id, "openai");
+        create_thread_database(&legacy, id, "openai");
+        for (path, title) in [(&active, "active title"), (&legacy, "legacy title")] {
+            Connection::open(path)
+                .expect("open duplicate database")
+                .execute(
+                    "UPDATE threads SET title = ?1, updated_at_ms = 100 WHERE id = ?2",
+                    (title, id),
+                )
+                .expect("update duplicate title");
+        }
+
+        let discovery = discover_sqlite_databases(&codex_dir);
+        assert_eq!(discovery.session_paths, vec![legacy, active.clone()]);
+        let previews = list_session_previews_with_paths(
+            &discovery.active_first_session_paths(),
+            &RolloutScan::default(),
+            "openai",
+            50,
+        )
+        .expect("list duplicate previews")
+        .0;
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].title, "active title");
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
 }

@@ -1,10 +1,10 @@
 use super::app_server::delete_sessions_via_codex_app_server;
 use super::storage::{
-    all_codex_sqlite_paths, current_model_provider, scan_rollouts, split_line_ending,
-    sqlite_candidate_paths, sqlite_subagent_thread_ids, sqlite_thread_needs_alignment,
-    SqliteThreadIndexState,
+    current_model_provider, discover_sqlite_databases, ensure_sqlite_discovery_writable,
+    scan_rollouts, split_line_ending, sqlite_subagent_thread_ids, sqlite_thread_needs_alignment,
+    SqliteDiscovery, SqliteThreadIndexState,
 };
-use super::sync::{acquire_session_maintenance_lock, session_sync_status_inner};
+use super::sync::{acquire_session_maintenance_lock, session_sync_status_with_discovery};
 use super::types::SessionSyncStatus;
 use crate::error::{CodexxError, Result};
 use crate::file_io::{io_err, write_text};
@@ -65,58 +65,112 @@ fn normalized_session_ids(values: Vec<String>) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-fn collect_thread_spawn_edges(codex_dir: &Path) -> Result<Vec<(String, String)>> {
-    let mut edges = HashSet::new();
-    for path in sqlite_candidate_paths(codex_dir) {
+fn relationship_database_sources(
+    discovery: &SqliteDiscovery,
+    selected: &[String],
+) -> Result<HashMap<String, PathBuf>> {
+    let mut sources = HashMap::new();
+    for path in discovery.active_first_thread_paths() {
         let conn = Connection::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .map_err(|e| CodexxError::Database(format!("读取会话关系失败 {}: {e}", path.display())))?;
-        if !sqlite_has_table(&conn, "thread_spawn_edges")? {
-            continue;
-        }
-        let cols = table_column_set(&conn, "thread_spawn_edges")?;
-        if !cols.contains("parent_thread_id") || !cols.contains("child_thread_id") {
+        .map_err(|error| {
+            CodexxError::Database(format!("读取会话关系失败 {}: {error}", path.display()))
+        })?;
+        if !table_column_set(&conn, "threads")?.contains("id") {
             continue;
         }
         let mut stmt = conn
-            .prepare("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges")
-            .map_err(|e| CodexxError::Database(e.to_string()))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|e| CodexxError::Database(e.to_string()))?;
-        for row in rows {
-            edges.insert(row.map_err(|e| CodexxError::Database(e.to_string()))?);
+            .prepare("SELECT 1 FROM threads WHERE id = ?1 LIMIT 1")
+            .map_err(|error| CodexxError::Database(error.to_string()))?;
+        for id in selected {
+            if !sources.contains_key(id)
+                && stmt
+                    .exists([id])
+                    .map_err(|error| CodexxError::Database(error.to_string()))?
+            {
+                sources.insert(id.clone(), path.clone());
+            }
         }
     }
-    Ok(edges.into_iter().collect())
+    Ok(sources)
 }
 
-fn selected_session_roots(codex_dir: &Path, selected: &[String]) -> Result<Vec<String>> {
-    let edges = collect_thread_spawn_edges(codex_dir)?;
-    let selected_set = selected.iter().cloned().collect::<HashSet<_>>();
-    let mut parents = HashMap::<String, Vec<String>>::new();
-    for (parent, child) in edges {
-        parents.entry(child).or_default().push(parent);
+fn collect_thread_spawn_edges(path: &Path) -> Result<Vec<(String, String)>> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| CodexxError::Database(format!("读取会话关系失败 {}: {e}", path.display())))?;
+    if !sqlite_has_table(&conn, "thread_spawn_edges")? {
+        return Ok(Vec::new());
     }
+    let cols = table_column_set(&conn, "thread_spawn_edges")?;
+    if !cols.contains("parent_thread_id") || !cols.contains("child_thread_id") {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges")
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    let mut edges = Vec::new();
+    for row in rows {
+        edges.push(row.map_err(|e| CodexxError::Database(e.to_string()))?);
+    }
+    Ok(edges)
+}
+
+fn relationship_edges_by_database(
+    sources: &HashMap<String, PathBuf>,
+) -> Result<HashMap<PathBuf, Vec<(String, String)>>> {
+    let mut edges = HashMap::new();
+    for path in sources.values() {
+        if !edges.contains_key(path) {
+            edges.insert(path.clone(), collect_thread_spawn_edges(path)?);
+        }
+    }
+    Ok(edges)
+}
+
+fn selected_session_roots(
+    sources: &HashMap<String, PathBuf>,
+    selected: &[String],
+) -> Result<Vec<String>> {
+    let edges_by_database = relationship_edges_by_database(sources)?;
+    let selected_set = selected.iter().cloned().collect::<HashSet<_>>();
     Ok(selected
         .iter()
         .filter(|id| {
-            let mut pending = parents.get(*id).cloned().unwrap_or_default();
+            let Some(source) = sources.get(*id) else {
+                return true;
+            };
+            let Some(edges) = edges_by_database.get(source) else {
+                return true;
+            };
+            let mut pending = edges
+                .iter()
+                .filter(|(_, child)| child == *id)
+                .map(|(parent, _)| parent.clone())
+                .collect::<Vec<_>>();
             let mut visited = HashSet::new();
             while let Some(parent) = pending.pop() {
                 if !visited.insert(parent.clone()) {
                     continue;
                 }
-                if selected_set.contains(&parent) {
+                if selected_set.contains(&parent) && sources.get(&parent) == Some(source) {
                     return false;
                 }
-                if let Some(next) = parents.get(&parent) {
-                    pending.extend(next.iter().cloned());
-                }
+                pending.extend(
+                    edges
+                        .iter()
+                        .filter(|(_, child)| child == &parent)
+                        .map(|(next_parent, _)| next_parent.clone()),
+                );
             }
             true
         })
@@ -125,24 +179,29 @@ fn selected_session_roots(codex_dir: &Path, selected: &[String]) -> Result<Vec<S
 }
 
 fn session_descendants_by_root(
-    codex_dir: &Path,
+    sources: &HashMap<String, PathBuf>,
     roots: &[String],
 ) -> Result<HashMap<String, HashSet<String>>> {
-    let edges = collect_thread_spawn_edges(codex_dir)?;
-    let mut children = HashMap::<String, Vec<String>>::new();
-    for (parent, child) in edges {
-        children.entry(parent).or_default().push(child);
-    }
+    let edges_by_database = relationship_edges_by_database(sources)?;
     let mut descendants = HashMap::new();
     for root in roots {
         let mut ids = HashSet::from([root.clone()]);
+        let Some(edges) = sources
+            .get(root)
+            .and_then(|source| edges_by_database.get(source))
+        else {
+            descendants.insert(root.clone(), ids);
+            continue;
+        };
         let mut pending = vec![root.clone()];
         while let Some(parent) = pending.pop() {
-            if let Some(next) = children.get(&parent) {
-                for child in next {
-                    if ids.insert(child.clone()) {
-                        pending.push(child.clone());
-                    }
+            for child in edges
+                .iter()
+                .filter(|(candidate, _)| candidate == &parent)
+                .map(|(_, child)| child)
+            {
+                if ids.insert(child.clone()) {
+                    pending.push(child.clone());
                 }
             }
         }
@@ -150,7 +209,6 @@ fn session_descendants_by_root(
     }
     Ok(descendants)
 }
-
 pub(crate) fn active_session_ids_present(
     active_database_paths: &[PathBuf],
     session_ids: &HashSet<String>,
@@ -295,8 +353,11 @@ fn active_session_storage_snapshot(
 }
 
 #[cfg(test)]
-fn session_ids_with_descendants(codex_dir: &Path, roots: &[String]) -> Result<HashSet<String>> {
-    Ok(session_descendants_by_root(codex_dir, roots)?
+fn session_ids_with_descendants(
+    sources: &HashMap<String, PathBuf>,
+    roots: &[String],
+) -> Result<HashSet<String>> {
+    Ok(session_descendants_by_root(sources, roots)?
         .into_values()
         .flatten()
         .collect())
@@ -383,10 +444,11 @@ fn canonical_rollout_path(codex_dir: &Path, value: &str, id: &str) -> Result<Opt
 
 fn selected_rollout_paths(
     codex_dir: &Path,
+    thread_database_paths: &[PathBuf],
     session_ids: &HashSet<String>,
 ) -> Result<HashSet<PathBuf>> {
     let mut paths = HashSet::new();
-    for db_path in all_codex_sqlite_paths(codex_dir) {
+    for db_path in thread_database_paths {
         let conn = Connection::open_with_flags(
             &db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -578,7 +640,7 @@ fn delete_ids_from_table(
 }
 
 fn purge_session_database_references(
-    codex_dir: &Path,
+    related_database_paths: &[PathBuf],
     session_ids: &HashSet<String>,
 ) -> (usize, usize, Vec<String>) {
     let known_tables = [
@@ -599,7 +661,7 @@ fn purge_session_database_references(
     let mut deleted_threads = 0usize;
     let mut deleted_related = 0usize;
     let mut errors = Vec::new();
-    for path in all_codex_sqlite_paths(codex_dir) {
+    for path in related_database_paths {
         let result = (|| -> Result<(usize, usize)> {
             let mut conn = Connection::open_with_flags(
                 &path,
@@ -701,6 +763,7 @@ pub(crate) struct LocalSessionDeleteCounts {
 
 fn delete_exact_session_ids_locally(
     codex_dir: &Path,
+    related_database_paths: &[PathBuf],
     session_ids: HashSet<String>,
     rollout_paths: HashSet<PathBuf>,
 ) -> LocalSessionDeleteCounts {
@@ -726,7 +789,7 @@ fn delete_exact_session_ids_locally(
         }
     }
     let (deleted_thread_rows, removed_database_rows, database_errors) =
-        purge_session_database_references(codex_dir, &session_ids);
+        purge_session_database_references(related_database_paths, &session_ids);
     deleted_related_rows += removed_database_rows;
     errors.extend(database_errors);
     LocalSessionDeleteCounts {
@@ -743,10 +806,14 @@ pub(crate) fn hard_delete_sessions_locally(
     codex_dir: &Path,
     roots: &[String],
 ) -> Result<LocalSessionDeleteCounts> {
-    let session_ids = session_ids_with_descendants(codex_dir, roots)?;
-    let rollout_paths = selected_rollout_paths(codex_dir, &session_ids)?;
+    let discovery = discover_sqlite_databases(codex_dir);
+    ensure_sqlite_discovery_writable(&discovery)?;
+    let relationship_sources = relationship_database_sources(&discovery, roots)?;
+    let session_ids = session_ids_with_descendants(&relationship_sources, roots)?;
+    let rollout_paths = selected_rollout_paths(codex_dir, &discovery.thread_paths, &session_ids)?;
     Ok(delete_exact_session_ids_locally(
         codex_dir,
+        &discovery.related_paths,
         session_ids,
         rollout_paths,
     ))
@@ -767,25 +834,30 @@ pub(crate) fn delete_codex_sessions_inner(
     let requested_sessions = selected.len();
     let codex_dir = resolve_codex_dir(input.config_dir)?;
     let _maintenance_lock = acquire_session_maintenance_lock(&codex_dir)?;
-    let roots = selected_session_roots(&codex_dir, &selected)?;
-    let expected_by_root = session_descendants_by_root(&codex_dir, &roots)?;
+    let discovery = discover_sqlite_databases(&codex_dir);
+    ensure_sqlite_discovery_writable(&discovery)?;
+    let relationship_sources = relationship_database_sources(&discovery, &selected)?;
+    let roots = selected_session_roots(&relationship_sources, &selected)?;
+    let expected_by_root = session_descendants_by_root(&relationship_sources, &roots)?;
     let expected_ids = expected_by_root
         .values()
         .flatten()
         .cloned()
         .collect::<HashSet<_>>();
-    let active_database_paths = sqlite_candidate_paths(&codex_dir);
-    if active_database_paths.is_empty() {
+    if discovery.thread_paths.is_empty() {
         return Err(CodexxError::Database(
             "无法确认当前活动会话库，已取消永久删除".to_string(),
         ));
     }
     let verification_ids = expected_ids.clone();
-    let status_before = session_sync_status_inner(Some(codex_dir.display().to_string()), None)?;
-    let storage_before = active_session_storage_snapshot(&codex_dir, &active_database_paths)?;
+    let target_provider = current_model_provider(&codex_dir, None)?;
+    let status_before =
+        session_sync_status_with_discovery(&codex_dir, target_provider.clone(), &discovery)?;
+    let storage_before = active_session_storage_snapshot(&codex_dir, &discovery.thread_paths)?;
     // Validate and collect every filesystem target before the official API can
     // make the deletion irreversible.
-    let expected_rollout_paths = selected_rollout_paths(&codex_dir, &expected_ids)?;
+    let expected_rollout_paths =
+        selected_rollout_paths(&codex_dir, &discovery.thread_paths, &expected_ids)?;
     let mut counts = LocalSessionDeleteCounts::default();
     let mut failed_roots = Vec::new();
 
@@ -811,6 +883,7 @@ pub(crate) fn delete_codex_sessions_inner(
                     &mut counts,
                     delete_exact_session_ids_locally(
                         &codex_dir,
+                        &discovery.related_paths,
                         cleanup_ids,
                         cleanup_rollout_paths,
                     ),
@@ -820,12 +893,17 @@ pub(crate) fn delete_codex_sessions_inner(
         None => {
             merge_delete_counts(
                 &mut counts,
-                delete_exact_session_ids_locally(&codex_dir, expected_ids, expected_rollout_paths),
+                delete_exact_session_ids_locally(
+                    &codex_dir,
+                    &discovery.related_paths,
+                    expected_ids,
+                    expected_rollout_paths,
+                ),
             );
         }
     }
 
-    let remaining_ids = match active_session_ids_present(&active_database_paths, &verification_ids)
+    let remaining_ids = match active_session_ids_present(&discovery.thread_paths, &verification_ids)
     {
         Ok(remaining) => remaining,
         Err(error) => {
@@ -841,7 +919,7 @@ pub(crate) fn delete_codex_sessions_inner(
         .iter()
         .filter(|id| remaining_ids.contains(*id))
         .count();
-    let status = match session_sync_status_inner(Some(codex_dir.display().to_string()), None) {
+    let status = match session_sync_status_with_discovery(&codex_dir, target_provider, &discovery) {
         Ok(status) => status,
         Err(error) => {
             let message = format!("删除后刷新会话状态失败: {error}");
@@ -906,4 +984,158 @@ pub(crate) fn delete_codex_sessions_inner(
         deleted_rollout_files: counts.deleted_rollout_files,
         deleted_related_rows: counts.deleted_related_rows,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_codex_dir() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codex-x-delete-verification-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create test codex dir");
+        path
+    }
+
+    fn create_thread_database(path: &Path, id: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create sqlite parent");
+        }
+        let conn = Connection::open(path).expect("create thread database");
+        conn.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT NOT NULL)",
+            [],
+        )
+        .expect("create threads table");
+        conn.execute(
+            "INSERT INTO threads (id, model_provider) VALUES (?1, 'openai')",
+            [id],
+        )
+        .expect("insert thread");
+    }
+
+    #[test]
+    fn deletion_verification_checks_second_visible_database() {
+        let codex_dir = temp_codex_dir();
+        let active = codex_dir.join("state_10.sqlite");
+        let second = codex_dir.join("sqlite/custom.db");
+        let id = "019f6000-0000-7000-8000-000000000331";
+        create_thread_database(&active, id);
+        create_thread_database(&second, id);
+
+        let discovery = discover_sqlite_databases(&codex_dir);
+        assert_eq!(discovery.thread_paths.len(), 2);
+        Connection::open(&active)
+            .expect("open active database")
+            .execute("DELETE FROM threads WHERE id = ?1", [id])
+            .expect("delete only active copy");
+
+        let ids = HashSet::from([id.to_string()]);
+        let remaining = active_session_ids_present(&discovery.thread_paths, &ids)
+            .expect("verify all visible databases");
+        assert_eq!(remaining, ids);
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn descendant_edges_use_active_database_not_stale_legacy_copy() {
+        let codex_dir = temp_codex_dir();
+        let active = codex_dir.join("state_10.sqlite");
+        let legacy = codex_dir.join("sqlite/state_5.sqlite");
+        let parent = "019f6000-0000-7000-8000-000000000341";
+        let child = "019f6000-0000-7000-8000-000000000342";
+        let keep = "019f6000-0000-7000-8000-000000000343";
+        create_thread_database(&active, parent);
+        create_thread_database(&legacy, parent);
+
+        for (path, descendant) in [(&active, child), (&legacy, keep)] {
+            let conn = Connection::open(path).expect("open relationship database");
+            conn.execute(
+                "INSERT INTO threads (id, model_provider) VALUES (?1, 'openai')",
+                [descendant],
+            )
+            .expect("insert descendant");
+            conn.execute(
+                "CREATE TABLE thread_spawn_edges (
+                    parent_thread_id TEXT NOT NULL,
+                    child_thread_id TEXT NOT NULL
+                 )",
+                [],
+            )
+            .expect("create spawn edges");
+            conn.execute(
+                "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id)
+                 VALUES (?1, ?2)",
+                (parent, descendant),
+            )
+            .expect("insert spawn edge");
+        }
+
+        let discovery = discover_sqlite_databases(&codex_dir);
+        let relationship_sources = relationship_database_sources(&discovery, &[parent.to_string()])
+            .expect("resolve relationship source");
+        assert_eq!(relationship_sources.get(parent), Some(&active));
+        let descendants = session_descendants_by_root(&relationship_sources, &[parent.to_string()])
+            .expect("resolve descendants");
+        assert_eq!(
+            descendants.get(parent),
+            Some(&HashSet::from([parent.to_string(), child.to_string()]))
+        );
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn secondary_only_session_uses_its_own_descendant_edges() {
+        let codex_dir = temp_codex_dir();
+        let active = codex_dir.join("state_10.sqlite");
+        let secondary = codex_dir.join("sqlite/custom.db");
+        let active_id = "019f6000-0000-7000-8000-000000000361";
+        let parent = "019f6000-0000-7000-8000-000000000362";
+        let child = "019f6000-0000-7000-8000-000000000363";
+        create_thread_database(&active, active_id);
+        create_thread_database(&secondary, parent);
+        let conn = Connection::open(&secondary).expect("open secondary database");
+        conn.execute(
+            "INSERT INTO threads (id, model_provider) VALUES (?1, 'openai')",
+            [child],
+        )
+        .expect("insert secondary child");
+        conn.execute(
+            "CREATE TABLE thread_spawn_edges (
+                parent_thread_id TEXT NOT NULL,
+                child_thread_id TEXT NOT NULL
+             )",
+            [],
+        )
+        .expect("create secondary edges");
+        conn.execute(
+            "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id)
+             VALUES (?1, ?2)",
+            (parent, child),
+        )
+        .expect("insert secondary edge");
+        drop(conn);
+
+        let discovery = discover_sqlite_databases(&codex_dir);
+        let sources = relationship_database_sources(&discovery, &[parent.to_string()])
+            .expect("resolve secondary source");
+        assert_eq!(sources.get(parent), Some(&secondary));
+        let descendants = session_descendants_by_root(&sources, &[parent.to_string()])
+            .expect("resolve secondary descendants");
+        assert_eq!(
+            descendants.get(parent),
+            Some(&HashSet::from([parent.to_string(), child.to_string()]))
+        );
+
+        let _ = fs::remove_dir_all(codex_dir);
+    }
 }
