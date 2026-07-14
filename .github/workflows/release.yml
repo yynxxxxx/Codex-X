@@ -5,13 +5,21 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag matching the app version (for example v0.2.36)
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 defaults:
   run:
     shell: bash
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -23,38 +31,20 @@ jobs:
         include:
           - name: macOS Apple Silicon
             platform: macos-latest
-            args: --bundles dmg
+            args: --bundles app,dmg
             artifact: codex-x-macos-arm64
-            paths: |
-              apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
-              apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz
-              apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
           - name: macOS Intel
             platform: macos-15-intel
-            args: --bundles dmg
+            args: --bundles app,dmg
             artifact: codex-x-macos-x64
-            paths: |
-              apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
-              apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz
-              apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
           - name: Linux
             platform: ubuntu-22.04
             args: --bundles deb,rpm
             artifact: codex-x-linux
-            paths: |
-              apps/desktop/src-tauri/target/release/bundle/deb/*.deb
-              apps/desktop/src-tauri/target/release/bundle/deb/*.deb.sig
-              apps/desktop/src-tauri/target/release/bundle/rpm/*.rpm
-              apps/desktop/src-tauri/target/release/bundle/rpm/*.rpm.sig
           - name: Windows
             platform: windows-latest
             args: --bundles msi
             artifact: codex-x-windows
-            paths: |
-              apps/desktop/src-tauri/target/release/bundle/msi/*.msi
-              apps/desktop/src-tauri/target/release/bundle/msi/*.msi.zip
-              apps/desktop/src-tauri/target/release/bundle/msi/*.msi.zip.sig
-              apps/desktop/src-tauri/Codex-X_*_windows_x64_portable.zip
 
     steps:
       - name: Checkout
@@ -93,6 +83,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Validate updater signing secrets
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY" || { echo "Missing TAURI_SIGNING_PRIVATE_KEY repository secret" >&2; exit 1; }
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" || { echo "Missing TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secret" >&2; exit 1; }
+          python3 scripts/validate_updater_release.py --config-only
+
+      - name: Validate release version
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          test "$RELEASE_TAG" = "v$version" || { echo "Release tag $RELEASE_TAG does not match app version $version" >&2; exit 1; }
+
       - name: Build Tauri bundles
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -116,57 +120,47 @@ jobs:
           EOF
           powershell -NoProfile -Command "Compress-Archive -Path 'apps/desktop/src-tauri/portable/Codex-X_${version}_windows_x64_portable/*' -DestinationPath 'apps/desktop/src-tauri/Codex-X_${version}_windows_x64_portable.zip' -Force"
 
-      - name: Normalize release asset names
+      - name: Stage release assets
         run: |
           set -euo pipefail
           version=$(node -p "require('./apps/desktop/package.json').version")
+          rm -rf release-upload
+          mkdir -p release-upload
           case "${{ matrix.name }}" in
             "macOS Apple Silicon")
-              target="apps/desktop/src-tauri/target/release/bundle/dmg/Codex-X_${version}_macos_apple_silicon_aarch64.dmg"
-              src=$(find apps/desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' | head -n 1)
-              test -n "$src"
-              mv "$src" "$target"
+              dmg=$(find apps/desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' | head -n 1)
               updater=$(find apps/desktop/src-tauri/target/release/bundle/macos -maxdepth 1 -type f -name '*.app.tar.gz' | head -n 1)
-              test -n "$updater" && test -f "${updater}.sig"
-              updater_target="apps/desktop/src-tauri/target/release/bundle/macos/Codex-X_${version}_darwin_aarch64.app.tar.gz"
-              mv "$updater" "$updater_target"
-              mv "${updater}.sig" "${updater_target}.sig"
+              test -n "$dmg" && test -n "$updater" && test -f "${updater}.sig"
+              cp "$dmg" "release-upload/Codex-X_${version}_macos_apple_silicon_aarch64.dmg"
+              cp "$updater" "release-upload/Codex-X_${version}_darwin_aarch64.app.tar.gz"
+              cp "${updater}.sig" "release-upload/Codex-X_${version}_darwin_aarch64.app.tar.gz.sig"
               ;;
             "macOS Intel")
-              target="apps/desktop/src-tauri/target/release/bundle/dmg/Codex-X_${version}_macos_intel_x64.dmg"
-              src=$(find apps/desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' | head -n 1)
-              test -n "$src"
-              mv "$src" "$target"
+              dmg=$(find apps/desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' | head -n 1)
               updater=$(find apps/desktop/src-tauri/target/release/bundle/macos -maxdepth 1 -type f -name '*.app.tar.gz' | head -n 1)
-              test -n "$updater" && test -f "${updater}.sig"
-              updater_target="apps/desktop/src-tauri/target/release/bundle/macos/Codex-X_${version}_darwin_x86_64.app.tar.gz"
-              mv "$updater" "$updater_target"
-              mv "${updater}.sig" "${updater_target}.sig"
+              test -n "$dmg" && test -n "$updater" && test -f "${updater}.sig"
+              cp "$dmg" "release-upload/Codex-X_${version}_macos_intel_x64.dmg"
+              cp "$updater" "release-upload/Codex-X_${version}_darwin_x86_64.app.tar.gz"
+              cp "${updater}.sig" "release-upload/Codex-X_${version}_darwin_x86_64.app.tar.gz.sig"
               ;;
             "Windows")
-              target="apps/desktop/src-tauri/target/release/bundle/msi/Codex-X_${version}_windows_x64.msi"
-              src=$(find apps/desktop/src-tauri/target/release/bundle/msi -maxdepth 1 -type f -name '*.msi' | head -n 1)
-              test -n "$src"
-              mv "$src" "$target"
+              msi=$(find apps/desktop/src-tauri/target/release/bundle/msi -maxdepth 1 -type f -name '*.msi' | head -n 1)
               updater=$(find apps/desktop/src-tauri/target/release/bundle/msi -maxdepth 1 -type f -name '*.msi.zip' | head -n 1)
-              test -n "$updater" && test -f "${updater}.sig"
-              updater_target="apps/desktop/src-tauri/target/release/bundle/msi/Codex-X_${version}_windows_x86_64.msi.zip"
-              mv "$updater" "$updater_target"
-              mv "${updater}.sig" "${updater_target}.sig"
+              portable="apps/desktop/src-tauri/Codex-X_${version}_windows_x64_portable.zip"
+              test -n "$msi" && test -n "$updater" && test -f "${updater}.sig" && test -f "$portable"
+              cp "$msi" "release-upload/Codex-X_${version}_windows_x64.msi"
+              cp "$updater" "release-upload/Codex-X_${version}_windows_x86_64.msi.zip"
+              cp "${updater}.sig" "release-upload/Codex-X_${version}_windows_x86_64.msi.zip.sig"
+              cp "$portable" release-upload/
               ;;
             "Linux")
-              deb_target="apps/desktop/src-tauri/target/release/bundle/deb/Codex-X_${version}_linux_x64.deb"
-              rpm_target="apps/desktop/src-tauri/target/release/bundle/rpm/Codex-X_${version}_linux_x64.rpm"
-              deb_src=$(find apps/desktop/src-tauri/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' | head -n 1)
-              rpm_src=$(find apps/desktop/src-tauri/target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' | head -n 1)
-              test -n "$deb_src"
-              test -n "$rpm_src"
-              test -f "${deb_src}.sig"
-              test -f "${rpm_src}.sig"
-              mv "$deb_src" "$deb_target"
-              mv "$rpm_src" "$rpm_target"
-              mv "${deb_src}.sig" "${deb_target}.sig"
-              mv "${rpm_src}.sig" "${rpm_target}.sig"
+              deb=$(find apps/desktop/src-tauri/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' | head -n 1)
+              rpm=$(find apps/desktop/src-tauri/target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' | head -n 1)
+              test -n "$deb" && test -n "$rpm" && test -f "${deb}.sig" && test -f "${rpm}.sig"
+              cp "$deb" "release-upload/Codex-X_${version}_linux_x64.deb"
+              cp "${deb}.sig" "release-upload/Codex-X_${version}_linux_x64.deb.sig"
+              cp "$rpm" "release-upload/Codex-X_${version}_linux_x64.rpm"
+              cp "${rpm}.sig" "release-upload/Codex-X_${version}_linux_x64.rpm.sig"
               ;;
           esac
 
@@ -174,7 +168,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.paths }}
+          path: release-upload/*
           if-no-files-found: error
           retention-days: 7
 
@@ -195,14 +189,13 @@ jobs:
           merge-multiple: true
 
       - name: Prepare release notes
-        id: release_notes
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import os
           import re
 
-          tag = os.environ["GITHUB_REF_NAME"]
+          tag = os.environ["RELEASE_TAG"]
           text = Path("CHANGELOG.md").read_text(encoding="utf-8")
           match = re.search(
               rf"^## \[{re.escape(tag)}\].*?\n(.*?)(?=^## \[|\Z)",
@@ -217,55 +210,33 @@ jobs:
           PY
 
       - name: Prepare update manifests
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          python3 - <<'PY'
-          from datetime import datetime, timezone
-          import json
-          import os
-          from pathlib import Path
+          python3 scripts/prepare_updater_manifests.py \
+            --asset-dir release-assets \
+            --notes-file release-body.md \
+            --repository yynxxxxx/Codex-X \
+            --tag "$RELEASE_TAG"
 
-          tag = os.environ["RELEASE_TAG"]
-          version = tag.removeprefix("v")
-          asset_dir = Path("release-assets")
-          notes = Path("release-body.md").read_text(encoding="utf-8").strip()
-          base_url = f"https://github.com/yynxxxxx/Codex-X/releases/download/{tag}"
-          manifests = {
-              "latest-darwin-aarch64-app.json": f"Codex-X_{version}_darwin_aarch64.app.tar.gz",
-              "latest-darwin-x86_64-app.json": f"Codex-X_{version}_darwin_x86_64.app.tar.gz",
-              "latest-windows-x86_64-msi.json": f"Codex-X_{version}_windows_x86_64.msi.zip",
-              "latest-linux-x86_64-deb.json": f"Codex-X_{version}_linux_x64.deb",
-              "latest-linux-x86_64-rpm.json": f"Codex-X_{version}_linux_x64.rpm",
-          }
-          for manifest, artifact_name in manifests.items():
-              artifact = asset_dir / artifact_name
-              signature = Path(f"{artifact}.sig")
-              if not artifact.is_file() or not signature.is_file():
-                  raise SystemExit(f"Missing updater artifact or signature: {artifact_name}")
-              payload = {
-                  "version": version,
-                  "notes": notes,
-                  "pub_date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                  "url": f"{base_url}/{artifact_name}",
-                  "signature": signature.read_text(encoding="utf-8").strip(),
-              }
-              (asset_dir / manifest).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-          PY
+      - name: Validate updater release
+        run: |
+          python3 scripts/validate_updater_release.py \
+            --asset-dir release-assets \
+            --repository yynxxxxx/Codex-X \
+            --tag "$RELEASE_TAG"
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="$RELEASE_TAG"
           title="Codex-X ${tag}"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" --title "$title" --notes-file release-body.md --latest
           else
             gh release create "$tag" --title "$title" --notes-file release-body.md --latest
           fi
-          mapfile -t assets < <(find release-assets -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.rpm' -o -name '*.zip' -o -name '*.sig' -o -name 'latest-*.json' \) -print | sort)
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.rpm' -o -name '*.zip' -o -name '*.sig' -o -name 'latest-*.json' \) -print | sort)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "No release assets found" >&2
             exit 1

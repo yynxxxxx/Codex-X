@@ -23,7 +23,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 thiserror = "2.0"
 rusqlite = { version = "0.31", features = ["bundled"] }
-ureq = { version = "2.12", features = ["tls", "socks-proxy"] }
+ureq = { version = "2.12", features = ["tls"] }
 sha2 = "0.10"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 tauri-plugin-updater = "2"

@@ -34,8 +34,8 @@ import {
   Zap,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import "./styles.css";
 
 type Lang = "zh" | "en";
@@ -165,12 +165,6 @@ type ReleaseInfo = {
   hasUpdate?: boolean;
   canInstall?: boolean;
   downloadProgress?: number;
-};
-
-type ReleaseUpdateInstallResult = {
-  version: string;
-  assetName: string;
-  downloadUrl: string;
 };
 
 type ReleaseUpdateProgress = {
@@ -993,9 +987,7 @@ function releaseUpdatePhaseLabel(phase: string, lang: Lang) {
   const labels: Record<string, { zh: string; en: string }> = {
     checking: { zh: "检查更新", en: "Checking" },
     downloading: { zh: "下载更新", en: "Downloading" },
-    mounting: { zh: "挂载镜像", en: "Mounting" },
-    installing: { zh: "安装更新", en: "Installing" },
-    cleanup: { zh: "清理现场", en: "Cleaning up" },
+    installing: { zh: "校验并安装", en: "Verifying and installing" },
     restarting: { zh: "重新启动", en: "Restarting" },
     error: { zh: "更新失败", en: "Failed" },
   };
@@ -1091,6 +1083,7 @@ function App() {
   const [officialForm, setOfficialForm] = React.useState({ model: "gpt-5.5", authJson: "" });
   const [promptModeHelpOpen, setPromptModeHelpOpen] = React.useState(false);
   const autoUpdateCheckedRef = React.useRef(false);
+  const availableUpdateRef = React.useRef<Update | null>(null);
   const autoSessionSyncRanRef = React.useRef(false);
   const promptImportRef = React.useRef<HTMLInputElement | null>(null);
   const skillZipImportRef = React.useRef<HTMLInputElement | null>(null);
@@ -1131,16 +1124,16 @@ function App() {
     if (releaseInfo.status === "ok") return lang === "zh" ? "已是最新" : "Up to date";
     return lang === "zh" ? "未检查" : "Idle";
   }, [lang, releaseInfo.hasUpdate, releaseInfo.status]);
-  const canAutoInstallRelease = releaseInfo.hasUpdate === true && releaseInfo.status !== "installing";
+  const canAutoInstallRelease = releaseInfo.hasUpdate === true
+    && releaseInfo.canInstall === true
+    && releaseInfo.status !== "installing";
   const releaseUpdatePercent = typeof releaseUpdateProgress?.progress === "number"
     ? Math.max(0, Math.min(100, Math.round(releaseUpdateProgress.progress * 100)))
     : null;
   const releaseUpdateVisualPercent = releaseUpdatePercent ?? ({
     checking: 12,
     downloading: 18,
-    mounting: 58,
-    installing: 78,
-    cleanup: 90,
+    installing: 82,
     restarting: 100,
     error: 100,
   }[releaseUpdateProgress?.phase || "checking"] ?? 12);
@@ -1152,30 +1145,10 @@ function App() {
     localStorage.setItem(LANG_KEY, lang);
   }, [lang]);
 
-  React.useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void listen<ReleaseUpdateProgress>("release-update-progress", (event) => {
-      if (disposed) return;
-      const payload = event.payload;
-      setReleaseUpdateProgress(payload);
-      setReleaseInfo((current) => ({
-        ...current,
-        status: payload.phase === "error" ? "error" : "installing",
-        downloadProgress: typeof payload.progress === "number" ? payload.progress : current.downloadProgress,
-        message: payload.message || current.message,
-      }));
-    }).then((cleanup) => {
-      if (disposed) {
-        cleanup();
-      } else {
-        unlisten = cleanup;
-      }
-    }).catch(() => undefined);
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
+  React.useEffect(() => () => {
+    const update = availableUpdateRef.current;
+    availableUpdateRef.current = null;
+    if (update) void update.close().catch(() => undefined);
   }, []);
 
   React.useEffect(() => {
@@ -1878,6 +1851,9 @@ function App() {
   const checkForUpdates = React.useCallback(async ({ quiet = false }: { quiet?: boolean } = {}) => {
     const repo = aboutInfo?.githubRepo || FALLBACK_GITHUB_REPO;
     const releasesUrl = `https://github.com/${repo}/releases/`;
+    const previousUpdate = availableUpdateRef.current;
+    availableUpdateRef.current = null;
+    if (previousUpdate) await previousUpdate.close().catch(() => undefined);
     setReleaseInfo({ status: "checking", htmlUrl: releasesUrl });
     let update: Awaited<ReturnType<typeof check>> = null;
     try {
@@ -1890,11 +1866,14 @@ function App() {
       }
 
       const latestVersion = update.version;
+      const releaseBody = update.body || "";
+      availableUpdateRef.current = update;
+      update = null;
       setReleaseInfo({
         status: "ok",
         latestVersion,
         htmlUrl: releasesUrl,
-        body: update.body || "",
+        body: releaseBody,
         hasUpdate: true,
         canInstall: true,
         message: lang === "zh" ? "发现新版本" : "Update available",
@@ -1905,6 +1884,7 @@ function App() {
         setUpdatePromptOpen(true);
       }
     } catch {
+      availableUpdateRef.current = null;
       try {
         const release = await fetchLatestGithubRelease(repo);
         const latestVersion = release.tag_name || release.name || "";
@@ -1935,10 +1915,10 @@ function App() {
   const installAvailableUpdate = React.useCallback(async () => {
     const repo = aboutInfo?.githubRepo || FALLBACK_GITHUB_REPO;
     const releasesUrl = `https://github.com/${repo}/releases/`;
-    if (!releaseInfo.hasUpdate || releaseInfo.status === "installing") {
-      if (!releaseInfo.hasUpdate) {
-        setToast(lang === "zh" ? "请先检查更新" : "Check for updates first");
-      }
+    const update = availableUpdateRef.current;
+    if (!releaseInfo.hasUpdate || !releaseInfo.canInstall || !update || releaseInfo.status === "installing") {
+      if (!releaseInfo.hasUpdate) setToast(lang === "zh" ? "请先检查更新" : "Check for updates first");
+      else if (!releaseInfo.canInstall || !update) setToast(lang === "zh" ? "请从发布页下载安装此更新" : "Download this update from the releases page");
       return;
     }
     setUpdatePromptOpen(false);
@@ -1957,15 +1937,63 @@ function App() {
       downloadProgress: undefined,
       message: lang === "zh" ? "正在自动下载并安装更新…" : "Downloading and installing update…",
     }));
+    let downloadedBytes = 0;
+    let totalBytes: number | null = null;
     try {
-      const result = await invoke<ReleaseUpdateInstallResult>("install_release_update_from_github", { repo });
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          downloadedBytes = 0;
+          totalBytes = event.data.contentLength ?? null;
+          setReleaseUpdateProgress({
+            phase: "downloading",
+            message: lang === "zh" ? "正在下载并校验签名更新包…" : "Downloading and verifying the signed update…",
+            progress: totalBytes ? 0 : null,
+            downloadedBytes: 0,
+            totalBytes,
+          });
+          return;
+        }
+        if (event.event === "Progress") {
+          downloadedBytes += event.data.chunkLength;
+          const progress = totalBytes && totalBytes > 0 ? downloadedBytes / totalBytes : null;
+          setReleaseUpdateProgress({
+            phase: "downloading",
+            message: lang === "zh" ? "正在下载并校验签名更新包…" : "Downloading and verifying the signed update…",
+            progress,
+            downloadedBytes,
+            totalBytes,
+          });
+          setReleaseInfo((current) => ({ ...current, downloadProgress: progress ?? undefined }));
+          return;
+        }
+        setReleaseUpdateProgress({
+          phase: "installing",
+          message: lang === "zh" ? "下载完成，正在校验签名并安装更新…" : "Download complete. Verifying the signature and installing…",
+          progress: 1,
+          downloadedBytes,
+          totalBytes,
+        });
+      }, { timeout: 5 * 60_000 });
+
+      availableUpdateRef.current = null;
+      await update.close().catch(() => undefined);
+      setReleaseUpdateProgress({
+        phase: "restarting",
+        message: lang === "zh" ? "更新已安装，正在重新启动…" : "Update installed. Restarting…",
+        progress: 1,
+        downloadedBytes,
+        totalBytes,
+      });
       setReleaseInfo((current) => ({
         ...current,
-        latestVersion: result.version,
-        htmlUrl: result.downloadUrl || current.htmlUrl || releasesUrl,
-        message: lang === "zh" ? `已安装 ${result.version}，正在重新启动…` : `Installed ${result.version}. Restarting…`,
+        latestVersion: update.version,
+        canInstall: false,
+        downloadProgress: 1,
+        htmlUrl: current.htmlUrl || releasesUrl,
+        message: lang === "zh" ? `已安装 ${update.version}，正在重新启动…` : `Installed ${update.version}. Restarting…`,
       }));
       setToast(lang === "zh" ? "更新已安装，正在重新启动…" : "Update installed. Restarting…");
+      await relaunch();
     } catch (e) {
       const detail = String(e || "");
       const message = lang === "zh" ? "下载或安装更新失败" : "Failed to download or install the update";
@@ -1979,7 +2007,7 @@ function App() {
       setReleaseInfo((current) => ({ ...current, status: "error", htmlUrl: current.htmlUrl || releasesUrl, message }));
       setToast(message);
     }
-  }, [aboutInfo?.githubRepo, lang, releaseInfo.hasUpdate, releaseInfo.status]);
+  }, [aboutInfo?.githubRepo, lang, releaseInfo.canInstall, releaseInfo.hasUpdate, releaseInfo.status]);
 
   React.useEffect(() => {
     if (!state || !aboutInfo || autoUpdateCheckedRef.current) return;
@@ -2451,7 +2479,7 @@ function App() {
                   </div>
                 )}
                 <div className="update-progress-steps">
-                  {["checking", "downloading", "mounting", "installing", "cleanup", "restarting"].map((phase) => (
+                  {["checking", "downloading", "installing", "restarting"].map((phase) => (
                     <span key={phase} className={cx(
                       "update-progress-step",
                       releaseUpdateProgress.phase === phase && "active",
@@ -3525,7 +3553,7 @@ function App() {
                     <div><span>{lang === "zh" ? "最新版本" : "Latest"}</span><strong>{releaseInfo.latestVersion || "-"}</strong></div>
                   </div>
                   <div className="about-actions">
-                    <button className="primary-btn" onClick={() => void checkForUpdates()} disabled={releaseInfo.status === "checking"}><RefreshCw size={16} className={cx(releaseInfo.status === "checking" && "spin")} /> {lang === "zh" ? "检查更新" : "Check updates"}</button>
+                    <button className="primary-btn" onClick={() => void checkForUpdates()} disabled={releaseInfo.status === "checking" || releaseInfo.status === "installing"}><RefreshCw size={16} className={cx(releaseInfo.status === "checking" && "spin")} /> {lang === "zh" ? "检查更新" : "Check updates"}</button>
                     <button className="primary-btn" onClick={() => void installAvailableUpdate()} disabled={!canAutoInstallRelease}>{releaseInfo.status === "installing" ? <Loader2 size={16} className="spin" /> : <Download size={16} />} {lang === "zh" ? "自动下载并更新" : "Auto download and update"}</button>
                     <button className="secondary-btn" onClick={() => releaseInfo.canInstall ? setUpdatePromptOpen(true) : openExternalUrl(releaseInfo.htmlUrl)} disabled={!releaseInfo.htmlUrl}><Download size={16} /> {releaseInfo.canInstall ? (lang === "zh" ? "立即更新" : "Update now") : (lang === "zh" ? "打开下载页" : "Open releases")}</button>
                   </div>
