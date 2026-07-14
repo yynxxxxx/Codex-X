@@ -1,4 +1,5 @@
 mod ccswitch;
+mod connection;
 mod live;
 mod store;
 
@@ -14,6 +15,9 @@ pub(crate) use ccswitch::{
     import_ccswitch_codex_providers_inner, read_ccswitch_official_auth_inner, ImportResult,
     OfficialAuthCandidate,
 };
+#[cfg(test)]
+pub(crate) use connection::provider_status_result;
+pub(crate) use connection::{test_provider_connection_inner, ProviderConnectionResult};
 #[cfg(test)]
 pub(crate) use live::{
     detected_live_custom_provider, save_provider_toml_config_with_pre_persist,

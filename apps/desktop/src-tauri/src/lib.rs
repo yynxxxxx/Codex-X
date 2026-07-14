@@ -10,7 +10,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 mod app_db;
 mod backups;
@@ -56,17 +55,17 @@ use providers::{
     build_ccswitch_codex_provider, canonical_provider_base_url, codex_sections_from_config,
     detected_live_custom_provider, is_official_ccswitch_row, list_saved_providers_on_connection,
     merge_duplicate_provider_identities, normalize_saved_provider, provider_by_id_on_connection,
-    provider_identity, read_ccswitch_codex_rows, save_manual_provider_on_connection,
-    save_provider_toml_config_with_pre_persist, switch_official_provider_with_pre_persist,
-    switch_provider_with_pre_persist, upsert_provider_on_connection, CcSwitchCodexRow,
-    ProviderUpsertKind, ProviderUpsertMode,
+    provider_identity, provider_status_result, read_ccswitch_codex_rows,
+    save_manual_provider_on_connection, save_provider_toml_config_with_pre_persist,
+    switch_official_provider_with_pre_persist, switch_provider_with_pre_persist,
+    upsert_provider_on_connection, CcSwitchCodexRow, ProviderUpsertKind, ProviderUpsertMode,
 };
 use providers::{
     delete_provider_inner, import_ccswitch_codex_providers_inner, list_saved_providers_inner,
     read_ccswitch_official_auth_inner, save_official_config_inner, save_provider_inner,
     save_provider_toml_config_inner, switch_official_provider_inner, switch_provider_inner,
-    ImportResult, OfficialAuthCandidate, OfficialConfigInput, ProviderInput, ProviderTomlInput,
-    SavedProvider,
+    test_provider_connection_inner, ImportResult, OfficialAuthCandidate, OfficialConfigInput,
+    ProviderConnectionResult, ProviderInput, ProviderTomlInput, SavedProvider,
 };
 #[cfg(test)]
 use sessions::{
@@ -95,15 +94,6 @@ use state::active_saved_provider_id_from_config;
 use state::{auth_has_material, build_state, ActionResult, CodexState};
 use toml_edit::{value, DocumentMut};
 pub(crate) use toml_utils::string_value;
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderConnectionResult {
-    ok: bool,
-    status: Option<u16>,
-    message: String,
-    duration_ms: u128,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptInjectionMode {
@@ -845,95 +835,6 @@ async fn save_provider_toml_config(input: ProviderTomlInput) -> Result<ActionRes
     tauri::async_runtime::spawn_blocking(move || save_provider_toml_config_inner(input))
         .await
         .map_err(|e| CodexxError::Config(format!("保存供应商 TOML 失败: {e}")))?
-}
-
-fn provider_test_request(
-    agent: &ureq::Agent,
-    url: &str,
-    api_key: Option<&str>,
-) -> std::result::Result<ureq::Response, ureq::Error> {
-    let request = agent.get(url);
-    if let Some(api_key) = api_key.filter(|s| !s.trim().is_empty()) {
-        request.set("Authorization", &format!("Bearer {}", api_key.trim()))
-    } else {
-        request
-    }
-    .call()
-}
-
-fn provider_status_result(status: u16, duration_ms: u128) -> ProviderConnectionResult {
-    ProviderConnectionResult {
-        ok: (200..300).contains(&status),
-        status: Some(status),
-        message: if (200..300).contains(&status) {
-            format!("{duration_ms} ms")
-        } else if status == 401 || status == 403 {
-            format!("HTTP {status} · {duration_ms} ms（认证失败或无权限）")
-        } else {
-            format!("HTTP {status} · {duration_ms} ms")
-        },
-        duration_ms,
-    }
-}
-
-fn test_provider_connection_inner(
-    base_url: String,
-    api_key: Option<String>,
-) -> Result<ProviderConnectionResult> {
-    let base = base_url.trim().trim_end_matches('/').to_string();
-    if base.is_empty() {
-        return Err(CodexxError::Config("base_url 不能为空".to_string()));
-    }
-    if !base.starts_with("http://") && !base.starts_with("https://") {
-        return Err(CodexxError::Config(
-            "base_url 必须以 http:// 或 https:// 开头".to_string(),
-        ));
-    }
-
-    let api_key = api_key.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(6))
-        .build();
-    let models_url = format!("{base}/models");
-    let started = Instant::now();
-
-    match provider_test_request(&agent, &models_url, api_key) {
-        Ok(response) => {
-            return Ok(provider_status_result(
-                response.status(),
-                started.elapsed().as_millis(),
-            ))
-        }
-        Err(ureq::Error::Status(status, _)) => {
-            // /models exists but rejected the request. This is not a successful
-            // provider test; notably HTTP 403 must not be shown as “连接正常”.
-            return Ok(provider_status_result(
-                status,
-                started.elapsed().as_millis(),
-            ));
-        }
-        Err(_models_error) => {
-            // Network-level failure on /models: try the base endpoint once so
-            // users can distinguish DNS/TLS failures from a provider with no
-            // models route.
-            match provider_test_request(&agent, &base, api_key) {
-                Ok(response) => Ok(provider_status_result(
-                    response.status(),
-                    started.elapsed().as_millis(),
-                )),
-                Err(ureq::Error::Status(status, _)) => Ok(provider_status_result(
-                    status,
-                    started.elapsed().as_millis(),
-                )),
-                Err(_base_error) => Ok(ProviderConnectionResult {
-                    ok: false,
-                    status: None,
-                    message: format!("请求失败 · {} ms", started.elapsed().as_millis()),
-                    duration_ms: started.elapsed().as_millis(),
-                }),
-            }
-        }
-    }
 }
 
 #[tauri::command]
