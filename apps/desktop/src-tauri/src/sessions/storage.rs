@@ -1,4 +1,4 @@
-use super::projectless_thread_ids;
+use super::sync::projectless_thread_ids;
 use super::types::{RolloutScan, SessionFileChange, SessionPreview, SqliteScan};
 use crate::error::{CodexxError, Result};
 use crate::file_io::{

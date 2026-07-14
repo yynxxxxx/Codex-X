@@ -4,8 +4,8 @@ use super::storage::{
     sqlite_candidate_paths, sqlite_subagent_thread_ids, sqlite_thread_needs_alignment,
     SqliteThreadIndexState,
 };
+use super::sync::{acquire_session_maintenance_lock, session_sync_status_inner};
 use super::types::SessionSyncStatus;
-use super::{acquire_session_maintenance_lock, session_sync_status_inner};
 use crate::error::{CodexxError, Result};
 use crate::file_io::{io_err, write_text};
 use crate::resolve_codex_dir;
