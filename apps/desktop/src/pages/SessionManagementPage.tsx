@@ -243,7 +243,7 @@ export function SessionManagementPage({
       )}
 
       <section className={cx("panel glass sessions-panel", !active && "page-pane-hidden")}>
-        <div className="panel-head provider-title-row">
+        <div className="panel-head provider-title-row session-page-head">
           <div>
             <p className="eyebrow">{lang === "zh" ? "会话同步" : "Session sync"}</p>
             <h3>{lang === "zh" ? "会话管理" : "Session management"}</h3>

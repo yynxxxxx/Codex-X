@@ -280,6 +280,9 @@ pub(super) fn import_ccswitch_mcp_servers_for_codex(
             row.map_err(|e| CodexxError::Database(e.to_string()))?;
         let config: Value =
             serde_json::from_str(&config_text).unwrap_or(Value::Object(Default::default()));
+        if !imported_ids.insert(id.clone()) {
+            continue;
+        }
         let enabled = enabled_codex || live_enabled.contains(&id);
         save_managed_mcp(&id, &name, &config, enabled)?;
         if enabled_codex && !live_enabled.contains(&id) {
@@ -287,9 +290,7 @@ pub(super) fn import_ccswitch_mcp_servers_for_codex(
                 .insert(&id, json_to_toml_item(&config));
             changed_config = true;
         }
-        if imported_ids.insert(id) {
-            imported += 1;
-        }
+        imported += 1;
     }
     if changed_config {
         write_text(&cfg, &doc.to_string())?;

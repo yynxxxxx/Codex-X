@@ -332,6 +332,7 @@ input, select, textarea {
 .import-preview-body {
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   display: grid;
   gap: 14px;
   padding-right: 4px;
@@ -1609,9 +1610,13 @@ html, body, #root {
   overflow: hidden;
 }
 .content.session-content { overflow-y: hidden; }
+.content.modal-scroll-locked { overflow-y: hidden; }
 .sessions-panel > .panel-head {
   flex: 0 0 auto;
   margin-bottom: 0;
+}
+.session-page-head {
+  padding-inline-start: 8px;
 }
 .panel.glass.sessions-panel {
   background: transparent;

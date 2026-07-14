@@ -2171,7 +2171,11 @@ function App() {
         <div className="sidebar-footer" />
       </aside>
 
-      <section className={cx("content", tab === "sessions" && "session-content")}>
+      <section className={cx(
+        "content",
+        tab === "sessions" && "session-content",
+        skillsMcpImportOpen && Boolean(skillsMcpImportPreview) && "modal-scroll-locked",
+      )}>
         {tab === "dashboard" && (
           <header className="topbar glass">
             <div>

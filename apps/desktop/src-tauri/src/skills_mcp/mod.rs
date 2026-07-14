@@ -30,6 +30,18 @@ use skills::{
 use std::collections::HashSet;
 use std::fs;
 
+fn extend_unmanaged_mcp_candidates(
+    output: &mut Vec<ManagedMcpServer>,
+    seen_ids: &mut HashSet<String>,
+    candidates: impl IntoIterator<Item = ManagedMcpServer>,
+) {
+    for server in candidates {
+        if seen_ids.insert(server.id.clone()) {
+            output.push(server);
+        }
+    }
+}
+
 pub(crate) fn build_skills_mcp_state_inner(config_dir: Option<String>) -> Result<SkillsMcpState> {
     let codex_dir = resolve_codex_dir(config_dir)?;
     let skills_dir = codex_skills_dir(&codex_dir);
@@ -118,12 +130,16 @@ pub(crate) fn import_existing_skills_mcp_inner(
     }
 
     let mut imported_mcp = 0usize;
-    let mut imported_mcp_ids = HashSet::new();
+    let mut imported_mcp_ids = db_managed_mcp()?
+        .into_iter()
+        .map(|(id, _, _, _)| id)
+        .collect::<HashSet<_>>();
     for server in list_mcp_from_config(&codex_dir)? {
-        save_managed_mcp(&server.id, &server.name, &server.config_json, true)?;
-        if imported_mcp_ids.insert(server.id.clone()) {
-            imported_mcp += 1;
+        if !imported_mcp_ids.insert(server.id.clone()) {
+            continue;
         }
+        save_managed_mcp(&server.id, &server.name, &server.config_json, true)?;
+        imported_mcp += 1;
     }
     imported_mcp += import_ccswitch_mcp_servers_for_codex(&codex_dir, &mut imported_mcp_ids)?;
     let state = build_skills_mcp_state_inner(config_dir)?;
@@ -170,19 +186,21 @@ pub(crate) fn preview_existing_skills_mcp_inner(
     }
     skills.retain(|skill| skill.update_status != "已存在，将跳过");
 
-    let mut mcp_servers = list_mcp_from_config(&codex_dir)?;
-    for server in &mut mcp_servers {
+    let mut config_mcp_servers = list_mcp_from_config(&codex_dir)?;
+    for server in &mut config_mcp_servers {
         server.source = "config.toml".to_string();
     }
-    let mut seen_mcp = mcp_servers
-        .iter()
-        .map(|server| server.id.clone())
+    let mut seen_mcp = db_managed_mcp()?
+        .into_iter()
+        .map(|(id, _, _, _)| id)
         .collect::<HashSet<_>>();
-    for server in preview_ccswitch_mcp_servers_for_codex(&codex_dir)? {
-        if seen_mcp.insert(server.id.clone()) {
-            mcp_servers.push(server);
-        }
-    }
+    let mut mcp_servers = Vec::new();
+    extend_unmanaged_mcp_candidates(&mut mcp_servers, &mut seen_mcp, config_mcp_servers);
+    extend_unmanaged_mcp_candidates(
+        &mut mcp_servers,
+        &mut seen_mcp,
+        preview_ccswitch_mcp_servers_for_codex(&codex_dir)?,
+    );
     sort_managed_skills(&mut skills);
     sort_managed_mcp_servers(&mut mcp_servers);
     Ok(SkillsMcpImportPreview {
@@ -190,4 +208,67 @@ pub(crate) fn preview_existing_skills_mcp_inner(
         mcp_servers,
         warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn mcp_candidate(id: &str, source: &str) -> ManagedMcpServer {
+        ManagedMcpServer {
+            id: id.to_string(),
+            name: id.to_string(),
+            transport: "stdio".to_string(),
+            enabled: true,
+            source: source.to_string(),
+            summary: id.to_string(),
+            command: Some(id.to_string()),
+            url: None,
+            config_json: json!({ "command": id }),
+        }
+    }
+
+    #[test]
+    fn mcp_import_preview_excludes_managed_and_duplicate_ids() {
+        let mut seen = HashSet::from(["alpha".to_string()]);
+        let mut candidates = Vec::new();
+        extend_unmanaged_mcp_candidates(
+            &mut candidates,
+            &mut seen,
+            [
+                mcp_candidate("alpha", "config.toml"),
+                mcp_candidate("beta", "config.toml"),
+            ],
+        );
+        extend_unmanaged_mcp_candidates(
+            &mut candidates,
+            &mut seen,
+            [
+                mcp_candidate("beta", "cc-switch"),
+                mcp_candidate("gamma", "cc-switch"),
+            ],
+        );
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|server| (server.id.as_str(), server.source.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("beta", "config.toml"), ("gamma", "cc-switch")]
+        );
+
+        let mut imported_ids = seen;
+        let mut second_preview = Vec::new();
+        extend_unmanaged_mcp_candidates(
+            &mut second_preview,
+            &mut imported_ids,
+            [
+                mcp_candidate("alpha", "config.toml"),
+                mcp_candidate("beta", "config.toml"),
+                mcp_candidate("gamma", "cc-switch"),
+            ],
+        );
+        assert!(second_preview.is_empty());
+    }
 }
