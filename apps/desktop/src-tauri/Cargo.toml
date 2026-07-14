@@ -5,7 +5,7 @@ description = "Codex Switch & Instruct desktop manager"
 authors = ["yynxxxxx"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.85.0"
+rust-version = "1.89.0"
 
 [lib]
 name = "codexx_lib"
