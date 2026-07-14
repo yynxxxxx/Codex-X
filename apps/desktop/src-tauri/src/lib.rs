@@ -1092,11 +1092,23 @@ fn save_detected_provider_inner(provider: SavedProvider) -> Result<SavedProvider
     Ok(upsert_provider_on_connection(&conn, provider, ProviderUpsertMode::Detected)?.provider)
 }
 
+fn delete_provider_on_connection(conn: &Connection, id: &str) -> Result<()> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(CodexxError::Config("供应商 ID 不能为空".to_string()));
+    }
+    let deleted = conn
+        .execute("DELETE FROM providers WHERE id = ?1", params![id])
+        .map_err(|e| CodexxError::Database(e.to_string()))?;
+    if deleted == 0 {
+        return Err(CodexxError::Config(format!("供应商不存在或已删除: {id}")));
+    }
+    Ok(())
+}
+
 fn delete_provider_inner(id: &str) -> Result<()> {
     let conn = open_db()?;
-    conn.execute("DELETE FROM providers WHERE id = ?1", params![id])
-        .map_err(|e| CodexxError::Database(e.to_string()))?;
-    Ok(())
+    delete_provider_on_connection(&conn, id)
 }
 
 fn normalize_prompt_filename(input: &str, fallback: &str) -> String {
@@ -7581,6 +7593,34 @@ mod tests {
             canonical_provider_base_url("https://example.com:8443/V1/?Region=US#ignored"),
             "https://example.com:8443/V1?Region=US"
         );
+    }
+
+    #[test]
+    fn delete_provider_requires_an_existing_sqlite_row() {
+        let conn = provider_test_connection();
+        let provider = provider_fixture(
+            "provider-a",
+            "Provider A",
+            "https://a.example.com/v1",
+            Some("sk-a"),
+            "gpt-5.5",
+            None,
+        );
+        seed_provider(
+            &conn,
+            &provider,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+
+        delete_provider_on_connection(&conn, "provider-a").expect("delete existing provider");
+        assert!(provider_by_id_on_connection(&conn, "provider-a")
+            .expect("query deleted provider")
+            .is_none());
+
+        let error = delete_provider_on_connection(&conn, "provider-a")
+            .expect_err("deleting a missing provider must fail");
+        assert!(error.to_string().contains("供应商不存在或已删除"));
     }
 
     #[test]

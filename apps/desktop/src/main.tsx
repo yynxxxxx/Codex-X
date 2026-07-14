@@ -42,6 +42,10 @@ type InstructionMode = "list" | "form";
 type PromptInjectionMode = "append" | "replace";
 type Tab = "dashboard" | "provider" | "sessions" | "skillsMcp" | "instruction" | "toml" | "settings" | "about";
 
+type DeleteConfirmTarget =
+  | { kind: "provider"; id: string; name: string; isCurrent: boolean; fallbackName?: string }
+  | { kind: "prompt"; id: string; name: string };
+
 type InstructionTemplate = {
   id: string;
   filename: string;
@@ -989,6 +993,58 @@ function shortId(value: string) {
   return value.length > 13 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
 }
 
+function useFocusTrap(
+  dialogRef: React.RefObject<HTMLDivElement | null>,
+  open: boolean,
+  onClose: () => void,
+) {
+  // 通过 ref 读取最新 onClose，避免把内联回调放进依赖导致 effect 频繁重建；
+  // 关闭守卫（busy/loading）由调用方在 onClose 闭包内自行判断
+  const onCloseRef = React.useRef(onClose);
+  onCloseRef.current = onClose;
+  React.useEffect(() => {
+    if (!open) return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const restoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusableElements = () => Array.from(dialog.querySelectorAll<HTMLElement>(
+      "button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+    ));
+    const frame = window.requestAnimationFrame(() => {
+      (dialog.querySelector<HTMLElement>("[data-initial-focus]") || dialog).focus();
+    });
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = focusableElements();
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleKeyDown);
+      if (restoreTarget?.isConnected) window.requestAnimationFrame(() => restoreTarget.focus());
+    };
+  }, [open, dialogRef]);
+}
+
 function App() {
   const initialLang = (localStorage.getItem(LANG_KEY) as Lang | null) || "zh";
   const [lang, setLang] = React.useState<Lang>(initialLang === "en" ? "en" : "zh");
@@ -1025,6 +1081,7 @@ function App() {
   const [sessionDeleteConfirmOpen, setSessionDeleteConfirmOpen] = React.useState(false);
   const [sessionDeleteBusy, setSessionDeleteBusy] = React.useState(false);
   const [sessionDeleteSafetyConfirmed, setSessionDeleteSafetyConfirmed] = React.useState(false);
+  const [deleteConfirmTarget, setDeleteConfirmTarget] = React.useState<DeleteConfirmTarget | null>(null);
   const [autoSessionSync, setAutoSessionSync] = React.useState(() => localStorage.getItem(AUTO_SESSION_SYNC_KEY) === "1");
   const [autoSessionSyncBusy, setAutoSessionSyncBusy] = React.useState(false);
   const [state, setState] = React.useState<CodexState | null>(null);
@@ -1052,6 +1109,7 @@ function App() {
   const skillZipImportRef = React.useRef<HTMLInputElement | null>(null);
   const providerTomlEditorRef = React.useRef<HTMLTextAreaElement | null>(null);
   const promptModeHelpRef = React.useRef<HTMLDivElement | null>(null);
+  const deleteConfirmDialogRef = React.useRef<HTMLDivElement | null>(null);
   const sessionDeleteDialogRef = React.useRef<HTMLDivElement | null>(null);
   const sessionDeleteTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const sessionDeleteBusyRef = React.useRef(false);
@@ -1346,49 +1404,15 @@ function App() {
     }
   }, [selectedSessions.length, sessionDeleteConfirmOpen]);
 
-  React.useEffect(() => {
-    if (!sessionDeleteConfirmOpen) return;
-    const dialog = sessionDeleteDialogRef.current;
-    if (!dialog) return;
-    const restoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const focusableElements = () => Array.from(dialog.querySelectorAll<HTMLElement>(
-      "button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
-    ));
-    const frame = window.requestAnimationFrame(() => {
-      (dialog.querySelector<HTMLElement>("[data-initial-focus]") || dialog).focus();
-    });
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        if (!sessionDeleteBusyRef.current) setSessionDeleteConfirmOpen(false);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = focusableElements();
-      if (!focusable.length) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", handleKeyDown);
-      if (restoreTarget?.isConnected) window.requestAnimationFrame(() => restoreTarget.focus());
-    };
-  }, [sessionDeleteConfirmOpen]);
+  useFocusTrap(sessionDeleteDialogRef, sessionDeleteConfirmOpen, () => {
+    if (!sessionDeleteBusyRef.current) setSessionDeleteConfirmOpen(false);
+  });
 
-  const call = React.useCallback(async <T,>(fn: () => Promise<T>, success?: (data: T) => void) => {
+  useFocusTrap(deleteConfirmDialogRef, !!deleteConfirmTarget, () => {
+    if (!loading) setDeleteConfirmTarget(null);
+  });
+
+  const call = React.useCallback(async <T,>(fn: () => Promise<T>, success?: (data: T) => void, onError?: (e: unknown) => void) => {
     setLoading(true);
     setError("");
     try {
@@ -1396,6 +1420,7 @@ function App() {
       success?.(data);
     } catch (e) {
       setError(String(e));
+      onError?.(e);
     } finally {
       setLoading(false);
     }
@@ -1582,6 +1607,7 @@ function App() {
       },
       (promptList) => {
         setSavedPrompts(promptList);
+        setDeleteConfirmTarget(null);
         setToast(lang === "zh" ? "提示词已删除" : "Prompt deleted");
       },
     );
@@ -2058,17 +2084,56 @@ function App() {
     setProviderMode("form");
   };
 
-  const removeProvider = (id: string) => {
+  const removeProvider = (target: Extract<DeleteConfirmTarget, { kind: "provider" }>) => {
+    const fetchProviderState = async () => {
+      const [providerList, nextState] = await Promise.all([
+        invoke<SavedProvider[]>("list_saved_providers"),
+        invoke<CodexState>("get_codex_state", { configDir: configDir || null }),
+      ]);
+      return { providerList, nextState };
+    };
     call(
       async () => {
-        await invoke<void>("delete_saved_provider", { id });
-        return invoke<SavedProvider[]>("list_saved_providers");
+        if (target.isCurrent) {
+          await invoke<ActionResult>("switch_official_provider", { configDir: configDir || null });
+        }
+        await invoke<void>("delete_saved_provider", { id: target.id });
+        return fetchProviderState();
       },
-      (providerList) => {
+      ({ providerList, nextState }) => {
         setSavedProviders(providerList);
-        setToast(lang === "zh" ? "已从 SQLite 删除供应商" : "Provider deleted from SQLite");
+        setState(nextState);
+        setDeleteConfirmTarget(null);
+        if (target.isCurrent) {
+          localStorage.removeItem(ACTIVE_PROVIDER_KEY);
+          setActiveProviderId("");
+        }
+        setToast(target.isCurrent
+          ? (lang === "zh"
+            ? `已删除供应商“${target.name}”，并切换到 ${target.fallbackName || "默认供应商"}`
+            : `Deleted “${target.name}” and switched to ${target.fallbackName || "the default provider"}`)
+          : (lang === "zh" ? `已删除供应商“${target.name}”` : `Deleted provider “${target.name}”`));
+      },
+      async () => {
+        // switch 可能已生效，删除失败时刷新 codex state 与供应商列表以反映真实状态
+        try {
+          const { providerList, nextState } = await fetchProviderState();
+          setSavedProviders(providerList);
+          setState(nextState);
+        } catch {
+          // 保留已显示的删除错误
+        }
       },
     );
+  };
+
+  const confirmDelete = () => {
+    if (!deleteConfirmTarget) return;
+    if (deleteConfirmTarget.kind === "provider") {
+      removeProvider(deleteConfirmTarget);
+    } else {
+      removeSavedPrompt(deleteConfirmTarget.id);
+    }
   };
 
   const checkSessions = async () => {
@@ -2355,6 +2420,62 @@ function App() {
           </div>
         )}
 
+        {deleteConfirmTarget && (
+          <div className="update-mask" onClick={() => !loading && setDeleteConfirmTarget(null)}>
+            <div
+              ref={deleteConfirmDialogRef}
+              className="update-dialog glass session-delete-dialog delete-confirm-dialog"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="delete-confirm-title"
+              aria-describedby="delete-confirm-description"
+              tabIndex={-1}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="update-head session-delete-head">
+                <div className="update-icon session-delete-icon"><Trash2 size={22} /></div>
+                <div>
+                  <p className="eyebrow">{deleteConfirmTarget.kind === "provider" ? "Provider" : "Prompt"}</p>
+                  <h3 id="delete-confirm-title">
+                    {lang === "zh"
+                      ? `确认删除${deleteConfirmTarget.kind === "provider" ? "供应商" : "提示词"}`
+                      : `Delete ${deleteConfirmTarget.kind === "provider" ? "provider" : "prompt"}?`}
+                  </h3>
+                </div>
+              </div>
+              <div className="update-body session-delete-body">
+                <div className="session-delete-warning">
+                  <AlertCircle size={19} />
+                  <div>
+                    <strong>{deleteConfirmTarget.name}</strong>
+                    <p id="delete-confirm-description">
+                      {lang === "zh" ? "删除后将从本地列表中移除，此操作不可撤销。" : "This item will be removed from the local list. This action cannot be undone."}
+                    </p>
+                    {deleteConfirmTarget.kind === "provider" && deleteConfirmTarget.isCurrent && (
+                      <p>
+                        {lang === "zh"
+                          ? `该供应商正在使用中，确认后将先自动切换到 ${deleteConfirmTarget.fallbackName || "第一个供应商"}。`
+                          : `This provider is active. It will switch to ${deleteConfirmTarget.fallbackName || "the first provider"} before deletion.`}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="update-actions session-delete-actions">
+                <button className="secondary-btn" onClick={() => setDeleteConfirmTarget(null)} disabled={loading} data-initial-focus>
+                  {lang === "zh" ? "取消" : "Cancel"}
+                </button>
+                <button className="danger-btn session-delete-confirm-btn" onClick={confirmDelete} disabled={loading}>
+                  {loading ? <Loader2 size={17} className="spin" /> : <Trash2 size={17} />}
+                  {loading
+                    ? (lang === "zh" ? "正在删除..." : "Deleting...")
+                    : (lang === "zh" ? "确认删除" : "Delete")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {sessionDeleteConfirmOpen && selectedSessions.length > 0 && (
           <div className="update-mask" onClick={closeSessionDeleteConfirm}>
             <div
@@ -2600,7 +2721,17 @@ function App() {
                                 {p.source === "official" && <button className="icon-btn small" title={t.provider.edit} onClick={openOfficialEdit}><PencilLine size={15} /></button>}
                                 {local && <button className="icon-btn small" title={t.provider.edit} onClick={() => openEditProvider(local)}><PencilLine size={15} /></button>}
                                 {!local && p.source === "detected" && <button className="icon-btn small" title={t.provider.edit} onClick={() => openEditDetectedProvider(p)}><PencilLine size={15} /></button>}
-                                {local && <button className="icon-btn danger small" title={t.provider.remove} onClick={() => removeProvider(local.id)}><Trash2 size={15} /></button>}
+                                {local && <button
+                                  className="icon-btn danger small"
+                                  title={t.provider.remove}
+                                  onClick={() => setDeleteConfirmTarget({
+                                    kind: "provider",
+                                    id: local.id,
+                                    name: local.providerName,
+                                    isCurrent: p.isCurrent,
+                                    fallbackName: p.isCurrent ? "OpenAI Official" : undefined,
+                                  })}
+                                ><Trash2 size={15} /></button>}
                               </div>
                             </div>
                           );
@@ -3225,7 +3356,11 @@ function App() {
                                 <span />
                               </button>
                               <button className="icon-btn small" title={t.provider.edit} onClick={() => openEditPrompt(prompt)}><PencilLine size={15} /></button>
-                              <button className="icon-btn danger small" title={t.provider.remove} onClick={() => removeSavedPrompt(prompt.id)}><Trash2 size={15} /></button>
+                              <button
+                                className="icon-btn danger small"
+                                title={t.provider.remove}
+                                onClick={() => setDeleteConfirmTarget({ kind: "prompt", id: prompt.id, name: prompt.title })}
+                              ><Trash2 size={15} /></button>
                             </div>
                           </article>
                         );

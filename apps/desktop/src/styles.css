@@ -2106,6 +2106,9 @@ html, body, #root {
   min-height: 42px;
   padding: 0 15px;
 }
+.delete-confirm-dialog {
+  width: min(520px, calc(100vw - 40px));
+}
 .enhanced-session-list {
   flex: 1 1 auto;
   min-height: 0;
