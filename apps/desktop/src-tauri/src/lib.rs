@@ -528,6 +528,7 @@ fn managed_model_instruction_path(codex_dir: &Path, doc: &DocumentMut) -> Result
     Ok(Some(resolve_instruction_path(codex_dir, &current)))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn enable_prompt_content_inner(
     config_dir: Option<String>,
     filename: &str,

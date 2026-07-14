@@ -289,7 +289,7 @@ pub(crate) fn github_prompt_catalog_from_entries(
         let id = stable_remote_prompt_id(&entry.name);
         prompts.push((id, entry.name, source_url));
     }
-    prompts.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
+    prompts.sort_by_key(|prompt| prompt.1.to_ascii_lowercase());
     let mut seen_ids = HashSet::new();
     let mut seen_filenames = HashSet::new();
     prompts.retain(|(id, filename, _)| {
@@ -323,13 +323,13 @@ fn refresh_builtin_prompt_from_source(
 ) -> Result<BuiltinPromptStatus> {
     let cached_before = cached_builtin_prompt(id)?;
     let (title, subtitle, badge) = prompt_display_meta(filename);
-    match fetch_remote_prompt(&source_url) {
+    match fetch_remote_prompt(source_url) {
         Ok(remote) => {
             let updated = cached_before
                 .as_ref()
                 .map(|cached| cached.content != remote)
                 .unwrap_or_else(|| bundled.is_none_or(|content| remote != content));
-            save_builtin_prompt_cache(id, filename, &source_url, &remote)?;
+            save_builtin_prompt_cache(id, filename, source_url, &remote)?;
             let checked_at = cached_builtin_prompt(id)?.map(|cached| cached.checked_at);
             Ok(BuiltinPromptStatus {
                 id: id.to_string(),

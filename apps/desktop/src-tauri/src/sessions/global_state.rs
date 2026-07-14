@@ -21,8 +21,8 @@ pub(super) fn normalize_workspace_path(value: &str) -> Option<String> {
     if lower.starts_with(r"\\?\unc\") {
         return Some(format!(r"\\{}", trimmed[8..].replace('/', r"\")));
     }
-    if trimmed.starts_with(r"\\?\") {
-        return Some(trimmed[4..].replace('\\', "/"));
+    if let Some(stripped) = trimmed.strip_prefix(r"\\?\") {
+        return Some(stripped.replace('\\', "/"));
     }
     Some(trimmed.to_string())
 }
@@ -311,7 +311,7 @@ mod tests {
         fs::write(&backup, original_backup).expect("write original backup");
         write_text(&main, &written_text).expect("mutate global main");
         write_text(&backup, &written_text).expect("mutate global backup");
-        let writes = vec![
+        let writes = [
             GlobalStateWrite {
                 path: main.clone(),
                 original_bytes: Some(original_main.to_vec()),

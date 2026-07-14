@@ -65,14 +65,13 @@ fn redacted_auth_preview(path: &Path) -> Result<Option<Value>> {
     if let Some(obj) = value.as_object_mut() {
         for (key, val) in obj.iter_mut() {
             let lower = key.to_ascii_lowercase();
-            if lower.contains("key")
+            if (lower.contains("key")
                 || lower.contains("token")
                 || lower.contains("secret")
-                || lower.contains("password")
+                || lower.contains("password"))
+                && val.as_str().is_some_and(|s| !s.trim().is_empty())
             {
-                if val.as_str().is_some_and(|s| !s.trim().is_empty()) {
-                    *val = Value::String("••••••••".to_string());
-                }
+                *val = Value::String("••••••••".to_string());
             }
         }
     }

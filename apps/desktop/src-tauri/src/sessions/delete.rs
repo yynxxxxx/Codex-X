@@ -450,7 +450,7 @@ fn selected_rollout_paths(
     let mut paths = HashSet::new();
     for db_path in thread_database_paths {
         let conn = Connection::open_with_flags(
-            &db_path,
+            db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| {
@@ -664,7 +664,7 @@ fn purge_session_database_references(
     for path in related_database_paths {
         let result = (|| -> Result<(usize, usize)> {
             let mut conn = Connection::open_with_flags(
-                &path,
+                path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .map_err(|e| {

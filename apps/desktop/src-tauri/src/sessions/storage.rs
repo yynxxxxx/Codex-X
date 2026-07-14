@@ -737,7 +737,7 @@ pub(super) fn scan_sqlite_with_paths(
     let mut mismatched_ids = HashSet::new();
     for path in sqlite_paths {
         let conn = match Connection::open_with_flags(
-            &path,
+            path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
             Ok(conn) => conn,
@@ -833,7 +833,7 @@ pub(super) fn list_session_previews_with_paths(
 
     for path in sqlite_paths {
         let conn = match Connection::open_with_flags(
-            &path,
+            path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
             Ok(conn) => conn,

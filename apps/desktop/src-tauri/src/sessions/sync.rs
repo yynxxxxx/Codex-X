@@ -31,11 +31,11 @@ pub(super) fn session_sync_status_with_discovery(
     target: String,
     discovery: &SqliteDiscovery,
 ) -> Result<SessionSyncStatus> {
-    let rollouts = scan_rollouts(&codex_dir, &target)?;
+    let rollouts = scan_rollouts(codex_dir, &target)?;
     let sqlite = scan_sqlite_with_paths(&discovery.session_paths, &rollouts, &target)?;
     let global_state_updates =
         count_global_state_updates(&codex_dir.join(".codex-global-state.json"))?;
-    let session_limit = sqlite.sqlite_threads.max(50).min(1000);
+    let session_limit = sqlite.sqlite_threads.clamp(50, 1000);
     let preview_paths = discovery.active_first_session_paths();
     let (sessions, session_warnings) =
         list_session_previews_with_paths(&preview_paths, &rollouts, &target, session_limit)?;
@@ -100,7 +100,7 @@ pub(super) fn acquire_session_maintenance_lock(codex_dir: &Path) -> Result<Sessi
     file.try_lock()
         .map_err(|_| CodexxError::Config(format!("会话维护正在进行: {}", path.display())))?;
     file.set_len(0).map_err(|e| io_err(&path, e))?;
-    write!(file, "pid={}\n", std::process::id()).map_err(|e| io_err(&path, e))?;
+    writeln!(file, "pid={}", std::process::id()).map_err(|e| io_err(&path, e))?;
     file.sync_all().map_err(|e| io_err(&path, e))?;
     Ok(SessionMaintenanceLock { file })
 }

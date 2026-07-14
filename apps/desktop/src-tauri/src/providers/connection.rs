@@ -11,6 +11,7 @@ pub(crate) struct ProviderConnectionResult {
     pub(crate) duration_ms: u128,
 }
 
+#[allow(clippy::result_large_err)]
 fn provider_test_request(
     agent: &ureq::Agent,
     url: &str,
@@ -62,19 +63,17 @@ pub(crate) fn test_provider_connection_inner(
     let started = Instant::now();
 
     match provider_test_request(&agent, &models_url, api_key) {
-        Ok(response) => {
-            return Ok(provider_status_result(
-                response.status(),
-                started.elapsed().as_millis(),
-            ))
-        }
+        Ok(response) => Ok(provider_status_result(
+            response.status(),
+            started.elapsed().as_millis(),
+        )),
         Err(ureq::Error::Status(status, _)) => {
             // /models exists but rejected the request. This is not a successful
             // provider test; notably HTTP 403 must not be shown as “连接正常”.
-            return Ok(provider_status_result(
+            Ok(provider_status_result(
                 status,
                 started.elapsed().as_millis(),
-            ));
+            ))
         }
         Err(_models_error) => {
             // Network-level failure on /models: try the base endpoint once so
