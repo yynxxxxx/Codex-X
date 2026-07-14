@@ -1,4 +1,4 @@
-use super::sync::projectless_thread_ids;
+use super::global_state::{normalize_workspace_path, projectless_thread_ids};
 use super::types::{RolloutScan, SessionFileChange, SessionPreview, SqliteScan};
 use crate::error::{CodexxError, Result};
 use crate::file_io::{
@@ -69,21 +69,6 @@ pub(super) fn split_line_ending(segment: &str) -> (&str, &str) {
     } else {
         (segment, "")
     }
-}
-
-pub(super) fn normalize_workspace_path(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with(r"\\?\unc\") {
-        return Some(format!(r"\\{}", trimmed[8..].replace('/', r"\")));
-    }
-    if trimmed.starts_with(r"\\?\") {
-        return Some(trimmed[4..].replace('\\', "/"));
-    }
-    Some(trimmed.to_string())
 }
 
 fn is_locked_io_error(error: &std::io::Error) -> bool {
