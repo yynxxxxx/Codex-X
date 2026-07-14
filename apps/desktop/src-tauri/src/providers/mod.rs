@@ -1,8 +1,18 @@
+mod live;
 mod store;
 
 use crate::error::Result;
 use rusqlite::Connection;
 
+#[cfg(test)]
+pub(crate) use live::{
+    detected_live_custom_provider, save_provider_toml_config_with_pre_persist,
+    switch_official_provider_with_pre_persist, switch_provider_with_pre_persist,
+};
+pub(crate) use live::{
+    save_official_config_inner, save_provider_toml_config_inner, switch_official_provider_inner,
+    switch_provider_inner, OfficialConfigInput, ProviderInput, ProviderTomlInput,
+};
 #[cfg(test)]
 pub(crate) use store::{
     canonical_provider_base_url, merge_duplicate_provider_identities, provider_by_id_on_connection,
