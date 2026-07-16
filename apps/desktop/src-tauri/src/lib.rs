@@ -101,8 +101,9 @@ use skills_mcp::{
     sort_managed_skills, ManagedMcpServer, ManagedSkill,
 };
 use skins::{
-    enable_skin_theme_inner, export_skin_theme_inner, get_skin_center_state_inner,
-    import_skin_theme_zip_inner, SkinActionResult, SkinCenterState, SkinExportResult,
+    apply_skin_theme_inner, enable_skin_theme_inner, export_skin_theme_inner,
+    get_skin_center_state_inner, import_skin_theme_zip_inner, pause_skin_theme_inner,
+    SkinActionResult, SkinCenterState, SkinExportResult,
 };
 #[cfg(test)]
 use state::active_saved_provider_id_from_config;
@@ -501,6 +502,20 @@ async fn export_skin_theme(id: String) -> Result<SkinExportResult> {
     tauri::async_runtime::spawn_blocking(move || export_skin_theme_inner(id))
         .await
         .map_err(|e| CodexxError::Config(format!("导出皮肤失败: {e}")))?
+}
+
+#[tauri::command]
+async fn apply_skin_theme() -> Result<SkinActionResult> {
+    tauri::async_runtime::spawn_blocking(apply_skin_theme_inner)
+        .await
+        .map_err(|e| CodexxError::Config(format!("应用皮肤失败: {e}")))?
+}
+
+#[tauri::command]
+async fn pause_skin_theme() -> Result<SkinActionResult> {
+    tauri::async_runtime::spawn_blocking(pause_skin_theme_inner)
+        .await
+        .map_err(|e| CodexxError::Config(format!("暂停皮肤失败: {e}")))?
 }
 
 #[tauri::command]
@@ -1128,6 +1143,8 @@ pub fn run() {
             enable_skin_theme,
             import_skin_theme_zip,
             export_skin_theme,
+            apply_skin_theme,
+            pause_skin_theme,
             check_skill_updates,
             get_startup_diagnostics,
             get_session_sync_status,

@@ -5,6 +5,7 @@ import {
   FolderArchive,
   Loader2,
   Palette,
+  Pause,
   Play,
   Upload,
 } from "lucide-react";
@@ -24,6 +25,8 @@ export type SkinsPageProps = {
   onImportZip: (file?: File | null) => void | Promise<void>;
   onEnableTheme: (id: string) => void | Promise<void>;
   onExportTheme: (id: string) => void | Promise<void>;
+  onApplyTheme: MaybeAsyncAction;
+  onPauseTheme: MaybeAsyncAction;
 };
 
 function getCopy(lang: Lang) {
@@ -31,9 +34,13 @@ function getCopy(lang: Lang) {
     ? {
         eyebrow: "SKIN CENTER",
         title: "皮肤中心",
-        description: "兼容 Codex Dream Skin 的 theme.json + 图片格式。先管理主题包、切换当前主题，后续接入图片生成与实机注入。",
+        description: "兼容 Codex Dream Skin 的 theme.json + 图片格式。管理主题包、切换当前主题，并一键应用或暂停 Codex 桌面皮肤。",
         refresh: "刷新",
         importZip: "导入主题包",
+        apply: "应用到 Codex",
+        pause: "暂停皮肤",
+        applyingLive: "应用中",
+        pausing: "暂停中",
         loading: "正在读取皮肤库...",
         builtin: "内置",
         imported: "导入",
@@ -49,13 +56,19 @@ function getCopy(lang: Lang) {
         noThemes: "还没有主题。导入 .zip 主题包或使用内置主题开始。",
         zipHint: "主题包结构：theme.json + background.png/jpg/webp",
         statusReady: "主题库已就绪",
+        runtime: "运行状态",
+        port: "CDP 端口",
       }
     : {
         eyebrow: "SKIN CENTER",
         title: "Skin Center",
-        description: "Compatible with the Codex Dream Skin theme.json + image format. Manage packs and switch the current theme first; image generation and live injection can follow.",
+        description: "Compatible with the Codex Dream Skin theme.json + image format. Manage packs, switch the current theme, and apply or pause the live Codex desktop skin.",
         refresh: "Refresh",
         importZip: "Import theme ZIP",
+        apply: "Apply to Codex",
+        pause: "Pause skin",
+        applyingLive: "Applying",
+        pausing: "Pausing",
         loading: "Loading skin library...",
         builtin: "Built-in",
         imported: "Imported",
@@ -71,6 +84,8 @@ function getCopy(lang: Lang) {
         noThemes: "No themes yet. Import a .zip theme pack or start with a built-in theme.",
         zipHint: "Theme pack: theme.json + background.png/jpg/webp",
         statusReady: "Theme library ready",
+        runtime: "Runtime",
+        port: "CDP port",
       };
 }
 
@@ -175,6 +190,8 @@ export function SkinsPage({
   onImportZip,
   onEnableTheme,
   onExportTheme,
+  onApplyTheme,
+  onPauseTheme,
 }: SkinsPageProps) {
   const copy = getCopy(lang);
   const themes = state?.themes ?? [];
@@ -211,7 +228,23 @@ export function SkinsPage({
             {copy.refresh}
           </Button>
           <Button
+            variant="secondary"
+            onClick={() => run(onPauseTheme)}
+            disabled={Boolean(actionBusy) || !state?.runtime.supported || !state?.runtime.active}
+            icon={actionBusy === "pauseSkin" ? <Loader2 className="cx-skins-spin" size={15} /> : <Pause size={15} />}
+          >
+            {actionBusy === "pauseSkin" ? copy.pausing : copy.pause}
+          </Button>
+          <Button
             variant="primary"
+            onClick={() => run(onApplyTheme)}
+            disabled={Boolean(actionBusy) || !state?.currentThemeId}
+            icon={actionBusy === "applySkin" ? <Loader2 className="cx-skins-spin" size={15} /> : <Play size={15} />}
+          >
+            {actionBusy === "applySkin" ? copy.applyingLive : copy.apply}
+          </Button>
+          <Button
+            variant="secondary"
             onClick={() => zipInputRef.current?.click()}
             disabled={Boolean(actionBusy)}
             icon={actionBusy === "importSkinZip" ? <Loader2 className="cx-skins-spin" size={15} /> : <Upload size={15} />}
@@ -225,6 +258,14 @@ export function SkinsPage({
         <div>
           <span>{copy.current}</span>
           <strong>{current?.name || copy.noCurrent}</strong>
+        </div>
+        <div>
+          <span>{copy.runtime}</span>
+          <strong>{state?.runtime.message || "-"}</strong>
+        </div>
+        <div>
+          <span>{copy.port}</span>
+          <strong>{state?.runtime.port ? `127.0.0.1:${state.runtime.port}` : "-"}</strong>
         </div>
         <div>
           <span>{copy.storage}</span>

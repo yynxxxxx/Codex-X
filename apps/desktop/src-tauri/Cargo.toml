@@ -37,3 +37,5 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 sha2 = "0.10"
 percent-encoding = "2.3"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+base64 = "0.22"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
