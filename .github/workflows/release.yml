@@ -58,7 +58,6 @@ jobs:
           import json
           import os
           import re
-          import tomllib
           from pathlib import Path
 
           tag = os.environ["RELEASE_TAG"]
@@ -66,13 +65,19 @@ jobs:
           root_package = json.loads(Path("package.json").read_text(encoding="utf-8"))
           desktop_package = json.loads(Path("apps/desktop/package.json").read_text(encoding="utf-8"))
           tauri_config = json.loads(Path("apps/desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
-          with Path("apps/desktop/src-tauri/Cargo.toml").open("rb") as fh:
-              cargo = tomllib.load(fh)
+          cargo_text = Path("apps/desktop/src-tauri/Cargo.toml").read_text(encoding="utf-8")
+          cargo_match = re.search(
+              r'^\[package\]\s*$.*?^version\s*=\s*"([^"]+)"',
+              cargo_text,
+              flags=re.S | re.M,
+          )
+          if not cargo_match:
+              raise SystemExit("Unable to read the package version from Cargo.toml")
 
           versions = {
               "package.json": root_package.get("version"),
               "apps/desktop/package.json": desktop_package.get("version"),
-              "apps/desktop/src-tauri/Cargo.toml": cargo.get("package", {}).get("version"),
+              "apps/desktop/src-tauri/Cargo.toml": cargo_match.group(1),
               "apps/desktop/src-tauri/tauri.conf.json": tauri_config.get("version"),
           }
           mismatches = {path: value for path, value in versions.items() if value != expected}
