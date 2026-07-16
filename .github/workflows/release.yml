@@ -158,12 +158,12 @@ jobs:
             platform: macos-latest
             macos: true
             args: --bundles app,dmg
-            asset_pattern: Codex-X-[version]-macos-arm64[ext]
+            asset_pattern: Codex-X-[version]-macos-apple-silicon[ext]
           - name: macOS Intel
             platform: macos-15-intel
             macos: true
             args: --bundles app,dmg
-            asset_pattern: Codex-X-[version]-macos-x64[ext]
+            asset_pattern: Codex-X-[version]-macos-intel[ext]
           - name: Linux x64
             platform: ubuntu-22.04
             macos: false
