@@ -12,9 +12,13 @@ from typing import Any
 
 
 REQUIRED_PLATFORMS = {
+    "darwin-aarch64": ".app.tar.gz",
     "darwin-aarch64-app": ".app.tar.gz",
+    "darwin-x86_64": ".app.tar.gz",
     "darwin-x86_64-app": ".app.tar.gz",
+    "windows-x86_64": ".msi",
     "windows-x86_64-msi": ".msi",
+    "linux-x86_64": ".AppImage",
     "linux-x86_64-deb": ".deb",
     "linux-x86_64-rpm": ".rpm",
     "linux-x86_64-appimage": ".AppImage",
@@ -44,11 +48,45 @@ def validate_signature(platform: str, value: Any) -> None:
         fail(f"{platform} signature is unexpectedly short")
 
 
+def rewrite_download_urls(
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    assets_by_url: dict[str, dict[str, Any]],
+) -> int:
+    platforms = manifest.get("platforms")
+    if not isinstance(platforms, dict):
+        fail("latest.json has no platforms object")
+
+    rewritten = 0
+    for platform, entry in platforms.items():
+        if not isinstance(entry, dict):
+            fail(f"invalid platform entry {platform}")
+        current_url = entry.get("url")
+        if not isinstance(current_url, str):
+            fail(f"{platform} has an invalid download URL")
+        asset = assets_by_url.get(current_url)
+        if asset is None:
+            fail(f"{platform} URL does not point to an asset in this release")
+        download_url = asset.get("browser_download_url")
+        if not isinstance(download_url, str) or not download_url.startswith("https://"):
+            fail(f"{platform} asset has no public download URL")
+        if current_url != download_url:
+            entry["url"] = download_url
+            rewritten += 1
+
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return rewritten
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--rewrite-download-urls", action="store_true")
     args = parser.parse_args()
 
     manifest = load_json(args.manifest)
@@ -80,18 +118,29 @@ def main() -> None:
     if not isinstance(platforms, dict):
         fail("latest.json has no platforms object")
 
-    for platform, suffix in REQUIRED_PLATFORMS.items():
-        entry = platforms.get(platform)
-        if not isinstance(entry, dict):
-            fail(f"missing platform {platform}")
-        validate_signature(platform, entry.get("signature"))
+    if args.rewrite_download_urls:
+        rewritten = rewrite_download_urls(args.manifest, manifest, assets_by_url)
+        print(f"Rewrote {rewritten} updater asset URLs to public download URLs.")
 
+    for platform, entry in platforms.items():
+        if not isinstance(entry, dict):
+            fail(f"invalid platform entry {platform}")
+        validate_signature(platform, entry.get("signature"))
         url = entry.get("url")
         if not isinstance(url, str) or not url.startswith("https://"):
             fail(f"{platform} has an invalid download URL")
         asset = assets_by_url.get(url)
         if asset is None:
             fail(f"{platform} URL does not point to an asset in this release")
+        if url != asset.get("browser_download_url"):
+            fail(f"{platform} URL points to GitHub metadata instead of the asset download")
+
+    for platform, suffix in REQUIRED_PLATFORMS.items():
+        entry = platforms.get(platform)
+        if not isinstance(entry, dict):
+            fail(f"missing platform {platform}")
+
+        asset = assets_by_url[entry["url"]]
         asset_name = asset["name"]
         if not asset_name.endswith(suffix):
             fail(f"{platform} points to {asset_name!r}, expected a {suffix} updater")

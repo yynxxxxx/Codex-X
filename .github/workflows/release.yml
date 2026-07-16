@@ -386,6 +386,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
@@ -402,7 +403,9 @@ jobs:
           python3 scripts/validate_updater_release.py \
             --manifest latest.json \
             --assets release-assets.json \
-            --version "$VERSION"
+            --version "$VERSION" \
+            --rewrite-download-urls
+          gh release upload "$RELEASE_TAG" latest.json --clobber
 
       - name: Publish the verified release
         env:
@@ -412,10 +415,11 @@ jobs:
 
       - name: Verify published updater endpoint
         env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          endpoint="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/latest.json"
+          endpoint="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/latest.json"
           curl -fsSL \
             --retry 12 \
             --retry-delay 5 \
@@ -438,6 +442,5 @@ jobs:
               --retry 5 \
               --retry-delay 3 \
               --retry-all-errors \
-              -H "Accept: application/octet-stream" \
               "$url" >/dev/null
           done
