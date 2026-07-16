@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Codex-X",
-  "version": "0.2.35",
+  "version": "0.3.0",
   "identifier": "com.yynxxxxx.codexx",
   "build": {
     "frontendDist": "../dist",
@@ -29,11 +29,12 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://api.github.com"
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -42,5 +43,16 @@
       "icons/icon.ico"
     ],
     "targets": "all"
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/yynxxxxx/Codex-X/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCQTBEQkRFNTZCQjBBNUUKUldSZUNydFczdHVnYXkzSTM0N0F4UG5oV3BiVVJ0OEZwazdOd3hMRGRMNGJZaThoOEVneG9qb0cK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -1,9 +1,8 @@
 use crate::error::{CodexxError, Result};
-use crate::file_io::io_err;
+use crate::file_io::ensure_directory;
 use crate::paths::app_home;
 use crate::sqlite_utils::table_column_set;
 use rusqlite::Connection;
-use std::fs;
 use std::path::PathBuf;
 
 fn db_path() -> Result<PathBuf> {
@@ -38,7 +37,7 @@ fn ensure_sqlite_column(
 pub(crate) fn open() -> Result<Connection> {
     let path = db_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+        ensure_directory(parent)?;
     }
     let conn = Connection::open(&path).map_err(|e| CodexxError::Database(e.to_string()))?;
     conn.execute_batch(

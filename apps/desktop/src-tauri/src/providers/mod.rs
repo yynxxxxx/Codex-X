@@ -17,7 +17,10 @@ pub(crate) use ccswitch::{
 };
 #[cfg(test)]
 pub(crate) use connection::provider_status_result;
-pub(crate) use connection::{test_provider_connection_inner, ProviderConnectionResult};
+pub(crate) use connection::{
+    fetch_provider_models_inner, test_provider_connection_inner, ProviderConnectionResult,
+    ProviderModelsResult,
+};
 #[cfg(test)]
 pub(crate) use live::{
     detected_live_custom_provider, save_provider_toml_config_with_pre_persist,

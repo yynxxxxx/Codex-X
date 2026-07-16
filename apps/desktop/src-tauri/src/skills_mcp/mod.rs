@@ -17,7 +17,7 @@ pub(crate) use skills::read_skill_metadata;
 pub(crate) use types::ManagedSkill;
 
 use crate::error::Result;
-use crate::file_io::io_err;
+use crate::file_io::{ensure_directory, io_err};
 use crate::paths::home_dir;
 use crate::resolve_codex_dir;
 use mcp::{
@@ -104,7 +104,7 @@ pub(crate) fn import_existing_skills_mcp_inner(
 ) -> Result<SkillsMcpActionResult> {
     let codex_dir = resolve_codex_dir(config_dir.clone())?;
     let skills_dir = codex_skills_dir(&codex_dir);
-    fs::create_dir_all(&skills_dir).map_err(|e| io_err(&skills_dir, e))?;
+    ensure_directory(&skills_dir)?;
     let mut imported_skills = 0usize;
     let candidates = vec![
         home_dir()?.join(".agents").join("skills"),

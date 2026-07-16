@@ -21,6 +21,7 @@ pub(crate) struct BuiltinPromptStatus {
     pub(crate) cached: bool,
     pub(crate) updated: bool,
     pub(crate) content_source: String,
+    pub(crate) sync_issue: Option<String>,
     pub(crate) checked_at: Option<String>,
     pub(crate) message: String,
 }

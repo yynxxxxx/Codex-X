@@ -2,13 +2,12 @@ use super::build_skills_mcp_state_inner;
 use super::types::{ManagedMcpServer, SkillsMcpState};
 use crate::ccswitch::default_ccswitch_db_path;
 use crate::error::{CodexxError, Result};
-use crate::file_io::{io_err, parse_toml_document, read_to_string_if_exists, write_text};
+use crate::file_io::{ensure_directory, parse_toml_document, read_to_string_if_exists, write_text};
 use crate::toml_utils::ensure_table;
 use crate::{config_path, now_rfc3339, open_db, resolve_codex_dir};
 use rusqlite::{params, Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::fs;
 use std::path::Path;
 use toml_edit::{value, Item, Table};
 
@@ -370,7 +369,7 @@ pub(crate) fn toggle_codex_mcp_inner(
     enabled: bool,
 ) -> Result<SkillsMcpState> {
     let codex_dir = resolve_codex_dir(config_dir.clone())?;
-    fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
+    ensure_directory(&codex_dir)?;
     let cfg = config_path(&codex_dir);
     let text = read_to_string_if_exists(&cfg)?;
     let mut doc = parse_toml_document(&cfg, &text)?;

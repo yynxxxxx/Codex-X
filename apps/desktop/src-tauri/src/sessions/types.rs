@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -55,7 +55,6 @@ pub(crate) struct RolloutScan {
     pub(crate) mismatched_rollouts: usize,
     pub(crate) mismatched_session_meta: usize,
     pub(crate) changes: Vec<SessionFileChange>,
-    pub(crate) thread_ids_with_user_events: HashSet<String>,
     pub(crate) cwd_by_thread_id: HashMap<String, String>,
     pub(crate) warnings: Vec<String>,
 }

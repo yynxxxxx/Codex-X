@@ -6,7 +6,9 @@ use serde::Serialize;
 #[cfg(test)]
 use serde_json::{json, Value};
 #[cfg(test)]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(any(test, target_os = "windows"))]
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +16,7 @@ use std::process::Command;
 mod app_db;
 mod backups;
 mod ccswitch;
+mod config_migration;
 mod constants;
 mod error;
 mod file_io;
@@ -21,18 +24,23 @@ mod paths;
 mod platform;
 mod prompts;
 mod providers;
+mod remote;
 mod sessions;
 mod skills_mcp;
 mod sqlite_utils;
 mod state;
 mod toml_utils;
+mod updates;
 
 use backups::{action_backup_root, backups, create_backup, BackupEntry, BackupMeta};
 use constants::*;
 use error::{CodexxError, Result};
 #[cfg(test)]
 use file_io::write_json;
-use file_io::{atomic_write, io_err, parse_toml_document, read_to_string_if_exists, write_text};
+use file_io::{
+    atomic_write, directory_exists, ensure_directory, io_err, parse_toml_document,
+    read_to_string_if_exists, write_text,
+};
 #[cfg(test)]
 use paths::app_home;
 use paths::home_dir;
@@ -47,8 +55,9 @@ use prompts::{
 #[cfg(test)]
 use prompts::{
     bundled_prompt_metas, cached_prompt_fallback_statuses, delete_cached_prompt_ids,
-    github_prompt_catalog_from_entries, managed_agents_template_key_from_content,
-    stable_remote_prompt_id, stale_cached_prompt_ids, CachedBuiltinPrompt, GithubContentEntry,
+    github_prompt_catalog_from_entries, jsdelivr_prompt_catalog_from_entries,
+    managed_agents_template_key_from_content, prompt_content_source_urls, stable_remote_prompt_id,
+    stale_cached_prompt_ids, CachedBuiltinPrompt, GithubContentEntry,
 };
 #[cfg(test)]
 use providers::{
@@ -61,11 +70,12 @@ use providers::{
     upsert_provider_on_connection, CcSwitchCodexRow, ProviderUpsertKind, ProviderUpsertMode,
 };
 use providers::{
-    delete_provider_inner, import_ccswitch_codex_providers_inner, list_saved_providers_inner,
-    read_ccswitch_official_auth_inner, save_official_config_inner, save_provider_inner,
-    save_provider_toml_config_inner, switch_official_provider_inner, switch_provider_inner,
-    test_provider_connection_inner, ImportResult, OfficialAuthCandidate, OfficialConfigInput,
-    ProviderConnectionResult, ProviderInput, ProviderTomlInput, SavedProvider,
+    delete_provider_inner, fetch_provider_models_inner, import_ccswitch_codex_providers_inner,
+    list_saved_providers_inner, read_ccswitch_official_auth_inner, save_official_config_inner,
+    save_provider_inner, save_provider_toml_config_inner, switch_official_provider_inner,
+    switch_provider_inner, test_provider_connection_inner, ImportResult, OfficialAuthCandidate,
+    OfficialConfigInput, ProviderConnectionResult, ProviderInput, ProviderModelsResult,
+    ProviderTomlInput, SavedProvider,
 };
 #[cfg(test)]
 use sessions::{
@@ -94,6 +104,7 @@ use state::active_saved_provider_id_from_config;
 use state::{auth_has_material, build_state, ActionResult, CodexState};
 use toml_edit::{value, DocumentMut};
 pub(crate) use toml_utils::string_value;
+use updates::check_app_update;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptInjectionMode {
@@ -124,6 +135,7 @@ struct AboutInfo {
     codex_dir: String,
     project_url: String,
     github_repo: String,
+    native_updater_supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,22 +201,109 @@ pub(crate) fn sanitize_id(input: &str) -> String {
 
 fn default_codex_dir() -> Result<PathBuf> {
     if let Ok(value) = std::env::var("CODEX_HOME") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed));
+        if let Some(path) = codex_dir_from_text(&value)? {
+            return Ok(path);
         }
     }
     Ok(home_dir()?.join(".codex"))
 }
 
-pub(crate) fn resolve_codex_dir(config_dir: Option<String>) -> Result<PathBuf> {
-    match config_dir
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        Some(path) => Ok(PathBuf::from(path)),
-        None => default_codex_dir(),
+fn codex_dir_from_text(value: &str) -> Result<Option<PathBuf>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
     }
+    let unquoted = if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    if unquoted.trim().is_empty() {
+        return Ok(None);
+    }
+    if unquoted == "~" {
+        return Ok(Some(home_dir()?));
+    }
+    if let Some(rest) = unquoted
+        .strip_prefix("~/")
+        .or_else(|| unquoted.strip_prefix("~\\"))
+    {
+        return Ok(Some(home_dir()?.join(rest)));
+    }
+    Ok(Some(PathBuf::from(unquoted)))
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_linked_directory(path: PathBuf) -> Result<PathBuf> {
+    use std::os::windows::fs::FileTypeExt;
+
+    let original = path.clone();
+    let mut current = path;
+    let mut followed_link = false;
+    let mut visited = HashSet::new();
+    for _ in 0..16 {
+        if !visited.insert(current.clone()) {
+            return Err(CodexxError::Config(format!(
+                "当前 Codex 目录链接形成了循环：{}",
+                original.display()
+            )));
+        }
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !followed_link => {
+                return Ok(current);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CodexxError::Config(format!(
+                    "当前 Codex 目录链接的目标不存在：{}",
+                    original.display()
+                )));
+            }
+            Err(error) => return Err(io_err(&current, error)),
+        };
+        let file_type = metadata.file_type();
+        if metadata.is_dir() && !file_type.is_symlink_dir() {
+            return Ok(current);
+        }
+        if file_type.is_symlink_file() || file_type.is_symlink_dir() || file_type.is_symlink() {
+            let target = fs::read_link(&current).map_err(|error| io_err(&current, error))?;
+            current = if target.is_absolute() {
+                target
+            } else {
+                current
+                    .parent()
+                    .map(|parent| parent.join(&target))
+                    .unwrap_or(target)
+            };
+            followed_link = true;
+            continue;
+        }
+        return Err(CodexxError::Config(format!(
+            "当前 CODEX_HOME 不是文件夹：{}",
+            original.display()
+        )));
+    }
+
+    Err(CodexxError::Config(format!(
+        "当前 Codex 目录链接层级过多：{}",
+        original.display()
+    )))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_windows_linked_directory(path: PathBuf) -> Result<PathBuf> {
+    Ok(path)
+}
+
+pub(crate) fn resolve_codex_dir(config_dir: Option<String>) -> Result<PathBuf> {
+    let path = match config_dir.as_deref().map(codex_dir_from_text).transpose()? {
+        Some(Some(path)) => Ok(path),
+        _ => default_codex_dir(),
+    }?;
+    resolve_windows_linked_directory(path)
 }
 
 pub(crate) fn config_path(codex_dir: &Path) -> PathBuf {
@@ -248,7 +347,7 @@ fn startup_diagnostics_inner(config_dir: Option<String>) -> Result<StartupDiagno
     let config = config_path(&codex_dir);
     let auth = auth_path(&codex_dir);
     let sqlite_paths = sqlite_candidate_paths(&codex_dir);
-    let codex_dir_ok = codex_dir.is_dir();
+    let codex_dir_ok = directory_exists(&codex_dir);
     let config_ok = config.is_file();
     let auth_ok = auth.is_file() && auth_has_material(&auth).unwrap_or(false);
     let sqlite_ok = !sqlite_paths.is_empty();
@@ -434,12 +533,25 @@ async fn import_ccswitch_codex_providers(db_path: Option<String>) -> Result<Impo
 
 fn get_about_info_inner(config_dir: Option<String>) -> Result<AboutInfo> {
     let codex_dir = resolve_codex_dir(config_dir)?;
+    #[cfg(target_os = "windows")]
+    let native_updater_supported = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("Codex-X.portable")))
+        .map(|marker| !marker.is_file())
+        .unwrap_or(true);
+    #[cfg(target_os = "linux")]
+    let native_updater_supported = std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .is_some_and(|path| path.is_file());
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let native_updater_supported = true;
     Ok(AboutInfo {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         codex_version: platform::detect_codex_version(),
         codex_dir: codex_dir.display().to_string(),
         project_url: "https://github.com/yynxxxxx/Codex-X".to_string(),
         github_repo: "yynxxxxx/Codex-X".to_string(),
+        native_updater_supported,
     })
 }
 
@@ -551,7 +663,7 @@ fn enable_prompt_content_inner(
     }
 
     let codex_dir = resolve_codex_dir(config_dir)?;
-    fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
+    ensure_directory(&codex_dir)?;
     let cfg = config_path(&codex_dir);
     let agents = agents_path(&codex_dir);
     let text = read_to_string_if_exists(&cfg)?;
@@ -849,6 +961,16 @@ async fn test_provider_connection(
 }
 
 #[tauri::command]
+async fn fetch_provider_models(
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<ProviderModelsResult> {
+    tauri::async_runtime::spawn_blocking(move || fetch_provider_models_inner(base_url, api_key))
+        .await
+        .map_err(|e| CodexxError::Config(format!("获取模型列表失败: {e}")))?
+}
+
+#[tauri::command]
 async fn switch_provider(input: ProviderInput) -> Result<ActionResult> {
     tauri::async_runtime::spawn_blocking(move || switch_provider_inner(input))
         .await
@@ -873,7 +995,7 @@ fn restore_backup_inner(config_dir: Option<String>, backup_id: String) -> Result
     let cfg = config_path(&codex_dir);
     let auth = auth_path(&codex_dir);
     let agents = agents_path(&codex_dir);
-    fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
+    ensure_directory(&codex_dir)?;
 
     let backup_meta = fs::read_to_string(dir.join("meta.json"))
         .ok()
@@ -958,8 +1080,11 @@ fn open_url(url: String) -> std::result::Result<(), String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_about_info,
+            check_app_update,
             get_skills_mcp_state,
             preview_existing_skills_mcp,
             import_existing_skills_mcp,
@@ -993,6 +1118,7 @@ pub fn run() {
             switch_provider,
             save_provider_toml_config,
             test_provider_connection,
+            fetch_provider_models,
             list_backups,
             restore_backup,
             open_url,

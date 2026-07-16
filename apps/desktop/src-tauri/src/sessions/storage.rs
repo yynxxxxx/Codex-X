@@ -148,9 +148,6 @@ pub(crate) fn scan_rollouts(codex_dir: &Path, target_provider: &str) -> Result<R
             continue;
         }
         if let Some(thread_id) = thread_id {
-            if text.contains("\"user_message\"") || text.contains("\"user_input\"") {
-                scan.thread_ids_with_user_events.insert(thread_id.clone());
-            }
             if let Some(cwd) = cwd {
                 scan.cwd_by_thread_id.insert(thread_id, cwd);
             }
@@ -682,9 +679,7 @@ pub(super) fn sqlite_subagent_thread_ids(
 pub(super) struct SqliteThreadIndexState<'a> {
     pub(super) thread_id: &'a str,
     pub(super) provider: Option<&'a str>,
-    pub(super) has_user_event: Option<i64>,
     pub(super) cwd: Option<&'a str>,
-    pub(super) has_user_event_column: bool,
     pub(super) cwd_column: bool,
 }
 
@@ -694,14 +689,6 @@ pub(super) fn sqlite_thread_needs_alignment(
     state: &SqliteThreadIndexState<'_>,
 ) -> bool {
     if state.provider.map(str::trim).unwrap_or_default() != target_provider {
-        return true;
-    }
-    if state.has_user_event_column
-        && rollouts
-            .thread_ids_with_user_events
-            .contains(state.thread_id)
-        && state.has_user_event.unwrap_or_default() != 1
-    {
         return true;
     }
     if state.cwd_column {
@@ -759,11 +746,8 @@ pub(super) fn scan_sqlite_with_paths(
             continue;
         }
         scan.sqlite_dbs += 1;
-        let has_user_event_col = sql_select_column(&cols, "has_user_event", "NULL");
         let cwd_col = sql_select_column(&cols, "cwd", "NULL");
-        let query = format!(
-            "SELECT \"id\", \"model_provider\", {has_user_event_col}, {cwd_col} FROM threads"
-        );
+        let query = format!("SELECT \"id\", \"model_provider\", {cwd_col} FROM threads");
         let mut stmt = conn
             .prepare(&query)
             .map_err(|e| CodexxError::Database(e.to_string()))?;
@@ -772,14 +756,12 @@ pub(super) fn scan_sqlite_with_paths(
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             })
             .map_err(|e| CodexxError::Database(e.to_string()))?;
         for row in rows {
-            let (id, provider, has_user_event, cwd) =
-                row.map_err(|e| CodexxError::Database(e.to_string()))?;
+            let (id, provider, cwd) = row.map_err(|e| CodexxError::Database(e.to_string()))?;
             thread_ids.insert(id.clone());
             if sqlite_thread_needs_alignment(
                 rollouts,
@@ -787,9 +769,7 @@ pub(super) fn scan_sqlite_with_paths(
                 &SqliteThreadIndexState {
                     thread_id: &id,
                     provider: provider.as_deref(),
-                    has_user_event,
                     cwd: cwd.as_deref(),
-                    has_user_event_column: cols.contains("has_user_event"),
                     cwd_column: cols.contains("cwd"),
                 },
             ) {
@@ -913,9 +893,7 @@ pub(super) fn list_session_previews_with_paths(
                     &SqliteThreadIndexState {
                         thread_id: &id,
                         provider: normalized_provider.as_deref(),
-                        has_user_event: Some(has_user_event),
                         cwd: normalized_cwd.as_deref(),
-                        has_user_event_column: cols.contains("has_user_event"),
                         cwd_column: cols.contains("cwd"),
                     },
                 );

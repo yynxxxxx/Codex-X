@@ -3,54 +3,172 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild, for example v0.3.0
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 defaults:
   run:
     shell: bash
 
 jobs:
+  prepare:
+    name: Prepare draft release
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+      release_body: ${{ steps.metadata.outputs.release_body }}
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Validate versions and prepare release notes
+        id: metadata
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $REQUESTED_TAG" >&2
+            exit 1
+          fi
+          tag_commit=$(git rev-list -n 1 "refs/tags/${REQUESTED_TAG}^{commit}")
+          if [ -z "$tag_commit" ] || [ "$tag_commit" != "$(git rev-parse HEAD)" ]; then
+            echo "The workflow must run from the exact commit referenced by ${REQUESTED_TAG}" >&2
+            exit 1
+          fi
+
+          RELEASE_TAG="$REQUESTED_TAG" python3 - <<'PY'
+          import json
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          expected = tag[1:]
+          root_package = json.loads(Path("package.json").read_text(encoding="utf-8"))
+          desktop_package = json.loads(Path("apps/desktop/package.json").read_text(encoding="utf-8"))
+          tauri_config = json.loads(Path("apps/desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+          with Path("apps/desktop/src-tauri/Cargo.toml").open("rb") as fh:
+              cargo = tomllib.load(fh)
+
+          versions = {
+              "package.json": root_package.get("version"),
+              "apps/desktop/package.json": desktop_package.get("version"),
+              "apps/desktop/src-tauri/Cargo.toml": cargo.get("package", {}).get("version"),
+              "apps/desktop/src-tauri/tauri.conf.json": tauri_config.get("version"),
+          }
+          mismatches = {path: value for path, value in versions.items() if value != expected}
+          if mismatches:
+              details = ", ".join(f"{path}={value!r}" for path, value in mismatches.items())
+              raise SystemExit(f"Release tag {tag} does not match project versions: {details}")
+
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(
+              rf"^## \[{re.escape(tag)}\].*?\n(.*?)(?=^## \[|\Z)",
+              changelog,
+              flags=re.S | re.M,
+          )
+          body = match.group(1).strip() if match else ""
+          if not body:
+              body = "Codex-X desktop release."
+          Path("release-body.md").write_text(body + "\n", encoding="utf-8")
+          PY
+
+          delimiter="release_body_$(date +%s)_${RANDOM}"
+          {
+            echo "tag=$REQUESTED_TAG"
+            echo "version=${REQUESTED_TAG#v}"
+            echo "release_body<<$delimiter"
+            cat release-body.md
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create clean draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')
+            if [ "$is_draft" != "true" ]; then
+              echo "${RELEASE_TAG} is already published; use a new version instead of replacing updater assets" >&2
+              exit 1
+            fi
+            gh release edit "$RELEASE_TAG" \
+              --title "Codex-X ${RELEASE_TAG}" \
+              --notes-file release-body.md \
+              --draft
+          else
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "Codex-X ${RELEASE_TAG}" \
+              --notes-file release-body.md \
+              --draft
+          fi
+
+          release_id=$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id')
+          gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            --jq '.[].id' | while read -r asset_id; do
+              [ -z "$asset_id" ] || gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+            done
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.name }}
+    needs: prepare
     runs-on: ${{ matrix.platform }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: macOS Apple Silicon
             platform: macos-latest
-            args: --bundles dmg
-            artifact: codex-x-macos-arm64
-            paths: |
-              apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+            macos: true
+            args: --bundles app,dmg
+            asset_pattern: Codex-X-[version]-macos-arm64[ext]
           - name: macOS Intel
             platform: macos-15-intel
-            args: --bundles dmg
-            artifact: codex-x-macos-x64
-            paths: |
-              apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
-          - name: Linux
+            macos: true
+            args: --bundles app,dmg
+            asset_pattern: Codex-X-[version]-macos-x64[ext]
+          - name: Linux x64
             platform: ubuntu-22.04
-            args: --bundles deb,rpm
-            artifact: codex-x-linux
-            paths: |
-              apps/desktop/src-tauri/target/release/bundle/deb/*.deb
-              apps/desktop/src-tauri/target/release/bundle/rpm/*.rpm
-          - name: Windows
+            macos: false
+            args: --bundles deb,rpm,appimage
+            asset_pattern: Codex-X-[version]-linux-x64[ext]
+          - name: Windows x64
             platform: windows-latest
+            macos: false
             args: --bundles msi
-            artifact: codex-x-windows
-            paths: |
-              apps/desktop/src-tauri/target/release/bundle/msi/*.msi
-              apps/desktop/src-tauri/Codex-X_*_windows_x64_portable.zip
+            asset_pattern: Codex-X-[version]-windows-x64[ext]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -64,144 +182,251 @@ jobs:
             patchelf
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 10.26.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: apps/desktop/src-tauri
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Tauri bundles
-        run: pnpm --dir apps/desktop tauri build ${{ matrix.args }}
-
-      - name: Create Windows portable zip
+      - name: Test Windows filesystem compatibility
         if: matrix.platform == 'windows-latest'
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --locked
+
+      - name: Import Apple signing certificate and notarization key
+        if: matrix.macos
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           set -euo pipefail
-          version=$(node -p "require('./apps/desktop/package.json').version")
-          portable_dir="apps/desktop/src-tauri/portable/Codex-X_${version}_windows_x64_portable"
-          rm -rf "apps/desktop/src-tauri/portable"
+          required=(
+            APPLE_CERTIFICATE
+            APPLE_CERTIFICATE_PASSWORD
+            APPLE_API_ISSUER
+            APPLE_API_KEY
+            APPLE_API_KEY_P8_BASE64
+            APPLE_SIGNING_IDENTITY
+            APPLE_TEAM_ID
+            KEYCHAIN_PASSWORD
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required repository secret: ${name}" >&2
+              exit 1
+            fi
+          done
+          certificate_path="$RUNNER_TEMP/codex-x-developer-id.p12"
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          keychain_path="$RUNNER_TEMP/codex-x-signing.keychain-db"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate_path"
+          printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 -D > "$api_key_path"
+          chmod 600 "$certificate_path" "$api_key_path"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" \
+            | grep -F -- "$APPLE_SIGNING_IDENTITY" >/dev/null
+
+          echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
+          echo "CODEXX_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          echo "CODEXX_CERTIFICATE_PATH=$certificate_path" >> "$GITHUB_ENV"
+
+      - name: Validate updater signing secrets
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] || [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
+            echo "Missing Tauri updater signing repository secrets" >&2
+            exit 1
+          fi
+
+      - name: Build, sign, and upload updater artifacts
+        # Pinned to tauri-action v1.0.0 because this step receives the updater private key.
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.macos && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_API_ISSUER: ${{ matrix.macos && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ matrix.macos && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_KEY_PATH: ${{ matrix.macos && env.APPLE_API_KEY_PATH || '' }}
+          APPLE_TEAM_ID: ${{ matrix.macos && secrets.APPLE_TEAM_ID || '' }}
+        with:
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseBody: ${{ needs.prepare.outputs.release_body }}
+          releaseDraft: true
+          prerelease: false
+          projectPath: apps/desktop
+          args: ${{ matrix.args }}
+          releaseAssetNamePattern: ${{ matrix.asset_pattern }}
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          updaterJsonPreferNsis: false
+          retryAttempts: 3
+
+      - name: Verify updater signatures were generated
+        run: |
+          set -euo pipefail
+          signature_count=$(find apps/desktop/src-tauri/target/release/bundle -type f -name '*.sig' | wc -l | tr -d ' ')
+          if [ "$signature_count" -lt 1 ]; then
+            echo "No updater signatures were generated" >&2
+            exit 1
+          fi
+
+      - name: Verify signed and notarized macOS bundles
+        if: matrix.macos
+        run: |
+          set -euo pipefail
+          app_path=$(find apps/desktop/src-tauri/target/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)
+          dmg_path=$(find apps/desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)
+          test -n "$app_path"
+          test -n "$dmg_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
+          xcrun stapler validate "$app_path"
+          hdiutil verify "$dmg_path"
+
+      - name: Create and upload Windows portable archive
+        if: matrix.platform == 'windows-latest'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          portable_root="apps/desktop/src-tauri/portable"
+          portable_dir="$portable_root/Codex-X-${VERSION}-windows-x64-portable"
+          archive="apps/desktop/src-tauri/Codex-X-${VERSION}-windows-x64-portable.zip"
+          rm -rf "$portable_root"
           mkdir -p "$portable_dir"
           cp apps/desktop/src-tauri/target/release/codex-x.exe "$portable_dir/Codex-X.exe"
+          touch "$portable_dir/Codex-X.portable"
           cat > "$portable_dir/README-portable.txt" <<'EOF'
           Codex-X Windows Portable
 
           Double click Codex-X.exe to run. No MSI installation is required.
+          The portable edition uses manual downloads instead of in-app installation.
+          Keep Codex-X.portable next to Codex-X.exe so the app can identify this edition.
           Microsoft Edge WebView2 Runtime is required; Windows 10/11 usually already includes it.
           EOF
-          powershell -NoProfile -Command "Compress-Archive -Path 'apps/desktop/src-tauri/portable/Codex-X_${version}_windows_x64_portable/*' -DestinationPath 'apps/desktop/src-tauri/Codex-X_${version}_windows_x64_portable.zip' -Force"
+          powershell -NoProfile -Command "Compress-Archive -Path '${portable_dir}/*' -DestinationPath '${archive}' -Force"
+          gh release upload "$RELEASE_TAG" "$archive" --clobber
 
-      - name: Normalize release asset names
+      - name: Remove temporary Apple credentials
+        if: always() && matrix.macos
         run: |
-          set -euo pipefail
-          version=$(node -p "require('./apps/desktop/package.json').version")
-          case "${{ matrix.name }}" in
-            "macOS Apple Silicon")
-              target="apps/desktop/src-tauri/target/release/bundle/dmg/Codex-X_${version}_macos_apple_silicon_aarch64.dmg"
-              src=$(find apps/desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' | head -n 1)
-              test -n "$src"
-              mv "$src" "$target"
-              ;;
-            "macOS Intel")
-              target="apps/desktop/src-tauri/target/release/bundle/dmg/Codex-X_${version}_macos_intel_x64.dmg"
-              src=$(find apps/desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' | head -n 1)
-              test -n "$src"
-              mv "$src" "$target"
-              ;;
-            "Windows")
-              target="apps/desktop/src-tauri/target/release/bundle/msi/Codex-X_${version}_windows_x64.msi"
-              src=$(find apps/desktop/src-tauri/target/release/bundle/msi -maxdepth 1 -type f -name '*.msi' | head -n 1)
-              test -n "$src"
-              mv "$src" "$target"
-              ;;
-            "Linux")
-              deb_target="apps/desktop/src-tauri/target/release/bundle/deb/Codex-X_${version}_linux_x64.deb"
-              rpm_target="apps/desktop/src-tauri/target/release/bundle/rpm/Codex-X_${version}_linux_x64.rpm"
-              deb_src=$(find apps/desktop/src-tauri/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' | head -n 1)
-              rpm_src=$(find apps/desktop/src-tauri/target/release/bundle/rpm -maxdepth 1 -type f -name '*.rpm' | head -n 1)
-              test -n "$deb_src"
-              test -n "$rpm_src"
-              mv "$deb_src" "$deb_target"
-              mv "$rpm_src" "$rpm_target"
-              ;;
-          esac
+          if [ -n "${CODEXX_KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$CODEXX_KEYCHAIN_PATH" || true
+          fi
+          rm -f "${CODEXX_CERTIFICATE_PATH:-}" "${APPLE_API_KEY_PATH:-}"
 
-      - name: Upload bundle artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.paths }}
-          if-no-files-found: error
-          retention-days: 7
-
-  release:
-    name: Publish GitHub Release
-    needs: build
+  publish:
+    name: Validate and publish release
+    needs: [prepare, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download bundle artifacts
-        uses: actions/download-artifact@v4
+      - name: Checkout release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          path: release-assets
-          merge-multiple: true
+          ref: ${{ needs.prepare.outputs.tag }}
 
-      - name: Prepare release notes
-        id: release_notes
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
-          import re
-
-          tag = os.environ["GITHUB_REF_NAME"]
-          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          match = re.search(
-              rf"^## \[{re.escape(tag)}\].*?\n(.*?)(?=^## \[|\Z)",
-              text,
-              flags=re.S | re.M,
-          )
-          body = match.group(1).strip() if match else ""
-          if not body:
-              body = "Codex-X desktop release."
-          with open("release-body.md", "w", encoding="utf-8") as fh:
-              fh.write(body + "\n")
-          PY
-
-      - name: Publish release
+      - name: Download and validate updater manifest
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          title="Codex-X ${tag}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" --title "$title" --notes-file release-body.md --latest
-          else
-            gh release create "$tag" --title "$title" --notes-file release-body.md --latest
-          fi
-          mapfile -t assets < <(find release-assets -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.rpm' -o -name '*.zip' \) -print | sort)
-          if [ "${#assets[@]}" -eq 0 ]; then
-            echo "No release assets found" >&2
+          gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" > release-assets.json
+          latest_asset_id=$(jq -r '.[] | select(.name == "latest.json") | .id' release-assets.json)
+          if [ -z "$latest_asset_id" ] || [ "$latest_asset_id" = "null" ]; then
+            echo "latest.json is missing from the draft release" >&2
             exit 1
           fi
-          printf 'Uploading %s\n' "${assets[@]}"
-          gh release upload "$tag" "${assets[@]}" --clobber
+          gh api \
+            -H "Accept: application/octet-stream" \
+            "/repos/${GITHUB_REPOSITORY}/releases/assets/${latest_asset_id}" \
+            > latest.json
+          python3 scripts/validate_updater_release.py \
+            --manifest latest.json \
+            --assets release-assets.json \
+            --version "$VERSION"
+
+      - name: Publish the verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest
+
+      - name: Verify published updater endpoint
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          endpoint="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/latest.json"
+          curl -fsSL \
+            --retry 12 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            "$endpoint" \
+            -o published-latest.json
+          python3 scripts/validate_updater_release.py \
+            --manifest published-latest.json \
+            --assets release-assets.json \
+            --version "$VERSION"
+
+          python3 - <<'PY' > updater-urls.txt
+          import json
+          manifest = json.load(open("published-latest.json", encoding="utf-8"))
+          for entry in manifest["platforms"].values():
+              print(entry["url"])
+          PY
+          sort -u updater-urls.txt | while read -r url; do
+            curl -fsSLI \
+              --retry 5 \
+              --retry-delay 3 \
+              --retry-all-errors \
+              -H "Accept: application/octet-stream" \
+              "$url" >/dev/null
+          done

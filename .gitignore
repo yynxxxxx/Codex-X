@@ -23,6 +23,14 @@ apps/desktop/src-tauri/gen/schemas/
 .env
 .env.*
 *.local
+apple cert/
+*.p12
+*.p8
+*.pfx
+*.pem
+*.key
+codex-x-updater.key
+codex-new-ui/
 
 # Backups
 *.bak

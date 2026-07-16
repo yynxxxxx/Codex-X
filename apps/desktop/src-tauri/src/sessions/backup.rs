@@ -1,5 +1,5 @@
 use crate::error::{CodexxError, Result};
-use crate::file_io::{io_err, write_json};
+use crate::file_io::{ensure_directory, io_err, write_json};
 use chrono::Local;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
@@ -62,7 +62,7 @@ fn copy_file_to_backup(
     let existed = source.exists();
     if existed {
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+            ensure_directory(parent)?;
         }
         fs::copy(source, &target).map_err(|e| io_err(&target, e))?;
     }
@@ -88,7 +88,7 @@ pub(crate) fn backup_sqlite_to_backup(
     }
     let target = backup_target_path(codex_dir, backup_dir, source)?;
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+        ensure_directory(parent)?;
     }
     let from = Connection::open_with_flags(
         source,
@@ -182,14 +182,14 @@ pub(super) fn create_provider_sync_backup(
     sqlite_paths: &[PathBuf],
 ) -> Result<ProviderSyncBackup> {
     let root = provider_sync_backup_root(codex_dir);
-    fs::create_dir_all(&root).map_err(|e| io_err(&root, e))?;
+    ensure_directory(&root)?;
     let mut backup_dir = root.join(Local::now().format("%Y%m%d%H%M%S").to_string());
     let mut suffix = 0;
     while backup_dir.exists() {
         suffix += 1;
         backup_dir = root.join(format!("{}-{suffix}", Local::now().format("%Y%m%d%H%M%S")));
     }
-    fs::create_dir_all(&backup_dir).map_err(|e| io_err(&backup_dir, e))?;
+    ensure_directory(&backup_dir)?;
 
     let mut snapshots = Vec::new();
     for path in sqlite_paths {

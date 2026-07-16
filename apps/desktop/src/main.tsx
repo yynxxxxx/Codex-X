@@ -1,265 +1,65 @@
 import React from "react";
+import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
-import {
-  Activity,
-  ArrowLeftRight,
-  CheckCircle2,
-  ChevronRight,
-  CircleHelp,
-  CirclePlus,
-  Code2,
-  Download,
-  ExternalLink,
-  AlertCircle,
-  Eye,
-  EyeOff,
-  FileCode2,
-  FileText,
-  Globe2,
-  Github,
-  History,
-  Info,
-  KeyRound,
-  Layers3,
-  Loader2,
-  PencilLine,
-  Plus,
-  RefreshCw,
-  Settings,
-  Sparkles,
-  TerminalSquare,
-  Trash2,
-  Upload,
-  Zap,
-} from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   SessionManagementPage,
   type SessionPreview,
   type SessionSyncStatus,
 } from "./pages/SessionManagementPage";
-import "./styles.css";
+import { OverviewPage } from "./pages/OverviewPage";
+import { AboutPage, SettingsPage, TomlConfigPage } from "./pages/UtilityPages";
+import { PromptsPage } from "./pages/PromptsPage";
+import { SkillsMcpPage } from "./pages/SkillsMcpPage";
+import { ProvidersPage, type ProviderCopy, type ProviderRow } from "./pages/ProvidersPage";
+import { AppShell, type AppTab, type AppTheme } from "./components/AppShell";
+import { AppToast, StartupWizardDialog, UpdateDialog } from "./components/AppDialogs";
+import { PageTransition } from "./components/PageTransition";
+import { cx } from "./components/ui";
+import { appUpdater, useAppUpdater } from "./appUpdater";
+import type {
+  AboutInfo,
+  ActionResult,
+  AppUpdateInfo,
+  BuiltinPromptStatus,
+  CodexState,
+  ImportResult,
+  InstructionMode,
+  InstructionTemplate,
+  Lang,
+  PromptInjectionMode,
+  ProviderConnectionResult,
+  ProviderModel,
+  ProviderModelsResult,
+  ProviderMode,
+  ReleaseInfo,
+  SavedPrompt,
+  SavedProvider,
+  SessionDeleteResult,
+  SessionSyncResult,
+  SkillsMcpActionResult,
+  SkillsMcpImportPreview,
+  SkillsMcpState,
+  StartupDiagnostics,
+} from "./types";
+import "./styles/base.css";
+import "./styles/app-shell.css";
+import "./styles/ui-primitives.css";
+import "./styles/app-dialogs.css";
+import "./styles/dark-theme.css";
 
-type Lang = "zh" | "en";
-type ProviderMode = "list" | "form" | "official";
-type InstructionMode = "list" | "form";
-type PromptInjectionMode = "append" | "replace";
-type Tab = "dashboard" | "provider" | "sessions" | "skillsMcp" | "instruction" | "toml" | "settings" | "about";
-
-type InstructionTemplate = {
-  id: string;
-  filename: string;
-  title: string;
-  subtitle: string;
-  badge: string;
-};
-
-type ProviderSummary = {
-  id: string;
-  name?: string;
-  baseUrl?: string;
-  wireApi?: string;
-  requiresOpenaiAuth?: boolean;
-  isCurrent: boolean;
-};
-
-type SavedProvider = {
-  id: string;
-  providerName: string;
-  baseUrl: string;
-  model: string;
-  apiKey?: string;
-  tomlConfig?: string;
-  wireApi: string;
-  requiresOpenaiAuth: boolean;
-};
-
-type SavedPrompt = {
-  id: string;
-  title: string;
-  filename: string;
-  content: string;
-};
-
-type BuiltinPromptStatus = {
-  id: string;
-  filename: string;
-  title: string;
-  subtitle: string;
-  badge: string;
-  sourceUrl: string;
-  cached: boolean;
-  updated: boolean;
-  contentSource: string;
-  checkedAt?: string | null;
-  message: string;
-};
-
-type BackupEntry = {
-  id: string;
-  action: string;
-  createdAt: string;
-  path: string;
-  hadConfig: boolean;
-  hadAuth: boolean;
-  hadAgents?: boolean;
-};
-
-type CodexState = {
-  codexDir: string;
-  configPath: string;
-  authPath: string;
-  configExists: boolean;
-  authExists: boolean;
-  officialAuthAvailable: boolean;
-  model?: string;
-  modelProvider?: string;
-  instructionFile?: string;
-  instructionEnabled: boolean;
-  instructionInjectionMode?: PromptInjectionMode;
-  instructionTemplateKey?: string;
-  agentsPath: string;
-  activeSavedProviderId?: string;
-  providers: ProviderSummary[];
-  configText: string;
-  authPreview?: unknown;
-  authText: string;
-  lastBackup?: BackupEntry;
-};
-
-type ActionResult = {
-  ok: boolean;
-  message: string;
-  backupId?: string;
-  state: CodexState;
-};
-
-type ImportResult = {
-  imported: number;
-  added: number;
-  updated: number;
-  merged: number;
-  skipped: number;
-  warnings: string[];
-  providers: SavedProvider[];
-};
-
-type OfficialAuthCandidate = {
-  authJson: string;
-  model?: string;
-  source: string;
-};
-
-type AboutInfo = {
-  appVersion: string;
-  codexVersion?: string;
-  codexDir: string;
-  projectUrl: string;
-  githubRepo: string;
-};
-
-type ReleaseInfo = {
-  status: "idle" | "checking" | "ok" | "error";
-  latestVersion?: string;
-  htmlUrl?: string;
-  assetName?: string;
-  body?: string;
-  message?: string;
-  hasUpdate?: boolean;
-};
-
-type ProviderConnectionResult = {
-  ok: boolean;
-  status?: number | null;
-  message: string;
-  durationMs: number;
-};
-
-
-type SessionSyncResult = {
-  status: SessionSyncStatus;
-  updatedRollouts: number;
-  updatedThreads: number;
-  backupDir: string;
-};
-
-type SessionDeleteResult = {
-  status: SessionSyncStatus;
-  requestedSessions: number;
-  deletedSessions: number;
-  failedSessions: number;
-  failureMessage?: string | null;
-  deletedThreadRows: number;
-  deletedRolloutFiles: number;
-  deletedRelatedRows: number;
-};
-
-type ManagedSkill = {
-  id: string;
-  name: string;
-  description?: string | null;
-  directory: string;
-  enabled: boolean;
-  source: string;
-  path: string;
-  contentHash?: string | null;
-  updateStatus: string;
-};
-
-type ManagedMcpServer = {
-  id: string;
-  name: string;
-  transport: string;
-  enabled: boolean;
-  source: string;
-  summary: string;
-  command?: string | null;
-  url?: string | null;
-  configJson: unknown;
-};
-
-type SkillsMcpState = {
-  codexDir: string;
-  codexSkillsDir: string;
-  disabledSkillsDir: string;
-  skills: ManagedSkill[];
-  mcpServers: ManagedMcpServer[];
-  warnings: string[];
-};
-
-type SkillsMcpActionResult = {
-  importedSkills: number;
-  importedMcp: number;
-  message: string;
-  state: SkillsMcpState;
-};
-
-type SkillsMcpImportPreview = {
-  skills: ManagedSkill[];
-  mcpServers: ManagedMcpServer[];
-  warnings: string[];
-};
-
-type DiagnosticItem = {
-  key: string;
-  label: string;
-  path?: string | null;
-  status: "ok" | "missing" | "manual" | string;
-  message: string;
-};
-
-type StartupDiagnostics = {
-  codexDir: string;
-  needsManualSelect: boolean;
-  summary: string;
-  items: DiagnosticItem[];
-};
+type Tab = AppTab;
 
 const LANG_KEY = "codexx.lang";
+const THEME_KEY = "codexx.theme";
 const STARTUP_WIZARD_SEEN_KEY = "codexx.startupWizardSeen";
 const ACTIVE_PROVIDER_KEY = "codexx.activeProviderId";
 const PROMPT_INJECTION_MODE_KEY = "codexx.promptInjectionMode";
 const FALLBACK_GITHUB_REPO = "yynxxxxx/Codex-X";
+
+type ThemeTransitionDocument = Document & {
+  startViewTransition?: (update: () => void | Promise<void>) => { finished: Promise<void> };
+};
 
 const bundledInstructionTemplates: InstructionTemplate[] = [
   {
@@ -283,12 +83,21 @@ const bundledInstructionTemplates: InstructionTemplate[] = [
     subtitle: "gpt5.5 大白话（80%场景）破甲",
     badge: "通用",
   },
+  {
+    id: "github-gpt-5-6-sol-unrestricted-33b86c71",
+    filename: "gpt-5.6-sol-unrestricted.md",
+    title: "gpt-5.6-sol-unrestricted.md",
+    subtitle: "gpt5.6-sol 破甲提示词",
+    badge: "内置",
+  },
+  {
+    id: "github-3-0-b459e1e8",
+    filename: "海鸥3.0破甲.md",
+    title: "海鸥3.0破甲.md",
+    subtitle: "测试生效：海鸥在线，你要整点薯条吗？",
+    badge: "内置",
+  },
 ];
-
-const bootHints = {
-  zh: ["检测 Codex 环境", "加载本地配置", "同步界面状态", "准备进入 Codex-X"],
-  en: ["Checking Codex environment", "Loading local config", "Syncing UI state", "Preparing Codex-X"],
-};
 
 const defaultProviderForm: SavedProvider = {
   id: "magicai",
@@ -374,11 +183,6 @@ const dict = {
       officialEdit: "OpenAI Official 编辑",
       officialHint: "官方配置不使用第三方路由；这里可以编辑官方模式下的模型和完整 auth.json（ChatGPT 登录通常包含 access_token / refresh_token / id_token）。",
       officialUrl: "官方入口",
-      loadOfficialAuth: "从 cc-switch 载入官方认证",
-      refreshOfficialAuth: "刷新当前 auth.json",
-      officialAuthLoaded: "已载入 cc-switch 官方认证",
-      officialAuthRefreshed: "已刷新当前 auth.json",
-      officialAuthNotFound: "未找到 cc-switch 官方认证",
       formAdd: "添加新供应商",
       formEdit: "编辑供应商",
       formHint: "保存后会写入供应商列表，并同步写入 Codex live 配置。下方可预览将生成的 config.toml。",
@@ -480,11 +284,6 @@ const dict = {
       officialEdit: "OpenAI Official settings",
       officialHint: "Official mode does not use third-party routing. You can edit the official model and the full auth.json (ChatGPT login usually contains access_token / refresh_token / id_token).",
       officialUrl: "Official URL",
-      loadOfficialAuth: "Load official auth from cc-switch",
-      refreshOfficialAuth: "Refresh current auth.json",
-      officialAuthLoaded: "Loaded cc-switch official auth",
-      officialAuthRefreshed: "Current auth.json refreshed",
-      officialAuthNotFound: "No cc-switch official auth found",
       formAdd: "Add provider",
       formEdit: "Edit provider",
       formHint: "Save writes the provider to the list and applies it to the Codex live config. The generated config.toml is previewed below.",
@@ -534,8 +333,72 @@ const dict = {
   },
 } as const;
 
-function cx(...items: Array<string | false | undefined>) {
-  return items.filter(Boolean).join(" ");
+function getProviderPageCopy(lang: Lang): ProviderCopy {
+  const t = dict[lang];
+  const isChinese = lang === "zh";
+  return {
+    eyebrow: "Provider",
+    title: t.provider.title,
+    subtitle: t.provider.subtitle,
+    importLabel: t.provider.importCc,
+    addLabel: t.provider.add,
+    noProviders: t.provider.noProviders,
+    currentLabel: isChinese ? "当前使用" : "Current",
+    enableLabel: isChinese ? "启用" : "Enable",
+    testLabel: isChinese ? "测试连接" : "Test connection",
+    editLabel: t.provider.edit,
+    removeLabel: t.provider.remove,
+    deleteTitle: isChinese ? "删除供应商" : "Delete provider",
+    deleteDescription: (providerName) => isChinese
+      ? `“${providerName}”将从供应商列表中删除，此操作无法撤销。`
+      : `“${providerName}” will be removed from the provider list. This cannot be undone.`,
+    deleteCurrentDescription: (providerName) => isChinese
+      ? `“${providerName}”当前正在使用。删除后不会自动切换供应商，确定继续吗？`
+      : `“${providerName}” is currently active. Deleting it will not switch providers automatically. Continue?`,
+    deleteCancelLabel: isChinese ? "取消" : "Cancel",
+    deleteConfirmLabel: isChinese ? "确认删除" : "Delete",
+    noBaseUrlLabel: "no base_url",
+    officialEyebrow: "OpenAI Official",
+    officialTitle: t.provider.officialEdit,
+    officialHint: t.provider.officialHint,
+    officialUrlLabel: t.provider.officialUrl,
+    authPathLabel: "auth.json",
+    officialCurrentLabel: t.provider.current,
+    officialAuthLabel: "auth.json (JSON)",
+    officialSaveLabel: isChinese ? "保存官方配置" : "Save official config",
+    cancelLabel: t.provider.cancel,
+    formEyebrow: "Provider",
+    formAddTitle: t.provider.formAdd,
+    formEditTitle: t.provider.formEdit,
+    formHint: t.provider.formHint,
+    apiConfigTitle: isChinese ? "供应商 API 配置" : "Provider API configuration",
+    apiConfigDescription: isChinese
+      ? "在同一个页面管理 API、认证信息和 config.toml。"
+      : "Manage API, authentication, and config.toml in one place.",
+    apiKeyLabel: t.provider.apiKey,
+    apiKeyPlaceholder: t.provider.apiKeyPlaceholder,
+    showApiKeyLabel: isChinese ? "显示 API Key" : "Show API key",
+    hideApiKeyLabel: isChinese ? "隐藏 API Key" : "Hide API key",
+    baseUrlLabel: isChinese ? "API 请求地址" : t.provider.baseUrl,
+    nameLabel: t.provider.name,
+    modelLabel: t.provider.model,
+    fetchModelsLabel: isChinese ? "获取模型列表" : "Fetch models",
+    fetchingModelsLabel: isChinese ? "获取中" : "Fetching",
+    chooseModelLabel: (count) => isChinese ? `选择已获取的模型（${count}）` : `Choose a fetched model (${count})`,
+    wireApiLabel: t.provider.wireApi,
+    requiresAuthLabel: t.provider.requiresAuth,
+    authPreviewTitle: "auth.json (JSON)",
+    authPreviewDescription: isChinese
+      ? "预览保存时写入或保留的认证配置；API Key 留空不会覆盖现有认证。"
+      : "Preview the authentication data. An empty API key keeps the current auth file.",
+    tomlTitle: "config.toml (TOML)",
+    tomlDescription: isChinese
+      ? "这里保存供应商模板，只有启用供应商时才会写入 Codex 当前配置。"
+      : "This stores the provider template and is written to the live config only when enabled.",
+    resetTomlLabel: isChinese ? "重置生成" : "Reset",
+    saveLabel: t.provider.saveAndSwitch,
+    savingLabel: isChinese ? "保存中..." : "Saving...",
+  };
 }
 
 function providerId(name: string) {
@@ -585,57 +448,6 @@ function uniquePromptFilename(filename: string, existingFilenames: Iterable<stri
   }
   return candidate;
 }
-
-function StatusPill({ active, label }: { active: boolean; label: string }) {
-  return <span className={cx("pill", active ? "pill-ok" : "pill-muted")}>{label}</span>;
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="field">
-      <span>{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function StatCard({ icon, label, value, ok }: { icon: React.ReactNode; label: string; value: React.ReactNode; ok?: boolean }) {
-  return (
-    <div className="stat-card">
-      <div className={cx("stat-icon", ok ? "stat-icon-ok" : undefined)}>{icon}</div>
-      <div>
-        <p>{label}</p>
-        <strong>{value}</strong>
-      </div>
-    </div>
-  );
-}
-
-function Avatar({ name }: { name: string }) {
-  const initials = name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((s) => s[0]?.toUpperCase())
-    .join("") || "P";
-  return <div className="provider-avatar">{initials}</div>;
-}
-
-
-function OpenAIIcon() {
-  return (
-    <div className="openai-avatar" aria-label="OpenAI Official">
-      <svg viewBox="0 0 64 64" width="30" height="30" role="img">
-        <path
-          d="M31.6 6.5c4.4 0 8.3 2.3 10.5 5.8 4.1.2 8 2.5 10.2 6.3 2.2 3.8 2.1 8.4.2 11.9 1.9 3.7 1.9 8.2-.3 12-2.2 3.8-6.1 6.1-10.2 6.3-2.2 3.5-6.1 5.7-10.5 5.7-4.4 0-8.3-2.2-10.5-5.7-4.1-.2-8-2.5-10.2-6.3-2.2-3.8-2.2-8.3-.3-12-1.9-3.6-1.9-8.1.3-11.9 2.2-3.8 6.1-6.1 10.2-6.3 2.2-3.5 6.1-5.8 10.6-5.8Zm0 5.6c-2.3 0-4.3 1-5.7 2.7l12.1 7V16c0-2.2-2.9-3.9-6.4-3.9Zm11 6.1v14l5-2.9c1.9-1.1 2.1-4.5.4-7.5-1.2-2.2-3.2-3.5-5.4-3.6Zm-23.9.1c-2.1.2-4.1 1.5-5.3 3.6-1.8 3-1.6 6.4.4 7.5l5 2.9v-14Zm5.2 1.2v14.1l7.7 4.5 7.7-4.5V19.5l-7.7 4.5-7.7-4.5Zm-9.2 15.9c-1.9 1.2-2.1 4.5-.4 7.5 1.2 2.1 3.2 3.4 5.3 3.6v-14l-4.9 2.9Zm34 .1-5 2.9v14c2.1-.2 4.1-1.5 5.3-3.6 1.8-3 1.6-6.4-.3-7.3Zm-17.1 8.7-7.7-4.5v5.8c0 2.2 2.9 3.9 6.4 3.9 2.3 0 4.4-1 5.7-2.7l-4.4-2.5Z"
-          fill="currentColor"
-        />
-      </svg>
-    </div>
-  );
-}
-
-
 
 function tomlEscape(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -733,7 +545,6 @@ function buildProviderTomlPreview(provider: SavedProvider, state: CodexState | n
   const providerKey = "custom";
   const baseUrl = provider.baseUrl.trim().replace(/\/+$/, "") || "https://example.com/v1";
   const wireApi = provider.wireApi || "responses";
-  const apiKey = provider.apiKey?.trim();
   const source = state?.configText?.trimEnd() || "";
   const sourceLines = source ? source.split("\n") : [];
   const keptLines: string[] = [];
@@ -904,39 +715,14 @@ function TomlPreview({ text }: { text: string }) {
 }
 
 
-function normalizeVersion(value?: string) {
-  return (value || "").trim().replace(/^v/i, "");
-}
-
-function compareVersions(a?: string, b?: string) {
-  const pa = normalizeVersion(a).split(/[.-]/).map((x) => Number.parseInt(x, 10) || 0);
-  const pb = normalizeVersion(b).split(/[.-]/).map((x) => Number.parseInt(x, 10) || 0);
-  const len = Math.max(pa.length, pb.length, 3);
-  for (let i = 0; i < len; i += 1) {
-    const diff = (pa[i] || 0) - (pb[i] || 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
-
-function releaseAssetForPlatform(assets: Array<{ name?: string; browser_download_url?: string }>) {
-  const platform = navigator.userAgent.toLowerCase();
-  const isMac = platform.includes("mac");
-  const isWindows = platform.includes("windows");
-  const isLinux = platform.includes("linux");
-  return assets.find((asset) => {
-    const name = (asset.name || "").toLowerCase();
-    if (isMac) return name.endsWith(".dmg") || name.endsWith(".app.tar.gz");
-    if (isWindows) return name.endsWith(".msi") || name.endsWith(".exe");
-    if (isLinux) return name.endsWith(".appimage") || name.endsWith(".deb") || name.endsWith(".rpm");
-    return Boolean(name);
-  }) || assets[0];
-}
-
 function App() {
   const initialLang = (localStorage.getItem(LANG_KEY) as Lang | null) || "zh";
   const [lang, setLang] = React.useState<Lang>(initialLang === "en" ? "en" : "zh");
+  const [theme, setTheme] = React.useState<AppTheme>(() =>
+    localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light",
+  );
   const t = dict[lang];
+  const updater = useAppUpdater();
   const isMacRuntime = navigator.userAgent.toLowerCase().includes("mac");
   const [tab, setTab] = React.useState<Tab>("dashboard");
   const [visitedTabs, setVisitedTabs] = React.useState<Set<Tab>>(() => new Set(["dashboard"]));
@@ -973,9 +759,6 @@ function App() {
   const [state, setState] = React.useState<CodexState | null>(null);
   const [configDir, setConfigDir] = React.useState("");
   const [loading, setLoading] = React.useState(false);
-  const [bootVisible, setBootVisible] = React.useState(true);
-  const [bootLeaving, setBootLeaving] = React.useState(false);
-  const [bootHintIndex, setBootHintIndex] = React.useState(0);
   const [toast, setToast] = React.useState<string>("");
   const [error, setError] = React.useState<string>("");
   const [providerForm, setProviderForm] = React.useState<SavedProvider>(defaultProviderForm);
@@ -983,6 +766,8 @@ function App() {
   const [providerTomlDirty, setProviderTomlDirty] = React.useState(false);
   const [providerApiKeyVisible, setProviderApiKeyVisible] = React.useState(false);
   const [providerTestingId, setProviderTestingId] = React.useState("");
+  const [availableProviderModels, setAvailableProviderModels] = React.useState<ProviderModel[]>([]);
+  const [providerModelsLoading, setProviderModelsLoading] = React.useState(false);
   const [actionBusy, setActionBusy] = React.useState<string>("");
   const [promptSyncing, setPromptSyncing] = React.useState(false);
   const [promptCatalogReady, setPromptCatalogReady] = React.useState(false);
@@ -993,17 +778,15 @@ function App() {
   const promptImportRef = React.useRef<HTMLInputElement | null>(null);
   const skillZipImportRef = React.useRef<HTMLInputElement | null>(null);
   const providerTomlEditorRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const providerModelsRequestRef = React.useRef(0);
   const promptModeHelpRef = React.useRef<HTMLDivElement | null>(null);
-  const sessionDeleteDialogRef = React.useRef<HTMLDivElement>(null);
-  const sessionDeleteTriggerRef = React.useRef<HTMLButtonElement>(null);
-  const sessionDeleteBusyRef = React.useRef(false);
   const promptRefreshRequestRef = React.useRef(0);
   const promptRefreshInFlightRef = React.useRef<Promise<BuiltinPromptStatus[]> | null>(null);
-  const promptAutoRefreshStartedRef = React.useRef(false);
+  const promptAutoRefreshAttemptedRef = React.useRef(false);
   const promptCatalogReadyRef = React.useRef(false);
   const promptModeSyncedRef = React.useRef("");
   const skillsMcpLoadedRef = React.useRef(false);
-  const bootStartedAtRef = React.useRef(Date.now());
+  const themeTransitionTimerRef = React.useRef<number | null>(null);
   const providerTomlPreview = React.useMemo(() => buildProviderTomlPreview(providerForm, state), [providerForm, state]);
   const providerAuthPreview = React.useMemo(() => buildProviderAuthPreview(providerForm), [providerForm]);
   const activeBuiltinTemplateId = state?.instructionTemplateKey?.startsWith("builtin:")
@@ -1020,22 +803,77 @@ function App() {
     ? activeBuiltinTemplateId
     : "";
   const currentInstructionId = instructionIdFromPath(state?.instructionFile, instructionTemplates);
-  const builtinPromptStatusMap = React.useMemo(() => new Map(builtinPromptStatus.map((item) => [item.id, item])), [builtinPromptStatus]);
   const releaseStatusLabel = React.useMemo(() => {
+    if (updater.state.phase === "downloading") return lang === "zh" ? "下载中" : "Downloading";
+    if (updater.state.phase === "installing") return lang === "zh" ? "安装中" : "Installing";
+    if (updater.state.phase === "ready") return lang === "zh" ? "等待重启" : "Restart required";
     if (releaseInfo.status === "checking") return lang === "zh" ? "检查中" : "Checking";
     if (releaseInfo.status === "error") return lang === "zh" ? "失败" : "Failed";
     if (releaseInfo.hasUpdate) return lang === "zh" ? "有更新" : "Update found";
     if (releaseInfo.status === "ok") return lang === "zh" ? "已是最新" : "Up to date";
     return lang === "zh" ? "未检查" : "Idle";
-  }, [lang, releaseInfo.hasUpdate, releaseInfo.status]);
+  }, [lang, releaseInfo.hasUpdate, releaseInfo.status, updater.state.phase]);
 
   React.useEffect(() => {
     localStorage.setItem(LANG_KEY, lang);
   }, [lang]);
 
+  React.useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
+
+  React.useEffect(() => () => {
+    if (themeTransitionTimerRef.current !== null) {
+      window.clearTimeout(themeTransitionTimerRef.current);
+    }
+    document.documentElement.classList.remove("cx-theme-view-transition", "cx-theme-fallback-transition");
+  }, []);
+
+  const toggleTheme = React.useCallback(() => {
+    const nextTheme: AppTheme = theme === "dark" ? "light" : "dark";
+    const root = document.documentElement;
+    const commitTheme = () => {
+      flushSync(() => setTheme(nextTheme));
+    };
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      commitTheme();
+      return;
+    }
+
+    const transitionDocument = document as ThemeTransitionDocument;
+    if (typeof transitionDocument.startViewTransition === "function") {
+      root.classList.remove("cx-theme-fallback-transition");
+      root.classList.add("cx-theme-view-transition");
+      try {
+        const transition = transitionDocument.startViewTransition(commitTheme);
+        const clearTransitionClass = () => root.classList.remove("cx-theme-view-transition");
+        void transition.finished.then(clearTransitionClass, clearTransitionClass);
+        return;
+      } catch {
+        root.classList.remove("cx-theme-view-transition");
+      }
+    }
+
+    root.classList.add("cx-theme-fallback-transition");
+    commitTheme();
+    if (themeTransitionTimerRef.current !== null) {
+      window.clearTimeout(themeTransitionTimerRef.current);
+    }
+    themeTransitionTimerRef.current = window.setTimeout(() => {
+      root.classList.remove("cx-theme-fallback-transition");
+      themeTransitionTimerRef.current = null;
+    }, 260);
+  }, [theme]);
+
   React.useEffect(() => {
     localStorage.setItem(PROMPT_INJECTION_MODE_KEY, promptInjectionMode);
   }, [promptInjectionMode]);
+
+  React.useEffect(() => {
+    if (error) setToast("");
+  }, [error]);
 
   React.useEffect(() => {
     if (!promptModeHelpOpen) return undefined;
@@ -1086,27 +924,6 @@ function App() {
     }
   }, [providerMode, providerTomlDirty, providerTomlPreview]);
 
-  React.useEffect(() => {
-    if (!state || !bootVisible || bootLeaving) return undefined;
-    const elapsed = Date.now() - bootStartedAtRef.current;
-    const minBootMs = 920;
-    const leaveDelay = Math.max(120, minBootMs - elapsed);
-    const leaveTimer = window.setTimeout(() => {
-      setBootLeaving(true);
-      window.setTimeout(() => setBootVisible(false), 300);
-    }, leaveDelay);
-    return () => window.clearTimeout(leaveTimer);
-  }, [bootLeaving, bootVisible, state]);
-
-  React.useEffect(() => {
-    if (!bootVisible || bootLeaving) return undefined;
-    const timer = window.setInterval(() => {
-      setBootHintIndex((index) => (index + 1) % bootHints.zh.length);
-    }, 620);
-    return () => window.clearInterval(timer);
-  }, [bootLeaving, bootVisible]);
-
-
   const currentProvider = state?.providers.find((p) => p.isCurrent);
   const liveProviderId = (state?.modelProvider || "openai").trim();
   const liveCustomProvider = React.useMemo(() => (state?.providers || []).find((item) => item.id === "custom"), [state?.providers]);
@@ -1145,17 +962,6 @@ function App() {
       || currentInstructionFilename
       || (lang === "zh" ? "当前提示词" : "Current prompt");
   }, [currentInstructionFilename, instructionTemplates, lang, savedPrompts, state?.instructionTemplateKey]);
-  const activeInjectionModeLabel = state?.instructionInjectionMode === "append"
-    ? (lang === "zh" ? "追加到 AGENTS.md" : "Append to AGENTS.md")
-    : (lang === "zh" ? "替换指令文件" : "Replace instruction file");
-  const selectedInjectionModeLabel = promptInjectionMode === "append"
-    ? (lang === "zh" ? "保留原提示词" : "Keep existing")
-    : (lang === "zh" ? "替换原提示词" : "Replace existing");
-  const injectionModePending = Boolean(
-    state?.instructionEnabled
-      && state.instructionInjectionMode
-      && state.instructionInjectionMode !== promptInjectionMode,
-  );
   const canonicalSavedProviders = React.useMemo(() => {
     const groups = new Map<string, SavedProvider[]>();
     savedProviders.forEach((provider) => {
@@ -1227,6 +1033,43 @@ function App() {
     return rows;
   }, [detectedRows, inferredActiveProviderId, localRows, state?.model, state?.modelProvider]);
 
+  const findLocalProviderForRow = React.useCallback((row: ProviderRow) => {
+    if (row.source === "official") return undefined;
+    return canonicalSavedProviders.find((item) =>
+      row.source === "local"
+        ? item.id === row.id
+        : providerIdentityKey(item.baseUrl, savedProviderApiKey(item), item.providerName)
+          === providerIdentityKey(row.baseUrl, row.apiKey, row.providerName),
+    );
+  }, [canonicalSavedProviders]);
+
+  const providerPageRows = React.useMemo<ProviderRow[]>(() => providerRows.map((row) => {
+    const local = row.source === "official"
+      ? undefined
+      : canonicalSavedProviders.find((item) =>
+        row.source === "local"
+          ? item.id === row.id
+          : providerIdentityKey(item.baseUrl, savedProviderApiKey(item), item.providerName)
+            === providerIdentityKey(row.baseUrl, row.apiKey, row.providerName),
+      );
+    return {
+      id: row.id,
+      source: row.source,
+      providerName: row.providerName,
+      baseUrl: row.baseUrl,
+      model: row.model,
+      apiKey: row.apiKey,
+      wireApi: row.wireApi,
+      requiresOpenaiAuth: row.requiresOpenaiAuth,
+      isCurrent: row.isCurrent,
+      sourceLabel: row.source === "official" ? (lang === "zh" ? "Codex 登录" : "Codex login") : undefined,
+      editable: row.source === "official" || Boolean(local) || row.source === "detected",
+      deletable: Boolean(local),
+      testable: row.source !== "official",
+      testingKey: `${row.source}-${row.id}`,
+    };
+  }), [canonicalSavedProviders, lang, providerRows]);
+
   const visibleSessions = React.useMemo(
     () => (sessionStatus?.sessions || []).filter((item) => showInternalSessions || !item.isSubagent),
     [sessionStatus?.sessions, showInternalSessions],
@@ -1287,67 +1130,15 @@ function App() {
     [selectedSessionSet, sessionStatus?.sessions],
   );
 
-  const enabledSkillCount = skillsMcpState?.skills.filter((item) => item.enabled).length ?? 0;
-  const enabledMcpCount = skillsMcpState?.mcpServers.filter((item) => item.enabled).length ?? 0;
-  const activeSkillsMcpCount = skillsMcpTab === "mcp"
-    ? (skillsMcpState?.mcpServers.length ?? 0)
-    : (skillsMcpState?.skills.length ?? 0);
-
   React.useEffect(() => {
     setSelectedSessionIds((ids) => ids.filter((id) => (sessionStatus?.sessions || []).some((item) => item.id === id)));
   }, [sessionStatus?.sessions]);
-
-  React.useEffect(() => {
-    sessionDeleteBusyRef.current = sessionDeleteBusy;
-  }, [sessionDeleteBusy]);
 
   React.useEffect(() => {
     if (sessionDeleteConfirmOpen && selectedSessions.length === 0) {
       setSessionDeleteConfirmOpen(false);
     }
   }, [selectedSessions.length, sessionDeleteConfirmOpen]);
-
-  React.useEffect(() => {
-    if (!sessionDeleteConfirmOpen) return;
-    const dialog = sessionDeleteDialogRef.current;
-    if (!dialog) return;
-    const restoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const focusableElements = () => Array.from(dialog.querySelectorAll<HTMLElement>(
-      "button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
-    ));
-    const frame = window.requestAnimationFrame(() => {
-      (dialog.querySelector<HTMLElement>("[data-initial-focus]") || dialog).focus();
-    });
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        if (!sessionDeleteBusyRef.current) setSessionDeleteConfirmOpen(false);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = focusableElements();
-      if (!focusable.length) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", handleKeyDown);
-      if (restoreTarget?.isConnected) window.requestAnimationFrame(() => restoreTarget.focus());
-    };
-  }, [sessionDeleteConfirmOpen]);
 
   const call = React.useCallback(async <T,>(fn: () => Promise<T>, success?: (data: T) => void) => {
     setLoading(true);
@@ -1365,21 +1156,22 @@ function App() {
   const refresh = React.useCallback(() => {
     call(
       async () => {
-        const [next, providerList, promptList, about] = await Promise.all([
+        const [next, providerList, promptList, promptStatus, about] = await Promise.all([
           invoke<CodexState>("get_codex_state", { configDir: configDir || null }),
           invoke<SavedProvider[]>("list_saved_providers"),
           invoke<SavedPrompt[]>("list_saved_prompts"),
+          invoke<BuiltinPromptStatus[]>("get_builtin_prompt_status"),
           invoke<AboutInfo>("get_about_info", { configDir: configDir || null }),
         ]);
-        return { next, providerList, promptList, about };
+        return { next, providerList, promptList, promptStatus, about };
       },
-      ({ next, providerList, promptList, about }) => {
+      ({ next, providerList, promptList, promptStatus, about }) => {
         setState(next);
         setSavedProviders(providerList);
         setSavedPrompts(promptList);
+        setBuiltinPromptStatus(uniqueBuiltinPromptStatuses(promptStatus));
         setAboutInfo(about);
-        if (!configDir) setConfigDir(next.codexDir);
-        const resolvedConfigDir = configDir || next.codexDir || null;
+        const resolvedConfigDir = configDir || null;
         void Promise.all([
           invoke<StartupDiagnostics>("get_startup_diagnostics", { configDir: resolvedConfigDir }),
           invoke<SessionSyncStatus>("get_session_sync_status", { configDir: resolvedConfigDir, targetProvider: null }),
@@ -1422,7 +1214,7 @@ function App() {
   const handleActionResult = (result: ActionResult) => {
     setState(result.state);
     setToast(result.message);
-    const resolvedConfigDir = configDir || result.state.codexDir || null;
+    const resolvedConfigDir = configDir || null;
     void Promise.all([
       invoke<SavedPrompt[]>("list_saved_prompts"),
       invoke<SavedProvider[]>("list_saved_providers"),
@@ -1493,20 +1285,6 @@ function App() {
       },
     );
 
-  const saveAndEnablePrompt = () =>
-    call(
-      async () => {
-        const saved = await invoke<SavedPrompt>("save_prompt", { prompt: normalizedPromptForm() });
-        const result = await invoke<ActionResult>("enable_saved_prompt", { configDir: configDir || null, id: saved.id, injectionMode: promptInjectionMode });
-        return result;
-      },
-      (result) => {
-        setInstructionMode("list");
-        setEditingPromptId(null);
-        handleActionResult(result);
-      },
-    );
-
   const enableSavedPrompt = (id: string) =>
     call(() => invoke<ActionResult>("enable_saved_prompt", { configDir: configDir || null, id, injectionMode: promptInjectionMode }), handleActionResult);
 
@@ -1557,7 +1335,7 @@ function App() {
 
   const refreshBuiltinPrompts = async ({ quiet = false }: { quiet?: boolean } = {}) => {
     const requestId = ++promptRefreshRequestRef.current;
-    if (!quiet) promptAutoRefreshStartedRef.current = true;
+    if (!quiet) promptAutoRefreshAttemptedRef.current = true;
     if (!quiet) setError("");
     try {
       const existingRequest = promptRefreshInFlightRef.current;
@@ -1575,11 +1353,10 @@ function App() {
       const list = await request;
       if (requestId !== promptRefreshRequestRef.current) return;
       const uniqueList = uniqueBuiltinPromptStatuses(list);
-      const catalogFailed = uniqueList.some((item) => item.message.includes("无法读取 GitHub 模板目录"));
+      const catalogFailed = uniqueList.some((item) => item.syncIssue === "catalog");
       const contentFetchFailures = uniqueList.filter((item) =>
-        item.contentSource === "unavailable" || item.message.includes("无法连接 GitHub"),
+        item.contentSource === "unavailable" || item.syncIssue === "content",
       ).length;
-      promptAutoRefreshStartedRef.current = !catalogFailed && contentFetchFailures === 0;
       if (!catalogFailed) {
         promptCatalogReadyRef.current = true;
         setPromptCatalogReady(true);
@@ -1591,17 +1368,16 @@ function App() {
       if (!quiet) {
         setToast(catalogFailed
           ? promptCatalogReadyRef.current
-            ? (lang === "zh" ? "暂时无法连接 GitHub，已保留当前模板列表" : "GitHub unavailable; keeping the current template list")
-            : (lang === "zh" ? "暂时无法连接 GitHub，已使用本地模板" : "GitHub unavailable; using local templates")
+            ? (lang === "zh" ? "在线模板库暂时不可用，已保留当前列表" : "Online templates are unavailable; keeping the current list")
+            : (lang === "zh" ? "在线模板库暂时不可用，已使用本地模板" : "Online templates are unavailable; using local templates")
           : contentFetchFailures > 0
-            ? (lang === "zh" ? `GitHub 目录已同步，${contentFetchFailures} 个模板暂用本地内容` : `GitHub catalog synced; ${contentFetchFailures} template(s) are using local content`)
+            ? (lang === "zh" ? `模板目录已同步，${contentFetchFailures} 个模板暂用本地内容` : `Template catalog synced; ${contentFetchFailures} template(s) are using local content`)
           : updated > 0
-            ? (lang === "zh" ? `已同步 ${updated} 个 GitHub 提示词模板` : `${updated} GitHub prompt template(s) synced`)
-            : (lang === "zh" ? "提示词模板已是 GitHub 最新" : "Prompt templates are up to date"));
+            ? (lang === "zh" ? `已同步 ${updated} 个提示词模板` : `${updated} prompt template(s) synced`)
+            : (lang === "zh" ? "提示词模板已是最新" : "Prompt templates are up to date"));
       }
     } catch (e) {
       if (requestId === promptRefreshRequestRef.current) {
-        promptAutoRefreshStartedRef.current = false;
         if (!quiet) setError(String(e));
       }
     }
@@ -1618,12 +1394,6 @@ function App() {
     wireApi: providerForm.wireApi || "responses",
     requiresOpenaiAuth: providerForm.requiresOpenaiAuth,
   });
-
-  const reloadSavedProviders = async () => {
-    const providerList = await invoke<SavedProvider[]>("list_saved_providers");
-    setSavedProviders(providerList);
-    return providerList;
-  };
 
   const saveProviderOnly = () =>
     call(
@@ -1674,15 +1444,56 @@ function App() {
       },
     );
 
+  const resetAvailableProviderModels = () => {
+    providerModelsRequestRef.current += 1;
+    setAvailableProviderModels([]);
+    setProviderModelsLoading(false);
+  };
+
+  const fetchProviderModels = async () => {
+    const baseUrl = providerForm.baseUrl.trim();
+    const apiKey = (providerForm.apiKey || "").trim();
+    if (!baseUrl || !apiKey) {
+      setError("");
+      setToast(lang === "zh" ? "请先填写 API 请求地址和 API Key" : "Enter the API URL and API key first");
+      return;
+    }
+
+    const requestId = providerModelsRequestRef.current + 1;
+    providerModelsRequestRef.current = requestId;
+    setProviderModelsLoading(true);
+    setError("");
+    setToast(lang === "zh" ? "正在获取模型列表..." : "Fetching model list...");
+    try {
+      const result = await invoke<ProviderModelsResult>("fetch_provider_models", { baseUrl, apiKey });
+      if (providerModelsRequestRef.current !== requestId) return;
+      setAvailableProviderModels(result.models);
+      setToast(result.models.length > 0
+        ? (lang === "zh" ? `已获取 ${result.models.length} 个模型` : `${result.models.length} models fetched`)
+        : (lang === "zh" ? "连接成功，但供应商没有返回模型" : "Connected, but the provider returned no models"));
+    } catch (e) {
+      if (providerModelsRequestRef.current !== requestId) return;
+      setToast("");
+      setError(String(e));
+    } finally {
+      if (providerModelsRequestRef.current === requestId) setProviderModelsLoading(false);
+    }
+  };
+
   const testProvider = async (id: string, baseUrl: string, apiKey?: string | null) => {
     setProviderTestingId(id);
     setError("");
+    setToast(lang === "zh" ? "正在检测连接..." : "Testing connection...");
     try {
       const result = await invoke<ProviderConnectionResult>("test_provider_connection", { baseUrl, apiKey: apiKey || null });
-      setToast(result.ok
-        ? (lang === "zh" ? `连接正常\n${result.durationMs} ms` : `Connection OK\n${result.durationMs} ms`)
-        : (lang === "zh" ? `连接失败\n${result.message}` : `Connection failed\n${result.message}`));
+      if (result.ok) {
+        setToast(lang === "zh" ? `连接成功，响应延迟 ${result.durationMs}ms` : `Connected, ${result.durationMs}ms latency`);
+      } else {
+        setToast("");
+        setError(lang === "zh" ? `连接失败：${result.message}` : `Connection failed: ${result.message}`);
+      }
     } catch (e) {
+      setToast("");
       setError(String(e));
     } finally {
       setProviderTestingId("");
@@ -1701,19 +1512,25 @@ function App() {
       },
     );
 
-  const importFromCcSwitch = () =>
-    call(
-      () => invoke<ImportResult>("import_ccswitch_codex_providers", { dbPath: null }),
-      (result) => {
-        setSavedProviders(result.providers);
-        const warningText = result.skipped > 0 ? `，跳过 ${result.skipped}` : "";
-        setToast(
-          lang === "zh"
-            ? `cc-switch 导入完成：新增 ${result.added}，更新 ${result.updated}，合并 ${result.merged}${warningText}`
-            : `cc-switch import complete: ${result.added} added, ${result.updated} updated, ${result.merged} merged${warningText}`,
-        );
-      },
-    );
+  const importFromCcSwitch = async () => {
+    setActionBusy("importCcSwitch");
+    try {
+      await call(
+        () => invoke<ImportResult>("import_ccswitch_codex_providers", { dbPath: null }),
+        (result) => {
+          setSavedProviders(result.providers);
+          const warningText = result.skipped > 0 ? `，跳过 ${result.skipped}` : "";
+          setToast(
+            lang === "zh"
+              ? `cc-switch 导入完成：新增 ${result.added}，更新 ${result.updated}，合并 ${result.merged}${warningText}`
+              : `cc-switch import complete: ${result.added} added, ${result.updated} updated, ${result.merged} merged${warningText}`,
+          );
+        },
+      );
+    } finally {
+      setActionBusy("");
+    }
+  };
 
   const openExternalUrl = React.useCallback((url?: string | null) => {
     if (!url) return;
@@ -1725,70 +1542,84 @@ function App() {
   }, [lang]);
 
   const checkForUpdates = React.useCallback(async ({ quiet = false }: { quiet?: boolean } = {}) => {
-    const repo = aboutInfo?.githubRepo || FALLBACK_GITHUB_REPO;
-    const appVersion = aboutInfo?.appVersion || "0.0.0";
-    const releasesUrl = `https://github.com/${repo}/releases/`;
     setReleaseInfo({ status: "checking" });
     try {
-      const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-        headers: { Accept: "application/vnd.github+json" },
-      });
-      if (!response.ok) {
-        throw new Error(`GitHub Releases ${response.status}`);
+      if (aboutInfo?.nativeUpdaterSupported !== false) {
+        const updaterResult = await appUpdater.check({ force: !quiet, timeout: 15_000 });
+        if (updaterResult === "available") {
+          const snapshot = appUpdater.getSnapshot();
+          const latestVersion = snapshot.latestVersion || "";
+          const releaseTag = latestVersion.startsWith("v") ? latestVersion : `v${latestVersion}`;
+          setReleaseInfo({
+            status: "ok",
+            latestVersion: releaseTag,
+            htmlUrl: `https://github.com/${FALLBACK_GITHUB_REPO}/releases/tag/${releaseTag}`,
+            hasUpdate: true,
+            updateMethod: "native",
+          });
+          if (quiet) {
+            setToast(lang === "zh" ? `发现新版本 ${releaseTag}，可在概览页查看` : `New version ${releaseTag} is available`);
+          } else {
+            setUpdatePromptOpen(true);
+          }
+          return;
+        }
+
+        if (updaterResult === "up-to-date") {
+          setReleaseInfo({
+            status: "ok",
+            latestVersion: aboutInfo?.appVersion,
+            htmlUrl: `https://github.com/${FALLBACK_GITHUB_REPO}/releases/latest`,
+            hasUpdate: false,
+          });
+          if (!quiet) setToast(lang === "zh" ? "当前已是最新版本" : "You are up to date");
+          return;
+        }
       }
-      const release = await response.json() as {
-        tag_name?: string;
-        name?: string;
-        html_url?: string;
-        body?: string;
-        assets?: Array<{ name?: string; browser_download_url?: string }>;
-      };
-      const latestVersion = release.tag_name || release.name || "";
-      const asset = releaseAssetForPlatform(release.assets || []);
-      const hasUpdate = compareVersions(latestVersion, appVersion) > 0;
-      const message = hasUpdate
+
+      // Keep the existing lightweight release check as a manual-download fallback for
+      // bootstrap and portable builds that cannot use the native updater yet.
+      const update = await invoke<AppUpdateInfo>("check_app_update");
+      const message = update.hasUpdate
         ? (lang === "zh" ? "发现新版本" : "Update available")
         : (lang === "zh" ? "当前已是最新版本" : "You are up to date");
       setReleaseInfo({
         status: "ok",
-        latestVersion,
-        htmlUrl: releasesUrl,
-        assetName: asset?.name,
-        body: release.body || "",
-        hasUpdate,
-        message,
+        latestVersion: update.latestVersion,
+        htmlUrl: update.htmlUrl,
+        hasUpdate: update.hasUpdate,
+        updateMethod: update.hasUpdate ? "download" : undefined,
       });
-      if (hasUpdate) {
+      if (update.hasUpdate) {
         if (quiet) {
-          setToast(lang === "zh" ? `发现新版本 ${latestVersion}，可在概览页查看` : `New version ${latestVersion} is available`);
+          setToast(lang === "zh" ? `发现新版本 ${update.latestVersion}，可在概览页查看` : `New version ${update.latestVersion} is available`);
         } else {
           setUpdatePromptOpen(true);
         }
       } else if (!quiet) {
         setToast(message);
       }
-    } catch (e) {
+    } catch {
       const message = quiet ? (lang === "zh" ? "自动检查失败" : "Auto check failed") : (lang === "zh" ? "检查失败" : "Check failed");
       setReleaseInfo({
         status: "error",
-        message,
       });
       if (!quiet) setToast(message);
     }
-  }, [aboutInfo?.githubRepo, aboutInfo?.appVersion, lang]);
+  }, [aboutInfo?.appVersion, aboutInfo?.nativeUpdaterSupported, lang]);
 
   React.useEffect(() => {
-    if (!state || !aboutInfo || autoUpdateCheckedRef.current) return;
+    if (!state || autoUpdateCheckedRef.current) return;
     autoUpdateCheckedRef.current = true;
     void checkForUpdates({ quiet: true });
-  }, [state, aboutInfo, checkForUpdates]);
+  }, [state, checkForUpdates]);
 
   React.useEffect(() => {
-    if (tab !== "instruction" || promptAutoRefreshStartedRef.current) return;
-    promptAutoRefreshStartedRef.current = true;
+    if (!state || promptAutoRefreshAttemptedRef.current) return;
+    promptAutoRefreshAttemptedRef.current = true;
     void refreshBuiltinPrompts({ quiet: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [state]);
 
   const loadSkillsMcp = React.useCallback(async ({ quiet = false }: { quiet?: boolean } = {}) => {
     if (!quiet) {
@@ -1816,6 +1647,12 @@ function App() {
     setError("");
     try {
       const preview = await invoke<SkillsMcpImportPreview>("preview_existing_skills_mcp", { configDir: configDir || null });
+      if (preview.skills.length + preview.mcpServers.length === 0) {
+        setSkillsMcpImportPreview(null);
+        setSkillsMcpImportOpen(false);
+        setToast(lang === "zh" ? "没有需要新导入的 Skills 或 MCP" : "No new Skills or MCP items to import");
+        return;
+      }
       setSkillsMcpImportPreview(preview);
       setSkillsMcpImportOpen(true);
     } catch (e) {
@@ -1908,32 +1745,7 @@ function App() {
     }
   };
 
-  const loadCcSwitchOfficialAuth = async (showToast = true) => {
-    const candidate = await invoke<OfficialAuthCandidate | null>("read_ccswitch_official_auth", { dbPath: null });
-    if (candidate) {
-      setOfficialForm({
-        model: candidate.model || state?.model || "gpt-5.5",
-        authJson: candidate.authJson,
-      });
-      if (showToast) setToast(t.provider.officialAuthLoaded);
-      return true;
-    }
-    if (showToast) setToast(t.provider.officialAuthNotFound);
-    return false;
-  };
-
   const officialAuthPlaceholder = '{\n  "OPENAI_API_KEY": null,\n  "auth_mode": "chatgpt",\n  "tokens": {\n    "access_token": "",\n    "refresh_token": "",\n    "id_token": ""\n  }\n}';
-
-  const refreshLiveOfficialAuth = async (showToast = true) => {
-    const next = await invoke<CodexState>("get_codex_state", { configDir: configDir || null });
-    setState(next);
-    setOfficialForm((form) => ({
-      ...form,
-      model: next.model || form.model || "gpt-5.5",
-      authJson: next.authText || officialAuthPlaceholder,
-    }));
-    if (showToast) setToast(t.provider.officialAuthRefreshed);
-  };
 
   const openOfficialEdit = () => {
     setOfficialForm({
@@ -1961,6 +1773,7 @@ function App() {
 
   const openAddProvider = () => {
     const next = { ...blankProviderForm };
+    resetAvailableProviderModels();
     setEditingProviderId(null);
     setProviderForm(next);
     setProviderTomlDraft(buildProviderTomlPreview(next, state));
@@ -1969,6 +1782,7 @@ function App() {
   };
 
   const openEditProvider = (provider: SavedProvider) => {
+    resetAvailableProviderModels();
     setEditingProviderId(provider.id);
     setProviderForm(provider);
     setProviderTomlDraft(provider.tomlConfig?.trim() || buildProviderTomlPreview(provider, state));
@@ -1977,6 +1791,7 @@ function App() {
   };
 
   const openEditDetectedProvider = (provider: { id: string; providerName: string; baseUrl: string; model: string; apiKey?: string; wireApi: string; requiresOpenaiAuth: boolean }) => {
+    resetAvailableProviderModels();
     setEditingProviderId(null);
     const next = {
       id: customProviderId(provider.providerName || provider.baseUrl),
@@ -1994,17 +1809,21 @@ function App() {
     setProviderMode("form");
   };
 
-  const removeProvider = (id: string) => {
-    call(
-      async () => {
-        await invoke<void>("delete_saved_provider", { id });
-        return invoke<SavedProvider[]>("list_saved_providers");
-      },
-      (providerList) => {
-        setSavedProviders(providerList);
-        setToast(lang === "zh" ? "已从 SQLite 删除供应商" : "Provider deleted from SQLite");
-      },
-    );
+  const removeProvider = async (id: string) => {
+    setLoading(true);
+    setError("");
+    try {
+      await invoke<void>("delete_saved_provider", { id });
+      const providerList = await invoke<SavedProvider[]>("list_saved_providers");
+      setSavedProviders(providerList);
+      setToast(lang === "zh" ? "供应商已删除" : "Provider deleted");
+      return true;
+    } catch (e) {
+      setError(String(e));
+      return false;
+    } finally {
+      setLoading(false);
+    }
   };
 
   const checkSessions = async () => {
@@ -2107,485 +1926,203 @@ function App() {
     }, 260);
   };
 
-  const navItems: Array<[Tab, string, React.ReactNode]> = [
-    ["dashboard", t.nav.dashboard, <Layers3 size={18} />],
-    ["provider", t.nav.provider, <Zap size={18} />],
-    ["sessions", t.nav.sessions, <History size={18} />],
-    ["skillsMcp", t.nav.skillsMcp, <Layers3 size={18} />],
-    ["instruction", t.nav.instruction, <Sparkles size={18} />],
-    ["toml", t.nav.toml, <FileCode2 size={18} />],
-    ["settings", t.nav.settings, <Settings size={18} />],
-    ["about", t.nav.about, <Info size={18} />],
-  ];
-
-  const toastLayer = toast ? (() => {
-    const [title, ...rest] = toast.split("\n");
-    const message = rest.join("\n").trim();
-    return (
-      <div className="toast ok" onAnimationEnd={() => setToast("")}>
-        <div className="toast-icon"><CheckCircle2 size={16} /></div>
-        <div className="toast-copy">
-          <strong>{title}</strong>
-          {message && <span>{message}</span>}
-        </div>
-        <button className="toast-close" onClick={() => setToast("")}>×</button>
-      </div>
-    );
-  })() : error ? (
-    <div className="toast error">
-      <div className="toast-icon"><AlertCircle size={16} /></div>
-      <div className="toast-copy">
-        <strong>{lang === "zh" ? "操作失败" : "Action failed"}</strong>
-        <span>{error}</span>
-      </div>
-      <button className="toast-close" onClick={() => setError("")}>×</button>
-    </div>
-  ) : null;
-
   return (
-    <main className={cx("app-shell", isMacRuntime && "mac-shell")}>
-      {isMacRuntime && <div className="window-drag-strip" data-tauri-drag-region />}
-      <div className="orb orb-a" />
-      <div className="orb orb-b" />
-      {toastLayer}
+    <AppShell
+      activeTab={tab}
+      onTabChange={(nextTab) => {
+        if (!state && nextTab !== "dashboard" && nextTab !== "settings" && nextTab !== "about") {
+          setTab("dashboard");
+          return;
+        }
+        setTab(nextTab);
+      }}
+      lang={lang}
+      theme={theme}
+      onToggleTheme={toggleTheme}
+      codexVersion={aboutInfo?.codexVersion}
+      appVersion={aboutInfo?.appVersion}
+      hasUpdate={Boolean(releaseInfo.hasUpdate)}
+      updatePhase={updater.state.phase}
+      onOpenUpdate={() => setUpdatePromptOpen(true)}
+      isMacRuntime={isMacRuntime}
+      contentClassName={cx(
+        tab === "sessions" && "cx-app-content--sessions",
+        (
+          (tab === "provider" && providerMode === "list")
+          || tab === "skillsMcp"
+          || (tab === "instruction" && instructionMode === "list")
+        ) && "cx-app-content--fixed",
+        skillsMcpImportOpen && Boolean(skillsMcpImportPreview) && "cx-app-content--modal-locked",
+      )}
+    >
+      <AppToast
+        lang={lang}
+        message={toast}
+        error={error}
+        loading={Boolean(providerTestingId || providerModelsLoading) && Boolean(toast)}
+        onDismissMessage={() => setToast("")}
+        onDismissError={() => setError("")}
+      />
+      <UpdateDialog
+        open={updatePromptOpen && Boolean(releaseInfo.hasUpdate)}
+        lang={lang}
+        state={releaseInfo.updateMethod === "native" ? updater.state : undefined}
+        currentVersion={aboutInfo?.appVersion}
+        latestVersion={releaseInfo.latestVersion}
+        onClose={() => setUpdatePromptOpen(false)}
+        onUpdate={releaseInfo.updateMethod === "native" ? updater.downloadAndInstall : undefined}
+        onRetry={releaseInfo.updateMethod === "native" ? updater.retry : undefined}
+        onRestart={releaseInfo.updateMethod === "native" ? updater.restart : undefined}
+        onDownload={() => {
+          setUpdatePromptOpen(false);
+          openExternalUrl(releaseInfo.htmlUrl);
+        }}
+      />
+      <StartupWizardDialog
+        open={startupWizardOpen}
+        closing={startupClosing}
+        lang={lang}
+        diagnostics={startupDiagnostics}
+        configDir={configDir}
+        loading={loading}
+        onConfigDirChange={setConfigDir}
+        onRecheck={refresh}
+        onSkip={closeStartupWizard}
+        onOpenSettings={() => {
+          setTab("settings");
+          closeStartupWizard();
+        }}
+        onEnter={closeStartupWizard}
+      />
 
-      <aside className="sidebar glass">
-        <div className="brand">
-          <div className="brand-mark">X</div>
-          <div>
-            <h1>Codex-X</h1>
-            <p>{t.appSubtitle}</p>
-          </div>
-        </div>
-
-        <nav>
-          {navItems.map(([id, label, icon]) => (
-            <button key={id} className={cx("nav-item", tab === id && "active")} onClick={() => React.startTransition(() => setTab(id))}>
-              {icon}
-              <span>{label}</span>
-              {tab === id && <ChevronRight size={16} />}
-            </button>
-          ))}
-        </nav>
-
-        <div className="sidebar-footer" />
-      </aside>
-
-      <section className={cx(
-        "content",
-        tab === "sessions" && "session-content",
-        skillsMcpImportOpen && Boolean(skillsMcpImportPreview) && "modal-scroll-locked",
-      )}>
-        {tab === "dashboard" && (
-          <header className="topbar glass">
-            <div>
-              <p className="eyebrow">{t.manager}</p>
-              <h2>{state?.model || "gpt-5.5"}</h2>
-            </div>
-            <div className="path-box">
-              <span>CODEX_HOME</span>
-              <input value={configDir} onChange={(e) => setConfigDir(e.target.value)} placeholder="~/.codex" />
-            </div>
-            <button className="primary-btn" onClick={refresh} disabled={loading}>
-              {loading ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
-              {t.load}
-            </button>
-          </header>
-        )}
-
-        {updatePromptOpen && releaseInfo.hasUpdate && (
-          <div className="update-mask" onClick={() => setUpdatePromptOpen(false)}>
-            <div className="update-dialog glass" onClick={(e) => e.stopPropagation()}>
-              <div className="update-head">
-                <div className="update-icon"><Sparkles size={22} /></div>
-                <div>
-                  <p className="eyebrow">Codex-X</p>
-                  <h3>{lang === "zh" ? "发现新版本" : "New version available"}</h3>
-                </div>
-              </div>
-              <div className="update-body">
-                <p>{lang === "zh" ? "检测到新版本，是否立即打开下载页？" : "A new version was found. Open the download page now?"}</p>
-                <div className="about-kv compact">
-                  <div><span>{lang === "zh" ? "当前版本" : "Current"}</span><strong>{aboutInfo?.appVersion || "-"}</strong></div>
-                  <div><span>{lang === "zh" ? "最新版本" : "Latest"}</span><strong>{releaseInfo.latestVersion || "-"}</strong></div>
-                </div>
-              </div>
-              <div className="update-actions">
-                <button className="primary-btn" onClick={() => {
-                  setUpdatePromptOpen(false);
-                  openExternalUrl(releaseInfo.htmlUrl);
-                }}>
-                  <Download size={16} /> {lang === "zh" ? "现在下载" : "Download now"}
-                </button>
-                <button className="secondary-btn" onClick={() => setUpdatePromptOpen(false)}>
-                  {lang === "zh" ? "稍后" : "Later"}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {skillsMcpImportOpen && skillsMcpImportPreview && (
-          <div className="update-mask" onClick={() => setSkillsMcpImportOpen(false)}>
-            <div className="import-preview-dialog glass" onClick={(e) => e.stopPropagation()}>
-              <div className="update-head">
-                <div className="update-icon"><Download size={21} /></div>
-                <div>
-                  <p className="eyebrow">Skills / MCP</p>
-                  <h3>{lang === "zh" ? "确认导入已有内容" : "Confirm import"}</h3>
-                </div>
-              </div>
-              <div className="import-preview-summary">
-                <div><strong>{skillsMcpImportPreview.skills.length}</strong><span>Skills</span></div>
-                <div><strong>{skillsMcpImportPreview.mcpServers.length}</strong><span>MCP</span></div>
-              </div>
-              <div className="import-preview-body">
-                {skillsMcpImportPreview.skills.length === 0 && skillsMcpImportPreview.mcpServers.length === 0 ? (
-                  <div className="session-empty compact"><span>{lang === "zh" ? "没有发现可导入的已有 Skills / MCP。" : "No existing Skills / MCP items were found."}</span></div>
-                ) : (
-                  <>
-                    <section className="import-preview-section">
-                      <div className="section-title-row">
-                        <strong>Skills</strong>
-                        <span>{skillsMcpImportPreview.skills.length}</span>
-                      </div>
-                      <div className="import-preview-list">
-                        {skillsMcpImportPreview.skills.length === 0 ? (
-                          <p className="empty">{lang === "zh" ? "没有可导入的 Skill" : "No Skill to import"}</p>
-                        ) : skillsMcpImportPreview.skills.map((skill) => (
-                          <div className="import-preview-row" key={`skill-${skill.id}-${skill.path}`}>
-                            <strong>{skill.name}</strong>
-                            <span>{skill.directory}</span>
-                            <em>{skill.source}</em>
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-                    <section className="import-preview-section">
-                      <div className="section-title-row">
-                        <strong>MCP</strong>
-                        <span>{skillsMcpImportPreview.mcpServers.length}</span>
-                      </div>
-                      <div className="import-preview-list">
-                        {skillsMcpImportPreview.mcpServers.length === 0 ? (
-                          <p className="empty">{lang === "zh" ? "没有可导入的 MCP" : "No MCP to import"}</p>
-                        ) : skillsMcpImportPreview.mcpServers.map((server) => (
-                          <div className="import-preview-row" key={`mcp-${server.id}-${server.source}`}>
-                            <strong>{server.name}</strong>
-                            <span>{server.transport}</span>
-                            <em>{server.source}</em>
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-                  </>
-                )}
-                {skillsMcpImportPreview.warnings.length > 0 && (
-                  <div className="skills-mcp-warnings compact">
-                    {skillsMcpImportPreview.warnings.map((item, index) => <p key={index}><AlertCircle size={14} /> {item}</p>)}
-                  </div>
-                )}
-              </div>
-              <div className="update-actions">
-                <button
-                  className="primary-btn"
-                  onClick={importExistingSkillsMcp}
-                  disabled={Boolean(actionBusy) || (skillsMcpImportPreview.skills.length + skillsMcpImportPreview.mcpServers.length === 0)}
-                >
-                  {actionBusy === "importExistingSkillsMcp" ? <Loader2 size={16} className="spin" /> : <Download size={16} />} {lang === "zh" ? "导入" : "Import"}
-                </button>
-                <button className="secondary-btn" onClick={() => setSkillsMcpImportOpen(false)} disabled={actionBusy === "importExistingSkillsMcp"}>
-                  {lang === "zh" ? "取消" : "Cancel"}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {startupWizardOpen && startupDiagnostics && (
-          <div className={cx("startup-mask", startupClosing && "closing")}>
-            <div className="startup-card glass">
-              <div className="startup-head">
-                <div>
-                  <p className="eyebrow">First Run Check</p>
-                  <h3>{lang === "zh" ? "首次启动向导" : "First-run wizard"}</h3>
-                  <p>{lang === "zh" ? startupDiagnostics.summary : startupDiagnostics.summary}</p>
-                </div>
-                <button className="ghost-btn" onClick={closeStartupWizard}>{lang === "zh" ? "跳过" : "Skip"}</button>
-              </div>
-
-              <div className="startup-path-row">
-                <Field label="CODEX_HOME">
-                  <input value={configDir || startupDiagnostics.codexDir} onChange={(e) => setConfigDir(e.target.value)} placeholder="~/.codex" />
-                </Field>
-                <button className="secondary-btn" onClick={refresh} disabled={loading}>
-                  <RefreshCw size={16} className={cx(loading && "spin")} /> {lang === "zh" ? "重新检测" : "Recheck"}
-                </button>
-              </div>
-
-              <div className="startup-check-grid">
-                {startupDiagnostics.items.map((item) => (
-                  <div className={cx("startup-check-item", item.status === "ok" && "ok", item.status === "manual" && "manual")} key={item.key}>
-                    <div className="startup-check-icon">
-                      {item.status === "ok" ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
-                    </div>
-                    <div>
-                      <strong>{item.label}</strong>
-                      <p>{lang === "zh" ? item.message : item.status === "ok" ? "Detected" : item.status === "manual" ? "Manual selection required" : "Not found"}</p>
-                      {item.path && <code>{item.path}</code>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="startup-actions">
-                <button className="secondary-btn" onClick={() => { setTab("settings"); closeStartupWizard(); }}>
-                  <Settings size={16} /> {lang === "zh" ? "去设置" : "Settings"}
-                </button>
-                <button className="primary-btn" onClick={closeStartupWizard}>
-                  <CheckCircle2 size={16} /> {lang === "zh" ? "进入 Codex-X" : "Enter Codex-X"}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {(!state || bootVisible) ? (
-          <div className={cx("panel glass center-panel boot-panel", bootLeaving && "leaving")}>
-            <div className="boot-logo-wrap">
-              <div className="boot-logo">Codex-X</div>
-              <div className="boot-orbit" />
-              <div className="boot-orbit boot-orbit-secondary" />
-            </div>
-            <p className="boot-hint" key={bootHintIndex}>{bootHints[lang][bootHintIndex]}</p>
-            <div className="boot-progress"><span /></div>
-          </div>
-        ) : (
-          <>
+      <PageTransition pageKey={tab}>
             {tab === "dashboard" && (
-              <>
-                {releaseInfo.status === "ok" && releaseInfo.hasUpdate && (
-                  <div className="update-strip glass">
-                    <div>
-                      <span className="update-dot" />
-                      <strong>{lang === "zh" ? "发现新版本" : "New version found"}</strong>
-                      <p>{lang === "zh" ? `Codex-X ${releaseInfo.latestVersion || ""} 已发布` : `Codex-X ${releaseInfo.latestVersion || ""} is available`}</p>
-                    </div>
-                    <button className="secondary-btn small" onClick={() => openExternalUrl(releaseInfo.htmlUrl)}>
-                      {lang === "zh" ? "查看更新" : "View"}
-                    </button>
-                  </div>
-                )}
-              <div className="grid dashboard-grid">
-                <StatCard icon={<TerminalSquare size={20} />} label={t.dashboard.config} value={state.configExists ? t.dashboard.found : t.dashboard.missing} ok={state.configExists} />
-                <StatCard icon={<Code2 size={20} />} label={t.dashboard.provider} value={currentProvider?.name || state.modelProvider || t.dashboard.officialDefault} ok={Boolean(state.modelProvider)} />
-                <StatCard icon={<Sparkles size={20} />} label={t.dashboard.instruction} value={state.instructionEnabled ? t.dashboard.enabled : t.dashboard.disabled} ok={state.instructionEnabled} />
-                <StatCard icon={<KeyRound size={20} />} label={t.dashboard.auth} value={state.authExists ? t.authJson : t.noAuth} ok={state.authExists} />
-
-                <section className="panel glass dashboard-config-panel">
-                  <div className="panel-head">
-                    <div>
-                      <p className="eyebrow">{t.dashboard.liveStatus}</p>
-                      <h3>{t.dashboard.currentConfig}</h3>
-                    </div>
-                    <StatusPill active={state.instructionEnabled} label={state.instructionEnabled ? "Instruct ON" : "Instruct OFF"} />
-                  </div>
-                  <div className="kv-list">
-                    <div><span>{t.dashboard.dir}</span><code>{state.codexDir}</code></div>
-                    <div><span>{t.dashboard.configPath}</span><code>{state.configPath}</code></div>
-                    <div><span>{t.dashboard.model}</span><code>{state.model || t.dashboard.notSet}</code></div>
-                    <div><span>{t.dashboard.providerName}</span><code>{state.modelProvider || t.dashboard.officialDefault}</code></div>
-                    <div><span>{t.dashboard.instructionFile}</span><code>{state.instructionInjectionMode === "append" ? `${state.agentsPath} (${lang === "zh" ? "追加模式" : "append"})` : (state.instructionFile || t.dashboard.notSet)}</code></div>
-                  </div>
-                </section>
-
-              </div>
-              </>
+              <OverviewPage
+                lang={lang}
+                model={state?.model}
+                configDir={configDir}
+                resolvedCodexDir={state?.codexDir || ""}
+                configExists={Boolean(state?.configExists)}
+                providerLabel={currentProvider?.name || state?.modelProvider}
+                instructionEnabled={Boolean(state?.instructionEnabled)}
+                authExists={Boolean(state?.authExists)}
+                configPath={state?.configPath}
+                modelProvider={state?.modelProvider}
+                instructionPath={state
+                  ? (state.instructionInjectionMode === "append"
+                    ? `${state.agentsPath} (${lang === "zh" ? "追加模式" : "append"})`
+                    : state.instructionFile)
+                  : null}
+                loading={loading}
+                hasUpdate={Boolean(releaseInfo.status === "ok" && releaseInfo.hasUpdate)}
+                latestVersion={releaseInfo.latestVersion}
+                onConfigDirChange={setConfigDir}
+                onRefresh={refresh}
+                onOpenUpdate={() => setUpdatePromptOpen(true)}
+              />
             )}
 
-            {tab === "provider" && (
-              <section className={cx("panel glass provider-panel", providerMode !== "list" && "provider-edit-panel")}> 
-                {providerMode === "list" ? (
-                  <>
-                    <div className="panel-head provider-title-row">
-                      <div>
-                        <p className="eyebrow">Provider</p>
-                        <h3>{t.provider.title}</h3>
-                        <p className="muted-desc">{t.provider.subtitle}</p>
-                      </div>
-                      <div className="provider-title-actions">
-                        <button className="secondary-btn add-provider-btn" onClick={importFromCcSwitch} disabled={loading}><RefreshCw size={18} /> {t.provider.importCc}</button>
-                        <button className="primary-btn add-provider-btn" onClick={openAddProvider}><Plus size={18} /> {t.provider.add}</button>
-                      </div>
-                    </div>
-
-                    <div className="provider-list-frame">
-                      <div className="provider-row-list">
-                        {providerRows.length === 0 && <p className="empty">{t.provider.noProviders}</p>}
-                        {providerRows.map((p) => {
-                          const local = p.source === "official"
-                            ? undefined
-                            : canonicalSavedProviders.find((item) =>
-                              p.source === "local"
-                                ? item.id === p.id
-                                : providerIdentityKey(item.baseUrl, savedProviderApiKey(item), item.providerName) === providerIdentityKey(p.baseUrl, p.apiKey, p.providerName),
-                            );
-                          const switchable: SavedProvider | null = p.source === "official" ? null : local || {
-                            id: customProviderId(p.providerName),
-                            providerName: p.providerName,
-                            baseUrl: p.baseUrl,
-                            model: p.model,
-                            apiKey: p.apiKey || "",
-                            tomlConfig: "",
-                            wireApi: p.wireApi,
-                            requiresOpenaiAuth: p.requiresOpenaiAuth,
-                          };
-                          return (
-                            <div className={cx("provider-row", p.isCurrent && "selected")} key={`${p.source}-${p.id}-${p.baseUrl}`}>
-                              <div className="drag-dot">⋮⋮</div>
-                              {p.source === "official" ? <OpenAIIcon /> : <Avatar name={p.providerName} />}
-                              <div className="provider-main">
-                                <strong>{p.providerName}</strong>
-                                <a>{p.baseUrl || "no base_url"}</a>
-                              </div>
-                              <div className="provider-badges">
-                                {p.isCurrent && <StatusPill active label={t.provider.current} />}
-                              </div>
-                              <div className="provider-actions">
-                                <button className="secondary-btn small" onClick={() => switchable ? switchProvider(switchable) : switchOfficialProvider()} disabled={loading || p.isCurrent}>{lang === "zh" ? "启用" : "Enable"}</button>
-                                {p.source !== "official" && (
-                                  <button className="icon-btn small" title={lang === "zh" ? "测试连接" : "Test connection"} onClick={() => void testProvider(`${p.source}-${p.id}`, p.baseUrl, local?.apiKey || p.apiKey || null)} disabled={loading || providerTestingId === `${p.source}-${p.id}`}>
-                                    {providerTestingId === `${p.source}-${p.id}` ? <Loader2 size={15} className="spin" /> : <Activity size={15} />}
-                                  </button>
-                                )}
-                                {p.source === "official" && <button className="icon-btn small" title={t.provider.edit} onClick={openOfficialEdit}><PencilLine size={15} /></button>}
-                                {local && <button className="icon-btn small" title={t.provider.edit} onClick={() => openEditProvider(local)}><PencilLine size={15} /></button>}
-                                {!local && p.source === "detected" && <button className="icon-btn small" title={t.provider.edit} onClick={() => openEditDetectedProvider(p)}><PencilLine size={15} /></button>}
-                                {local && <button className="icon-btn danger small" title={t.provider.remove} onClick={() => removeProvider(local.id)}><Trash2 size={15} /></button>}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                  </>
-                ) : providerMode === "official" ? (
-                  <div className="provider-form-page">
-                    <div className="panel-head">
-                      <div>
-                        <p className="eyebrow">OpenAI Official</p>
-                        <h3>{t.provider.officialEdit}</h3>
-                        <p className="muted-desc">{t.provider.officialHint}</p>
-                      </div>
-                      <button className="ghost-btn" onClick={() => setProviderMode("list")}>{t.provider.cancel}</button>
-                    </div>
-                    <div className="official-info-card">
-                      <div><span>{t.provider.officialUrl}</span><code>https://chatgpt.com/codex</code></div>
-                      <div><span>auth.json</span><code>{state.authPath}</code></div>
-                      <div><span>{t.provider.current}</span><code>{(!state.modelProvider || state.modelProvider === "openai") ? "OpenAI Official" : state.modelProvider}</code></div>
-                    </div>
-                    <div className="form-grid provider-form-grid">
-                      <Field label={t.provider.model}><input value={officialForm.model} onChange={(e) => setOfficialForm({ ...officialForm, model: e.target.value })} /></Field>
-                    </div>
-                    <label className="field official-auth-field">
-                      <span>auth.json (JSON)</span>
-                      <textarea className="official-auth-editor" value={officialForm.authJson} onChange={(e) => setOfficialForm({ ...officialForm, authJson: e.target.value })} spellCheck={false} />
-                    </label>
-                    <div className="form-actions">
-                      <button className="ghost-btn big" onClick={() => void refreshLiveOfficialAuth(true)} disabled={loading}>{t.provider.refreshOfficialAuth}</button>
-                      <button className="ghost-btn big" onClick={() => void loadCcSwitchOfficialAuth(true)} disabled={loading}>{t.provider.loadOfficialAuth}</button>
-                      <button className="secondary-btn big" onClick={() => setProviderMode("list")}>{t.provider.cancel}</button>
-                      <button className="primary-btn big" onClick={saveOfficialConfig} disabled={loading}>保存官方配置</button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="provider-form-page">
-                    <div className="panel-head">
-                      <div>
-                        <p className="eyebrow">Provider</p>
-                        <h3>{editingProviderId ? t.provider.formEdit : t.provider.formAdd}</h3>
-                        <p className="muted-desc">{t.provider.formHint}</p>
-                      </div>
-                      <button className="ghost-btn" onClick={() => setProviderMode("list")}>{t.provider.cancel}</button>
-                    </div>
-                    <div className="provider-edit-stack">
-                      <section className="provider-section provider-api-section unified-section">
-                        <div className="section-title-row">
-                          <div>
-                            <strong>{lang === "zh" ? "供应商 API 配置" : "Provider API config"}</strong>
-                            <p>{lang === "zh" ? "和 cc-switch 一样，API 信息、auth.json、config.toml 在同一个编辑页纵向展示。" : "API fields, auth.json and config.toml are shown vertically in one edit page."}</p>
-                          </div>
-                        </div>
-                        <div className="form-grid provider-form-grid provider-form-cc">
-                          <Field label={t.provider.apiKey}>
-                            <div className="secret-input-wrap">
-                              <input
-                                type={providerApiKeyVisible ? "text" : "password"}
-                                value={providerForm.apiKey || ""}
-                                onChange={(e) => setProviderForm({ ...providerForm, apiKey: e.target.value })}
-                                placeholder={t.provider.apiKeyPlaceholder}
-                              />
-                              <button
-                                type="button"
-                                className="secret-toggle"
-                                onClick={() => setProviderApiKeyVisible((value) => !value)}
-                                aria-label={providerApiKeyVisible ? (lang === "zh" ? "隐藏 API Key" : "Hide API Key") : (lang === "zh" ? "显示 API Key" : "Show API Key")}
-                              >
-                                {providerApiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
-                              </button>
-                            </div>
-                          </Field>
-                          <Field label={lang === "zh" ? "API 请求地址" : t.provider.baseUrl}><input value={providerForm.baseUrl} onChange={(e) => setProviderForm({ ...providerForm, baseUrl: e.target.value })} /></Field>
-                          <Field label={t.provider.name}><input value={providerForm.providerName} onChange={(e) => setProviderForm({ ...providerForm, providerName: e.target.value, id: editingProviderId || customProviderId(e.target.value) })} /></Field>
-                          <Field label={t.provider.model}><input value={providerForm.model} onChange={(e) => setProviderForm({ ...providerForm, model: e.target.value })} /></Field>
-                          <Field label={t.provider.wireApi}>
-                            <select value={providerForm.wireApi} onChange={(e) => setProviderForm({ ...providerForm, wireApi: e.target.value })}>
-                              <option value="responses">responses</option>
-                              <option value="chat">chat</option>
-                            </select>
-                          </Field>
-                          <label className="check-row"><input type="checkbox" checked={providerForm.requiresOpenaiAuth} onChange={(e) => setProviderForm({ ...providerForm, requiresOpenaiAuth: e.target.checked })} /><span>{t.provider.requiresAuth}</span></label>
-                        </div>
-                      </section>
-
-                      <section className="provider-section provider-auth-section unified-section">
-                        <div className="section-title-row">
-                          <div>
-                            <strong>auth.json (JSON)</strong>
-                            <p>{lang === "zh" ? "预览保存时会写入/保留的认证配置；API Key 留空时不会覆盖现有 auth.json。" : "Preview of auth config. Empty API key will not overwrite the existing auth.json."}</p>
-                          </div>
-                        </div>
-                        <JsonPreview text={providerAuthPreview} />
-                      </section>
-
-                      <section className="provider-section provider-toml-section unified-section">
-                        <div className="section-title-row config-title-row">
-                          <div>
-                            <strong>config.toml (TOML)</strong>
-                            <p>{lang === "zh" ? "可直接编辑为供应商模板；点击启用时才写入 Codex live config.toml。" : "Editable provider template. It is written to the live Codex config.toml only when enabled."}</p>
-                          </div>
-                          <button className="ghost-btn small" onClick={() => { setProviderTomlDraft(providerTomlPreview); setProviderTomlDirty(false); }}>{lang === "zh" ? "重置生成" : "Reset"}</button>
-                        </div>
-                        <textarea
-                          ref={providerTomlEditorRef}
-                          className="provider-toml-editor"
-                          value={providerTomlDraft}
-                          onChange={(e) => { setProviderTomlDraft(e.target.value); setProviderTomlDirty(true); }}
-                          spellCheck={false}
-                        />
-                      </section>
-
-                      <div className="form-actions provider-save-actions">
-                        <button className="primary-btn big lively-btn" onClick={saveProviderConfig} disabled={loading}>{loading ? <Loader2 size={18} className="spin" /> : <CheckCircle2 size={18} />} {loading ? (lang === "zh" ? "保存中..." : "Saving...") : t.provider.saveAndSwitch}</button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </section>
+            {state && tab === "provider" && (
+              <ProvidersPage
+                lang={lang}
+                copy={getProviderPageCopy(lang)}
+                mode={providerMode}
+                providerRows={providerPageRows}
+                loading={loading}
+                testingId={providerTestingId}
+                actionBusy={actionBusy}
+                editingProviderId={editingProviderId}
+                providerForm={{
+                  apiKey: providerForm.apiKey || "",
+                  baseUrl: providerForm.baseUrl,
+                  providerName: providerForm.providerName,
+                  model: providerForm.model,
+                  wireApi: providerForm.wireApi,
+                  requiresOpenaiAuth: providerForm.requiresOpenaiAuth,
+                }}
+                officialForm={officialForm}
+                officialInfo={{
+                  officialUrl: "https://chatgpt.com/codex",
+                  authPath: state.authPath,
+                  current: (!state.modelProvider || state.modelProvider === "openai") ? "OpenAI Official" : state.modelProvider,
+                }}
+                providerAuthPreview={<JsonPreview text={providerAuthPreview} />}
+                providerTomlDraft={providerTomlDraft}
+                providerTomlRef={providerTomlEditorRef}
+                apiKeyVisible={providerApiKeyVisible}
+                availableModels={availableProviderModels.map((model) => model.id)}
+                fetchingModels={providerModelsLoading}
+                onImportCcSwitch={importFromCcSwitch}
+                onAddProvider={openAddProvider}
+                onEnableProvider={(row) => {
+                  if (row.source === "official") {
+                    switchOfficialProvider();
+                    return;
+                  }
+                  const local = findLocalProviderForRow(row);
+                  switchProvider(local || {
+                    id: customProviderId(row.providerName),
+                    providerName: row.providerName,
+                    baseUrl: row.baseUrl,
+                    model: row.model,
+                    apiKey: row.apiKey || "",
+                    tomlConfig: "",
+                    wireApi: row.wireApi,
+                    requiresOpenaiAuth: row.requiresOpenaiAuth,
+                  });
+                }}
+                onTestProvider={(row) => {
+                  const local = findLocalProviderForRow(row);
+                  void testProvider(row.testingKey || `${row.source}-${row.id}`, row.baseUrl, local?.apiKey || row.apiKey || null);
+                }}
+                onEditProvider={(row) => {
+                  if (row.source === "official") {
+                    openOfficialEdit();
+                    return;
+                  }
+                  const local = findLocalProviderForRow(row);
+                  if (local) openEditProvider(local);
+                  else if (row.source === "detected") openEditDetectedProvider(row);
+                }}
+                onDeleteProvider={(row) => {
+                  const local = findLocalProviderForRow(row);
+                  return local ? removeProvider(local.id) : Promise.resolve(false);
+                }}
+                onCancelMode={() => setProviderMode("list")}
+                onOfficialModelChange={(value) => setOfficialForm((current) => ({ ...current, model: value }))}
+                onOfficialAuthChange={(value) => setOfficialForm((current) => ({ ...current, authJson: value }))}
+                onSaveOfficial={saveOfficialConfig}
+                onApiKeyChange={(value) => {
+                  resetAvailableProviderModels();
+                  setProviderForm((current) => ({ ...current, apiKey: value }));
+                }}
+                onBaseUrlChange={(value) => {
+                  resetAvailableProviderModels();
+                  setProviderForm((current) => ({ ...current, baseUrl: value }));
+                }}
+                onProviderNameChange={(value) => setProviderForm((current) => ({
+                  ...current,
+                  providerName: value,
+                  id: editingProviderId || customProviderId(value),
+                }))}
+                onProviderModelChange={(value) => setProviderForm((current) => ({ ...current, model: value }))}
+                onFetchModels={() => void fetchProviderModels()}
+                onWireApiChange={(value) => setProviderForm((current) => ({ ...current, wireApi: value }))}
+                onRequiresAuthChange={(value) => setProviderForm((current) => ({ ...current, requiresOpenaiAuth: value }))}
+                onToggleApiKeyVisibility={() => setProviderApiKeyVisible((value) => !value)}
+                onProviderTomlDraftChange={(value) => {
+                  setProviderTomlDraft(value);
+                  setProviderTomlDirty(true);
+                }}
+                onResetProviderToml={() => {
+                  setProviderTomlDraft(providerTomlPreview);
+                  setProviderTomlDirty(false);
+                }}
+                onSaveProvider={saveProviderConfig}
+              />
             )}
 
-            {(tab === "sessions" || visitedTabs.has("sessions")) && (
+            {state && (tab === "sessions" || visitedTabs.has("sessions")) && (
               <SessionManagementPage
                 active={tab === "sessions"}
                 lang={lang}
@@ -2610,8 +2147,6 @@ function App() {
                 sessionDeleteConfirmOpen={sessionDeleteConfirmOpen}
                 sessionDeleteBusy={sessionDeleteBusy}
                 sessionDeleteSafetyConfirmed={sessionDeleteSafetyConfirmed}
-                sessionDeleteDialogRef={sessionDeleteDialogRef}
-                sessionDeleteTriggerRef={sessionDeleteTriggerRef}
                 onCheckSessions={checkSessions}
                 onSyncSessions={syncSessions}
                 onSessionQueryChange={(value) => {
@@ -2637,472 +2172,182 @@ function App() {
               />
             )}
 
-            {(tab === "skillsMcp" || visitedTabs.has("skillsMcp")) && (
-              <section className={cx("panel glass skills-mcp-panel", tab !== "skillsMcp" && "page-pane-hidden")}>
-                <div className="panel-head provider-title-row">
-                  <div>
-                    <p className="eyebrow">Skills / MCP</p>
-                    <h3>{lang === "zh" ? "技能和 MCP" : "Skills & MCP"}</h3>
-                    <p className="muted-desc">{lang === "zh" ? "管理 Codex 当前可用的 Skills 与 MCP：导入已有、从 ZIP 安装、启用或禁用。" : "Manage Codex Skills and MCP servers: import existing items, install ZIP packages, enable or disable."}</p>
-                  </div>
-                  <div className="provider-title-actions">
-                    <input
-                      ref={skillZipImportRef}
-                      className="hidden-file-input"
-                      type="file"
-                      accept=".zip,application/zip"
-                      onChange={(e) => void installSkillZipFile(e.target.files?.[0])}
-                    />
-                    <button className="ghost-btn add-provider-btn lively-btn" onClick={() => void loadSkillsMcp()} disabled={actionBusy === "loadSkillsMcp"}>
-                      {actionBusy === "loadSkillsMcp" ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />} {lang === "zh" ? "刷新" : "Refresh"}
-                    </button>
-                    <button className="secondary-btn add-provider-btn lively-btn" onClick={openImportExistingSkillsMcpPreview} disabled={Boolean(actionBusy)}>
-                      {actionBusy === "previewExistingSkillsMcp" ? <Loader2 size={18} className="spin" /> : <Download size={18} />} {lang === "zh" ? "导入已有" : "Import existing"}
-                    </button>
-                    <button className="secondary-btn add-provider-btn lively-btn" onClick={() => skillZipImportRef.current?.click()} disabled={Boolean(actionBusy)}>
-                      {actionBusy === "installSkillZip" ? <Loader2 size={18} className="spin" /> : <Upload size={18} />} {lang === "zh" ? "从 ZIP 安装" : "Install ZIP"}
-                    </button>
-                    <button className="primary-btn add-provider-btn lively-btn" onClick={checkSkillUpdatesAction} disabled={Boolean(actionBusy)}>
-                      {actionBusy === "checkSkillUpdates" ? <Loader2 size={18} className="spin" /> : <Sparkles size={18} />} {lang === "zh" ? "检查更新" : "Check updates"}
-                    </button>
-                  </div>
-                </div>
-
-                {!skillsMcpState ? (
-                  <div className="session-empty skills-loading">
-                    <Loader2 className="spin" size={22} />
-                    <span>{lang === "zh" ? "正在读取本地 Skills / MCP..." : "Loading local Skills / MCP..."}</span>
-                  </div>
-                ) : (
-                  <>
-                    <div className="skills-mcp-tabs" role="tablist" aria-label="Skills and MCP">
-                      <button
-                        className={cx("skills-mcp-tab", skillsMcpTab === "mcp" && "active")}
-                        onClick={() => setSkillsMcpTab("mcp")}
-                        role="tab"
-                        aria-selected={skillsMcpTab === "mcp"}
-                      >
-                        MCP <span>{skillsMcpState.mcpServers.length}</span>
-                      </button>
-                      <button
-                        className={cx("skills-mcp-tab", skillsMcpTab === "skills" && "active")}
-                        onClick={() => setSkillsMcpTab("skills")}
-                        role="tab"
-                        aria-selected={skillsMcpTab === "skills"}
-                      >
-                        Skills <span>{skillsMcpState.skills.length}</span>
-                      </button>
-                    </div>
-
-                    <p className="skills-mcp-help">
-                      {skillsMcpTab === "mcp"
-                        ? (lang === "zh" ? `当前共有 ${skillsMcpState.mcpServers.length} 个 MCP；开启后会写入 Codex config.toml。` : `${skillsMcpState.mcpServers.length} MCP server(s). Enabling writes them to Codex config.toml.`)
-                        : (lang === "zh" ? `当前共有 ${skillsMcpState.skills.length} 个 Skills；开启后会放入 Codex skills 目录。` : `${skillsMcpState.skills.length} Skill(s). Enabling moves them into the Codex skills directory.`)}
-                    </p>
-
-                    <div className="skills-mcp-list-card">
-                      <div className="skills-mcp-list-head">
-                        <strong>{skillsMcpTab === "mcp" ? "MCP" : "Skills"}</strong>
-                        <span>{lang === "zh" ? `共 ${activeSkillsMcpCount} 个` : `${activeSkillsMcpCount} total`}</span>
-                      </div>
-
-                      {skillsMcpTab === "mcp" ? (
-                        skillsMcpState.mcpServers.length === 0 ? (
-                          <div className="session-empty compact"><span>{lang === "zh" ? "还没有发现 MCP，点击导入已有。" : "No MCP server found. Import existing items first."}</span></div>
-                        ) : (
-                          <div className="skills-mcp-simple-list">
-                            {skillsMcpState.mcpServers.map((server) => (
-                              <article className="skills-mcp-simple-row" key={server.id}>
-                                <strong>{server.name || server.id}</strong>
-                                <button
-                                  className={cx("switch-toggle", server.enabled && "on")}
-                                  onClick={() => void toggleMcpEnabled(server.id, !server.enabled)}
-                                  disabled={Boolean(actionBusy) && actionBusy !== `mcp:${server.id}`}
-                                  aria-label={server.enabled ? (lang === "zh" ? "关闭 MCP" : "Disable MCP") : (lang === "zh" ? "开启 MCP" : "Enable MCP")}
-                                  aria-pressed={server.enabled}
-                                >
-                                  {actionBusy === `mcp:${server.id}` ? <Loader2 size={14} className="spin" /> : <span />}
-                                </button>
-                              </article>
-                            ))}
-                          </div>
-                        )
-                      ) : (
-                        skillsMcpState.skills.length === 0 ? (
-                          <div className="session-empty compact"><span>{lang === "zh" ? "还没有发现 Skills，点击导入已有或从 ZIP 安装。" : "No Skills found. Import existing items or install a ZIP."}</span></div>
-                        ) : (
-                          <div className="skills-mcp-simple-list">
-                            {skillsMcpState.skills.map((skill) => (
-                              <article className="skills-mcp-simple-row" key={skill.id}>
-                                <strong>{skill.name || skill.directory}</strong>
-                                <button
-                                  className={cx("switch-toggle", skill.enabled && "on")}
-                                  onClick={() => void toggleSkillEnabled(skill.id, !skill.enabled)}
-                                  disabled={Boolean(actionBusy) && actionBusy !== `skill:${skill.id}`}
-                                  aria-label={skill.enabled ? (lang === "zh" ? "禁用 Skill" : "Disable Skill") : (lang === "zh" ? "启用 Skill" : "Enable Skill")}
-                                  aria-pressed={skill.enabled}
-                                >
-                                  {actionBusy === `skill:${skill.id}` ? <Loader2 size={14} className="spin" /> : <span />}
-                                </button>
-                              </article>
-                            ))}
-                          </div>
-                        )
-                      )}
-                    </div>
-
-                    {skillsMcpState.warnings.length > 0 && (
-                      <div className="session-warning-list">
-                        {skillsMcpState.warnings.map((item, index) => <p key={index}><AlertCircle size={15} /> {item}</p>)}
-                      </div>
-                    )}
-                  </>
-                )}
-              </section>
+            {state && (tab === "skillsMcp" || visitedTabs.has("skillsMcp")) && (
+              <SkillsMcpPage
+                lang={lang}
+                state={skillsMcpState}
+                activeTab={skillsMcpTab}
+                actionBusy={actionBusy}
+                importOpen={skillsMcpImportOpen}
+                importPreview={skillsMcpImportPreview}
+                zipInputRef={skillZipImportRef}
+                className={tab !== "skillsMcp" ? "page-pane-hidden" : undefined}
+                onTabChange={setSkillsMcpTab}
+                onLoad={loadSkillsMcp}
+                onOpenImportPreview={openImportExistingSkillsMcpPreview}
+                onCloseImportPreview={() => setSkillsMcpImportOpen(false)}
+                onConfirmImport={importExistingSkillsMcp}
+                onInstallZip={installSkillZipFile}
+                onCheckUpdates={checkSkillUpdatesAction}
+                onToggleSkill={toggleSkillEnabled}
+                onToggleMcp={toggleMcpEnabled}
+              />
             )}
 
-            {tab === "instruction" && (
-              <section className="panel glass instruction-panel simple-instruction-panel">
-                {instructionMode === "list" ? (
-                  <>
-                    <div className="panel-head provider-title-row">
-                      <div>
-                        <p className="eyebrow">Prompt injection</p>
-                        <h3>{t.instruction.title}</h3>
-                      </div>
-                      <div className="provider-title-actions">
-                        <input
-                          ref={promptImportRef}
-                          className="hidden-file-input"
-                          type="file"
-                          accept=".md,text/markdown,text/plain"
-                          onChange={(e) => void importPromptMd(e.target.files?.[0])}
-                        />
-                        <button className="ghost-btn add-provider-btn lively-btn" onClick={() => void refreshBuiltinPrompts()} disabled={loading || promptSyncing}>
-                          {promptSyncing ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />} {promptSyncing ? (lang === "zh" ? "同步中..." : "Syncing...") : (lang === "zh" ? "同步 GitHub 模板" : "Sync GitHub templates")}
-                        </button>
-                        <button className="secondary-btn add-provider-btn lively-btn" onClick={() => promptImportRef.current?.click()} disabled={loading}>
-                          {actionBusy === "importPrompt" ? <Loader2 size={18} className="spin" /> : <Upload size={18} />} {actionBusy === "importPrompt" ? (lang === "zh" ? "导入中..." : "Importing...") : (lang === "zh" ? "导入 md" : "Import md")}
-                        </button>
-                        <button className="primary-btn add-provider-btn lively-btn" onClick={openAddPrompt}><Plus size={18} /> {lang === "zh" ? "添加提示词" : "Add prompt"}</button>
-                      </div>
-                    </div>
-
-                    <div className="prompt-injection-mode-bar">
-                      <div className="prompt-active-summary">
-                        <span className="prompt-mode-label">{lang === "zh" ? "当前状态" : "Current status"}</span>
-                        <div className="prompt-active-line" aria-live="polite">
-                          <span className={cx("prompt-state-dot", state.instructionEnabled && "on")} />
-                          <strong>{state.instructionEnabled ? activeInstructionTitle : (lang === "zh" ? "未启用提示词" : "No prompt enabled")}</strong>
-                          {state.instructionEnabled && <span className="prompt-current-mode">{activeInjectionModeLabel}</span>}
-                        </div>
-                        <span className="prompt-active-detail">
-                          {state.instructionEnabled
-                            ? state.instructionInjectionMode === "append"
-                              ? (lang === "zh" ? "当前模板写入 AGENTS.md，同时保留已有指令文件。" : "The active template is in AGENTS.md while the existing instruction file is preserved.")
-                              : (lang === "zh" ? "当前模板通过 model_instructions_file 独立加载。" : "The active template is loaded through model_instructions_file.")
-                            : (lang === "zh" ? "先选择启用方式，再打开下方任一模板。" : "Choose an enable method, then turn on a template below.")}
-                        </span>
-                      </div>
-                      <div className="prompt-mode-choice">
-                        <div className="prompt-mode-copy">
-                          <div className="prompt-mode-title-row" ref={promptModeHelpRef}>
-                            <strong>{lang === "zh" ? "启用方式" : "Enable method"}</strong>
-                            <button
-                              type="button"
-                              className="prompt-mode-help-btn"
-                              aria-label={lang === "zh" ? "查看启用方式说明" : "Show enable method help"}
-                              aria-expanded={promptModeHelpOpen}
-                              onClick={() => setPromptModeHelpOpen((open) => !open)}
-                            >
-                              <CircleHelp size={15} />
-                            </button>
-                            {promptModeHelpOpen && (
-                              <div className="prompt-mode-help-popover" role="dialog" aria-label={lang === "zh" ? "启用方式说明" : "Enable method details"}>
-                                <div className="prompt-mode-help-item">
-                                  <strong>{lang === "zh" ? "保留原提示词" : "Keep existing"}</strong>
-                                  <span>{lang === "zh" ? "只在 AGENTS.md 里增加 Codex-X 管理区块，不会改动你原本的 model_instructions_file，也不会碰你已经配置好的系统提示词。适合想叠加使用、又不想影响原有环境的人。" : "Adds only a Codex-X managed block in AGENTS.md. Your existing model_instructions_file and configured system prompt stay untouched. Best when you want an overlay without disturbing the current setup."}</span>
-                                </div>
-                                <div className="prompt-mode-help-item">
-                                  <strong>{lang === "zh" ? "替换原提示词" : "Replace existing"}</strong>
-                                  <span>{lang === "zh" ? "会直接改写 model_instructions_file，当前选中的模板会成为唯一生效的指令入口。它更干净，但也意味着原来依赖的其他提示词内容会被覆盖，可能让效果变得更单一。" : "Rewrites model_instructions_file so the selected template becomes the only active instruction source. It is cleaner, but any other prompt content you relied on will be replaced, which can make behavior more narrow."}</span>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                          <span>
-                            {injectionModePending
-                              ? (lang === "zh" ? `当前模式不变；下次启用将使用“${selectedInjectionModeLabel}”。` : `Current mode is unchanged; the next enable uses “${selectedInjectionModeLabel}”.`)
-                              : (lang === "zh" ? "点击下方模板开关时，使用这里选择的方式。" : "This method is used when you turn on a template below.")}
-                          </span>
-                        </div>
-                        <div className="prompt-mode-segments" role="radiogroup" aria-label={lang === "zh" ? "提示词启用方式" : "Prompt enable method"}>
-                          <button
-                            className={cx(promptInjectionMode === "append" && "active")}
-                            role="radio"
-                            aria-checked={promptInjectionMode === "append"}
-                            title={lang === "zh" ? "写入 AGENTS.md，并保留现有 model_instructions_file" : "Write to AGENTS.md and preserve model_instructions_file"}
-                            onClick={() => setPromptInjectionMode("append")}
-                          >
-                            <CirclePlus size={15} />
-                            {lang === "zh" ? "保留原提示词" : "Keep existing"}
-                          </button>
-                          <button
-                            className={cx(promptInjectionMode === "replace" && "active")}
-                            role="radio"
-                            aria-checked={promptInjectionMode === "replace"}
-                            title={lang === "zh" ? "使用 model_instructions_file 替换现有指令文件" : "Replace the existing instruction file through model_instructions_file"}
-                            onClick={() => setPromptInjectionMode("replace")}
-                          >
-                            <ArrowLeftRight size={15} />
-                            {lang === "zh" ? "替换原提示词" : "Replace existing"}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="instruction-list-shell">
-                      <div className="skills-mcp-simple-list instruction-switch-list">
-                      {instructionTemplates.map((item) => {
-                        const isCurrent = state.instructionTemplateKey === `builtin:${item.id}`;
-                        const remoteStatus = builtinPromptStatusMap.get(item.id);
-                        const sourceLabel = remoteStatus?.contentSource === "github"
-                          ? (lang === "zh" ? "GitHub 最新" : "GitHub latest")
-                          : remoteStatus?.contentSource === "removed"
-                            ? (lang === "zh" ? "GitHub 已移除" : "Removed from GitHub")
-                          : remoteStatus?.contentSource === "cache"
-                            ? (lang === "zh" ? "本地缓存" : "Local cache")
-                            : remoteStatus?.contentSource === "unavailable"
-                              ? (lang === "zh" ? "下载失败" : "Unavailable")
-                            : (lang === "zh" ? "打包内置" : "Bundled");
-                        return (
-                          <article className={cx("skills-mcp-simple-row instruction-switch-row", isCurrent && "selected")} key={item.id}>
-                            <div className="instruction-main">
-                              <div className="instruction-title-line">
-                                <FileText size={16} aria-hidden="true" />
-                                <strong>{item.title}</strong>
-                              </div>
-                              <p>{item.subtitle}</p>
-                              <div className="prompt-remote-meta" title={remoteStatus?.message || undefined}>
-                                {isCurrent && <span className="mini-tag current-mode">{lang === "zh" ? `当前 · ${activeInjectionModeLabel}` : `Current · ${activeInjectionModeLabel}`}</span>}
-                                <span className={cx("mini-tag", remoteStatus?.contentSource === "github" && "ok", remoteStatus?.contentSource === "removed" && "warn")}>
-                                  {remoteStatus?.contentSource === "github" || remoteStatus?.contentSource === "cache" || remoteStatus?.contentSource === "removed"
-                                    ? <Github size={12} aria-hidden="true" />
-                                    : <FileText size={12} aria-hidden="true" />}
-                                  {sourceLabel}
-                                </span>
-                                {remoteStatus?.checkedAt && <small>{new Date(remoteStatus.checkedAt).toLocaleString()}</small>}
-                              </div>
-                            </div>
-                            <button
-                              className={cx("switch-toggle", isCurrent && "on")}
-                              title={isCurrent ? (lang === "zh" ? "关闭" : "Disable") : (lang === "zh" ? "启用" : "Enable")}
-                              onClick={() => isCurrent ? disableInstruction() : switchInstructionTemplate(item.id)}
-                              disabled={loading}
-                            >
-                              <span />
-                            </button>
-                          </article>
-                        );
-                      })}
-
-                      {promptCatalogReady && missingActiveBuiltinTemplateId && (
-                        <article className="skills-mcp-simple-row instruction-switch-row selected">
-                          <div className="instruction-main">
-                            <div className="instruction-title-line">
-                              <FileText size={16} aria-hidden="true" />
-                              <strong>{activeInstructionTitle}</strong>
-                            </div>
-                            <p>{lang === "zh" ? "该模板已从 GitHub 移除，当前配置仍在使用" : "This template was removed from GitHub but is still active"}</p>
-                            <div className="prompt-remote-meta">
-                              <span className="mini-tag current-mode">{lang === "zh" ? `当前 · ${activeInjectionModeLabel}` : `Current · ${activeInjectionModeLabel}`}</span>
-                              <span className="mini-tag warn">{lang === "zh" ? "GitHub 已移除" : "Removed from GitHub"}</span>
-                            </div>
-                          </div>
-                          <button
-                            className="switch-toggle on"
-                            title={lang === "zh" ? "关闭" : "Disable"}
-                            onClick={disableInstruction}
-                            disabled={loading}
-                          >
-                            <span />
-                          </button>
-                        </article>
-                      )}
-
-                      {savedPrompts.map((prompt) => {
-                        const isManagedCurrent = state.instructionTemplateKey === `saved:${prompt.id}`;
-                        const isPreservedExternal = state.instructionInjectionMode === "append"
-                          && Boolean(currentInstructionFilename)
-                          && currentInstructionFilename === prompt.filename;
-                        const isCurrent = isManagedCurrent || isPreservedExternal;
-                        return (
-                          <article className={cx("skills-mcp-simple-row instruction-switch-row", isCurrent && "selected")} key={prompt.id}>
-                            <div className="instruction-main">
-                              <strong>{prompt.title}</strong>
-                              <p>{isPreservedExternal
-                                ? (lang === "zh" ? "用户原有提示词，追加模式下继续生效" : "Existing user prompt preserved by append mode")
-                                : (lang === "zh" ? "自定义指令提示词" : "Custom instruction prompt")}</p>
-                              {isManagedCurrent && (
-                                <div className="prompt-remote-meta">
-                                  <span className="mini-tag current-mode">{lang === "zh" ? `当前 · ${activeInjectionModeLabel}` : `Current · ${activeInjectionModeLabel}`}</span>
-                                </div>
-                              )}
-                            </div>
-                            <div className="instruction-icon-actions">
-                              <button
-                                className={cx("switch-toggle", isCurrent && "on")}
-                                title={isManagedCurrent
-                                  ? (lang === "zh" ? "关闭" : "Disable")
-                                  : isPreservedExternal
-                                    ? (lang === "zh" ? "禁用外部提示词" : "Disable external prompt")
-                                    : (lang === "zh" ? "启用" : "Enable")}
-                                onClick={() => isManagedCurrent
-                                  ? disableInstruction()
-                                  : isPreservedExternal
-                                    ? disableExternalInstruction()
-                                    : enableSavedPrompt(prompt.id)}
-                                disabled={loading}
-                              >
-                                <span />
-                              </button>
-                              <button className="icon-btn small" title={t.provider.edit} onClick={() => openEditPrompt(prompt)}><PencilLine size={15} /></button>
-                              <button className="icon-btn danger small" title={t.provider.remove} onClick={() => removeSavedPrompt(prompt.id)}><Trash2 size={15} /></button>
-                            </div>
-                          </article>
-                        );
-                      })}
-
-                      {state.instructionFile
-                        && currentInstructionId === "custom"
-                        && !savedPrompts.some((p) => currentInstructionFilename === p.filename)
-                        && !(missingActiveBuiltinTemplateId && state.instructionInjectionMode !== "append") && (
-                        <article className="skills-mcp-simple-row instruction-switch-row selected">
-                          <div className="instruction-main">
-                            <strong>{lang === "zh" ? "用户原有指令提示词" : "Existing user prompt"}</strong>
-                            <p>{state.instructionInjectionMode === "append"
-                              ? (lang === "zh" ? "追加模式已保留这份外部提示词，并同时加载 Codex-X 的 AGENTS.md 区块。" : "Append mode preserves this external prompt alongside the Codex-X AGENTS.md block.")
-                              : (lang === "zh" ? "当前使用的是非 Codex-X 管理的外部提示词。" : "This external prompt is not managed by Codex-X.")}</p>
-                          </div>
-                          <button className="switch-toggle on" title={lang === "zh" ? "禁用外部提示词" : "Disable external prompt"} onClick={disableExternalInstruction} disabled={loading}><span /></button>
-                        </article>
-                      )}
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <div className="prompt-form-page">
-                    <div className="panel-head">
-                      <div>
-                        <p className="eyebrow">Prompt</p>
-                        <h3>{editingPromptId ? (lang === "zh" ? "编辑提示词" : "Edit prompt") : (lang === "zh" ? "添加提示词" : "Add prompt")}</h3>
-                      </div>
-                      <button className="ghost-btn" onClick={() => setInstructionMode("list")}>{t.provider.cancel}</button>
-                    </div>
-                    <div className="form-grid prompt-form-grid">
-                      <Field label={lang === "zh" ? "提示词名称" : "Prompt name"}><input value={promptForm.title} onChange={(e) => setPromptForm({ ...promptForm, title: e.target.value, id: editingPromptId || providerId(e.target.value) })} /></Field>
-                      <Field label={lang === "zh" ? "文件名" : "Filename"}><input value={promptForm.filename} onChange={(e) => setPromptForm({ ...promptForm, filename: e.target.value })} placeholder="my-prompt.md" /></Field>
-                      <label className="field prompt-content-field">
-                        <span>{lang === "zh" ? "提示词内容" : "Prompt content"}</span>
-                        <textarea className="prompt-editor" value={promptForm.content} onChange={(e) => setPromptForm({ ...promptForm, content: e.target.value })} spellCheck={false} />
-                      </label>
-                    </div>
-                    <div className="form-actions">
-                      <button className="secondary-btn big lively-btn" onClick={savePromptOnly} disabled={loading}>{lang === "zh" ? "保存" : "Save"}</button>
-                      <button className="primary-btn big lively-btn" onClick={saveAndEnablePrompt} disabled={loading}><Zap size={18} /> {lang === "zh" ? "保存并启用" : "Save & enable"}</button>
-                    </div>
-                  </div>
-                )}
-              </section>
+            {state && tab === "instruction" && (
+              <PromptsPage
+                lang={lang}
+                instructionMode={instructionMode}
+                promptForm={promptForm}
+                editingPromptId={editingPromptId}
+                loading={loading}
+                actionBusy={actionBusy}
+                promptSyncing={promptSyncing}
+                promptCatalogReady={promptCatalogReady}
+                promptImportRef={promptImportRef}
+                promptInjectionMode={promptInjectionMode}
+                promptModeHelpOpen={promptModeHelpOpen}
+                promptModeHelpRef={promptModeHelpRef}
+                instructionEnabled={state.instructionEnabled}
+                activeInstructionTitle={activeInstructionTitle}
+                activeInjectionMode={state.instructionInjectionMode}
+                instructionTemplates={instructionTemplates}
+                builtinPromptStatuses={builtinPromptStatus}
+                activeBuiltinTemplateId={activeBuiltinTemplateId}
+                orphanedBuiltinPrompt={missingActiveBuiltinTemplateId ? {
+                  id: missingActiveBuiltinTemplateId,
+                  title: activeInstructionTitle,
+                  description: lang === "zh"
+                    ? "该模板已从在线目录移除，当前配置仍在使用。"
+                    : "This template was removed online but is still active.",
+                } : null}
+                savedPrompts={savedPrompts}
+                managedSavedPromptId={state.instructionTemplateKey?.startsWith("saved:")
+                  ? state.instructionTemplateKey.slice("saved:".length)
+                  : null}
+                preservedSavedPromptFilename={state.instructionInjectionMode === "append" ? currentInstructionFilename : null}
+                externalPrompt={state.instructionFile
+                  && currentInstructionId === "custom"
+                  && !savedPrompts.some((prompt) => currentInstructionFilename === prompt.filename)
+                  && !(missingActiveBuiltinTemplateId && state.instructionInjectionMode !== "append")
+                  ? {
+                    title: lang === "zh" ? "用户原有指令提示词" : "Existing user prompt",
+                    description: state.instructionInjectionMode === "append"
+                      ? (lang === "zh"
+                        ? "追加模式已保留这份外部提示词，并同时加载 Codex-X 的 AGENTS.md 区块。"
+                        : "Append mode preserves this external prompt alongside the Codex-X AGENTS.md block.")
+                      : (lang === "zh"
+                        ? "当前使用的是非 Codex-X 管理的外部提示词。"
+                        : "This external prompt is not managed by Codex-X."),
+                    filename: currentInstructionFilename,
+                  }
+                  : null}
+                onSyncBuiltinPrompts={() => refreshBuiltinPrompts()}
+                onImportPrompt={importPromptMd}
+                onAddPrompt={openAddPrompt}
+                onInstructionModeChange={setInstructionMode}
+                onPromptInjectionModeChange={setPromptInjectionMode}
+                onTogglePromptModeHelp={() => setPromptModeHelpOpen((open) => !open)}
+                onEnableBuiltinPrompt={switchInstructionTemplate}
+                onDisableInstruction={disableInstruction}
+                onEnableSavedPrompt={enableSavedPrompt}
+                onDisableExternalPrompt={disableExternalInstruction}
+                onEditPrompt={openEditPrompt}
+                onDeletePrompt={removeSavedPrompt}
+                onPromptFormFieldChange={(field, value) => setPromptForm((current) => ({
+                  ...current,
+                  [field]: value,
+                  ...(field === "title" ? { id: editingPromptId || providerId(value) } : {}),
+                }))}
+                onSavePrompt={savePromptOnly}
+              />
             )}
 
-            {tab === "toml" && (
-              <section className="panel glass code-panel">
-                <div className="panel-head">
-                  <div>
-                    <p className="eyebrow">~/.codex/config.toml</p>
-                    <h3>{t.toml.title}</h3>
-                    <p className="muted-desc">{t.toml.desc}</p>
-                  </div>
-                  <StatusPill active={state.configExists} label={state.configExists ? t.toml.loaded : t.dashboard.missing} />
-                </div>
-                <TomlPreview text={state.configText || t.toml.missingText} />
-              </section>
+            {state && tab === "toml" && (
+              <TomlConfigPage
+                eyebrow="~/.codex/config.toml"
+                title={t.toml.title}
+                description={t.toml.desc}
+                loaded={state.configExists ? t.toml.loaded : t.dashboard.missing}
+                isLoaded={state.configExists}
+                preview={<TomlPreview text={state.configText || t.toml.missingText} />}
+              />
             )}
-
-
 
             {tab === "about" && (
-              <section className="about-page">
-                <section className="panel glass about-card">
-                  <div className="panel-head compact">
-                    <div><p className="eyebrow">About</p><h3>{lang === "zh" ? "关于 Codex-X" : "About Codex-X"}</h3></div>
-                  </div>
-                  <div className="about-kv">
-                    <div><span>Codex-X {lang === "zh" ? "版本" : "Version"}</span><strong>{aboutInfo?.appVersion || "0.2.0"}</strong></div>
-                    <div><span>Codex CLI {lang === "zh" ? "版本" : "Version"}</span><strong>{aboutInfo?.codexVersion || (lang === "zh" ? "未检测到" : "Not detected")}</strong></div>
-                    <div><span>CODEX_HOME</span><code>{aboutInfo?.codexDir || state.codexDir}</code></div>
-                    <div><span>{lang === "zh" ? "项目地址" : "Project"}</span><code>{aboutInfo?.projectUrl || `https://github.com/${FALLBACK_GITHUB_REPO}`}</code></div>
-                  </div>
-                  <div className="about-actions">
-                    <button className="secondary-btn" onClick={() => openExternalUrl(aboutInfo?.projectUrl || `https://github.com/${FALLBACK_GITHUB_REPO}`)}><ExternalLink size={16} /> {lang === "zh" ? "打开项目主页" : "Open project"}</button>
-                    <button className="ghost-btn" onClick={() => openExternalUrl(`${aboutInfo?.projectUrl || `https://github.com/${FALLBACK_GITHUB_REPO}`}/issues`)}><ExternalLink size={16} /> {lang === "zh" ? "反馈问题" : "Issues"}</button>
-                  </div>
-                </section>
-
-                <section className="panel glass about-card">
-                  <div className="panel-head compact">
-                    <div><p className="eyebrow">GitHub Releases</p><h3>{lang === "zh" ? "更新检查" : "Update check"}</h3></div>
-                    <span className={cx("update-status-pill", releaseInfo.hasUpdate && "available")}>{releaseStatusLabel}</span>
-                  </div>
-                  <div className="about-kv">
-                    <div><span>{lang === "zh" ? "状态" : "Status"}</span><strong>{releaseStatusLabel}</strong></div>
-                    <div><span>{lang === "zh" ? "最新版本" : "Latest"}</span><strong>{releaseInfo.latestVersion || "-"}</strong></div>
-                  </div>
-                  <div className="about-actions">
-                    <button className="primary-btn" onClick={() => void checkForUpdates()} disabled={releaseInfo.status === "checking"}><RefreshCw size={16} className={cx(releaseInfo.status === "checking" && "spin")} /> {lang === "zh" ? "检查更新" : "Check updates"}</button>
-                    <button className="secondary-btn" onClick={() => openExternalUrl(releaseInfo.htmlUrl)} disabled={!releaseInfo.htmlUrl}><Download size={16} /> {lang === "zh" ? "打开下载页" : "Open releases"}</button>
-                  </div>
-                </section>
-              </section>
+              <AboutPage
+                copy={{
+                  eyebrow: "About",
+                  title: lang === "zh" ? "关于 Codex-X" : "About Codex-X",
+                  appVersionLabel: `Codex-X ${lang === "zh" ? "版本" : "Version"}`,
+                  codexVersionLabel: `Codex CLI ${lang === "zh" ? "版本" : "Version"}`,
+                  codexHomeLabel: "CODEX_HOME",
+                  projectLabel: lang === "zh" ? "项目地址" : "Project",
+                  openProjectLabel: lang === "zh" ? "打开项目主页" : "Open project",
+                  openIssuesLabel: lang === "zh" ? "反馈问题" : "Issues",
+                  releasesEyebrow: "GitHub Releases",
+                  releasesTitle: lang === "zh" ? "更新检查" : "Update check",
+                  releaseStatusLabel: lang === "zh" ? "状态" : "Status",
+                  latestVersionLabel: lang === "zh" ? "最新版本" : "Latest version",
+                  checkUpdateLabel: lang === "zh" ? "检查更新" : "Check updates",
+                  openReleasesLabel: lang === "zh" ? "打开下载页" : "Open releases",
+                }}
+                appVersion={aboutInfo?.appVersion || "-"}
+                codexVersion={aboutInfo?.codexVersion || (lang === "zh" ? "未检测到" : "Not detected")}
+                codexHome={aboutInfo?.codexDir || state?.codexDir || configDir || "~/.codex"}
+                projectUrl={aboutInfo?.projectUrl || `https://github.com/${FALLBACK_GITHUB_REPO}`}
+                release={{
+                  status: releaseStatusLabel,
+                  latestVersion: releaseInfo.latestVersion || "-",
+                  tone: releaseInfo.status === "error"
+                    ? "error"
+                    : releaseInfo.hasUpdate
+                      ? "warning"
+                      : releaseInfo.status === "ok"
+                        ? "success"
+                        : "neutral",
+                  checking: releaseInfo.status === "checking"
+                    || updater.state.phase === "downloading"
+                    || updater.state.phase === "installing",
+                  canOpenReleases: Boolean(releaseInfo.htmlUrl),
+                }}
+                onOpenProject={() => openExternalUrl(aboutInfo?.projectUrl || `https://github.com/${FALLBACK_GITHUB_REPO}`)}
+                onOpenIssues={() => openExternalUrl(`${aboutInfo?.projectUrl || `https://github.com/${FALLBACK_GITHUB_REPO}`}/issues`)}
+                onCheckUpdate={() => void checkForUpdates()}
+                onOpenReleases={() => openExternalUrl(releaseInfo.htmlUrl)}
+              />
             )}
 
             {tab === "settings" && (
-              <section className="panel glass settings-panel">
-                <div className="panel-head">
-                  <div><p className="eyebrow">Settings</p><h3>{t.settings.title}</h3></div>
-                </div>
-                <div className="settings-list">
-                  <div className="settings-row">
-                    <div className="settings-icon"><Globe2 size={20} /></div>
-                    <div className="settings-copy"><strong>{t.settings.language}</strong><p>{t.settings.languageDesc}</p></div>
-                    <div className="segmented">
-                      <button className={cx(lang === "zh" && "active")} onClick={() => setLang("zh")}>{t.settings.zh}</button>
-                      <button className={cx(lang === "en" && "active")} onClick={() => setLang("en")}>{t.settings.en}</button>
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <div className="settings-icon"><Sparkles size={20} /></div>
-                    <div className="settings-copy"><strong>{t.settings.productName}</strong><p>{t.settings.productDesc}</p></div>
-                    <StatusPill active label="Codex-X" />
-                  </div>
-                  <div className="settings-row">
-                    <div className="settings-icon"><CheckCircle2 size={20} /></div>
-                    <div className="settings-copy">
-                      <strong>{lang === "zh" ? "首次启动向导" : "First-run wizard"}</strong>
-                      <p>{lang === "zh" ? "重新检测 CODEX_HOME、config.toml、auth.json 和 SQLite 会话库。" : "Recheck CODEX_HOME, config.toml, auth.json and SQLite session stores."}</p>
-                    </div>
-                    <button className="secondary-btn" onClick={() => { localStorage.removeItem(STARTUP_WIZARD_SEEN_KEY); setStartupWizardOpen(true); refresh(); }}>
-                      {lang === "zh" ? "重新检测" : "Recheck"}
-                    </button>
-                  </div>
-                </div>
-              </section>
+              <SettingsPage
+                lang={lang}
+                copy={{
+                  eyebrow: "Settings",
+                  title: t.settings.title,
+                  languageTitle: t.settings.language,
+                  languageDescription: t.settings.languageDesc,
+                  chineseLabel: t.settings.zh,
+                  englishLabel: t.settings.en,
+                  productTitle: t.settings.productName,
+                  productDescription: t.settings.productDesc,
+                  productValue: "Codex-X",
+                  recheckTitle: lang === "zh" ? "首次启动向导" : "First-run wizard",
+                  recheckDescription: lang === "zh"
+                    ? "重新检测 CODEX_HOME、config.toml、auth.json 和 SQLite 会话库。"
+                    : "Recheck CODEX_HOME, config.toml, auth.json and SQLite session stores.",
+                  recheckLabel: lang === "zh" ? "重新检测" : "Recheck",
+                }}
+                onLanguageChange={setLang}
+                recheckBusy={loading}
+                onRecheck={() => {
+                  localStorage.removeItem(STARTUP_WIZARD_SEEN_KEY);
+                  setStartupWizardOpen(true);
+                  refresh();
+                }}
+              />
             )}
-          </>
-        )}
-      </section>
-    </main>
+      </PageTransition>
+    </AppShell>
   );
 }
 

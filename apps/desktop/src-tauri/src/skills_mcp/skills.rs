@@ -3,7 +3,7 @@ use super::types::{CcSwitchSkillMeta, ManagedSkill, SkillsMcpActionResult, Skill
 use crate::ccswitch::default_ccswitch_db_path;
 use crate::constants::MAX_SKILL_ZIP_BYTES;
 use crate::error::{CodexxError, Result};
-use crate::file_io::{io_err, read_to_string_if_exists};
+use crate::file_io::{ensure_directory, io_err, read_to_string_if_exists};
 use crate::paths::app_home;
 use crate::{now_rfc3339, open_db, resolve_codex_dir};
 use chrono::Local;
@@ -44,7 +44,7 @@ pub(super) fn sanitize_dir_name(input: &str, fallback: &str) -> String {
 }
 
 pub(super) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst).map_err(|e| io_err(dst, e))?;
+    ensure_directory(dst)?;
     for entry in fs::read_dir(src).map_err(|e| io_err(src, e))? {
         let entry = entry.map_err(|e| io_err(src, e))?;
         let path = entry.path();
@@ -58,7 +58,7 @@ pub(super) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             copy_dir_recursive(&path, &target)?;
         } else if meta.is_file() {
             if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+                ensure_directory(parent)?;
             }
             fs::copy(&path, &target).map_err(|e| io_err(&target, e))?;
         }
@@ -309,8 +309,8 @@ pub(crate) fn toggle_codex_skill_inner(
     let codex_dir = resolve_codex_dir(config_dir.clone())?;
     let skills_dir = codex_skills_dir(&codex_dir);
     let disabled_dir = disabled_skills_dir()?;
-    fs::create_dir_all(&skills_dir).map_err(|e| io_err(&skills_dir, e))?;
-    fs::create_dir_all(&disabled_dir).map_err(|e| io_err(&disabled_dir, e))?;
+    ensure_directory(&skills_dir)?;
+    ensure_directory(&disabled_dir)?;
     let current_state = build_skills_mcp_state_inner(config_dir.clone())?;
     let name = current_state
         .skills
@@ -339,13 +339,13 @@ pub(crate) fn install_skill_zip_inner(
 ) -> Result<SkillsMcpActionResult> {
     let codex_dir = resolve_codex_dir(config_dir.clone())?;
     let skills_dir = codex_skills_dir(&codex_dir);
-    fs::create_dir_all(&skills_dir).map_err(|e| io_err(&skills_dir, e))?;
+    ensure_directory(&skills_dir)?;
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| CodexxError::Config(format!("读取 ZIP 失败: {e}")))?;
     let tmp = app_home()?
         .join("tmp")
         .join(format!("skill-zip-{}", Local::now().timestamp_millis()));
-    fs::create_dir_all(&tmp).map_err(|e| io_err(&tmp, e))?;
+    ensure_directory(&tmp)?;
     let install_result = (|| -> Result<usize> {
         let mut total_size = 0u64;
         for i in 0..archive.len() {
@@ -361,10 +361,10 @@ pub(crate) fn install_skill_zip_inner(
             }
             let out = tmp.join(path);
             if file.name().ends_with('/') {
-                fs::create_dir_all(&out).map_err(|e| io_err(&out, e))?;
+                ensure_directory(&out)?;
             } else {
                 if let Some(parent) = out.parent() {
-                    fs::create_dir_all(parent).map_err(|e| io_err(parent, e))?;
+                    ensure_directory(parent)?;
                 }
                 let mut outfile = fs::File::create(&out).map_err(|e| io_err(&out, e))?;
                 std::io::copy(&mut file, &mut outfile).map_err(|e| io_err(&out, e))?;

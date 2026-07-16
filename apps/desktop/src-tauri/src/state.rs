@@ -1,4 +1,5 @@
 use crate::backups::{latest_backup, BackupEntry};
+use crate::config_migration::migrate_legacy_prompt_config;
 use crate::error::Result;
 use crate::file_io::{io_err, json_err, parse_toml_document, read_to_string_if_exists};
 use crate::prompts::{
@@ -170,6 +171,7 @@ pub(crate) fn active_saved_provider_id_from_config(
 pub(crate) fn build_state(codex_dir: PathBuf) -> Result<CodexState> {
     let cfg = config_path(&codex_dir);
     let auth = auth_path(&codex_dir);
+    migrate_legacy_prompt_config(&codex_dir)?;
     let text = read_to_string_if_exists(&cfg)?;
     let doc = parse_toml_document(&cfg, &text)?;
     let model = string_value(&doc, "model");

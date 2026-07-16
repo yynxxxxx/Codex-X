@@ -194,6 +194,7 @@ fn failed_sqlite_commit_rolls_back_without_snapshot_restore() {
         .expect("count rolled-back child rows");
     assert_eq!(child_rows, 0);
 
+    drop(pending);
     fs::remove_dir_all(codex_dir).expect("remove test directory");
 }
 
@@ -427,6 +428,15 @@ fn injected_failure_restores_sqlite_jsonl_and_global_state() {
             MutationPoint::AfterSqliteCommit(0) => {
                 hook_called = true;
                 assert_eq!(thread_provider(&database, id), "custom");
+                let user_event_flag: i64 = Connection::open(&database)
+                    .expect("open committed session metadata")
+                    .query_row(
+                        "SELECT has_user_event FROM threads WHERE id = ?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .expect("read committed user event flag");
+                assert_eq!(user_event_flag, 0);
                 assert!(fs::read_to_string(&rollout)
                     .expect("read mutated rollout")
                     .contains("\"model_provider\":\"custom\""));

@@ -6,7 +6,8 @@ use super::{
 use crate::backups::create_backup;
 use crate::error::{CodexxError, Result};
 use crate::file_io::{
-    io_err, json_err, parse_toml_document, read_to_string_if_exists, write_json, write_text,
+    ensure_directory, io_err, json_err, parse_toml_document, read_to_string_if_exists, write_json,
+    write_text,
 };
 use crate::state::{build_state, ActionResult};
 use crate::toml_utils::ensure_table;
@@ -172,7 +173,7 @@ fn apply_official_config(
     message: &str,
 ) -> Result<ActionResult> {
     let codex_dir = resolve_codex_dir(config_dir)?;
-    fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
+    ensure_directory(&codex_dir)?;
     let cfg = config_path(&codex_dir);
     let auth = auth_path(&codex_dir);
     let backup_id = create_backup(&codex_dir, action)?;
@@ -258,7 +259,7 @@ pub(crate) fn save_official_config_inner(
     auth_json: Option<String>,
 ) -> Result<ActionResult> {
     let codex_dir = resolve_codex_dir(config_dir)?;
-    fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
+    ensure_directory(&codex_dir)?;
     let cfg = config_path(&codex_dir);
     let auth = auth_path(&codex_dir);
     let backup_id = create_backup(&codex_dir, "save-official")?;
@@ -303,7 +304,7 @@ where
     F: FnOnce(&Path) -> Result<()>,
 {
     let codex_dir = resolve_codex_dir(input.config_dir.clone())?;
-    fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
+    ensure_directory(&codex_dir)?;
     pre_persist(&codex_dir)?;
     let cfg = config_path(&codex_dir);
     let auth = auth_path(&codex_dir);
@@ -361,7 +362,7 @@ where
     F: FnOnce(&Path) -> Result<()>,
 {
     let codex_dir = resolve_codex_dir(input.config_dir.clone())?;
-    fs::create_dir_all(&codex_dir).map_err(|e| io_err(&codex_dir, e))?;
+    ensure_directory(&codex_dir)?;
     pre_persist(&codex_dir)?;
     let cfg = config_path(&codex_dir);
     let auth = auth_path(&codex_dir);

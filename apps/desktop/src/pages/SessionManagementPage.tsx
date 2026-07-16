@@ -1,7 +1,7 @@
-import React from "react";
 import {
   AlertCircle,
   CheckCircle2,
+  FolderTree,
   History,
   Info,
   Loader2,
@@ -10,6 +10,8 @@ import {
   Trash2,
   Zap,
 } from "lucide-react";
+import { Button, Checkbox, ModalShell, cx } from "../components/ui";
+import "../styles/session-management.css";
 
 export type Lang = "zh" | "en";
 
@@ -69,8 +71,6 @@ type SessionManagementPageProps = {
   sessionDeleteConfirmOpen: boolean;
   sessionDeleteBusy: boolean;
   sessionDeleteSafetyConfirmed: boolean;
-  sessionDeleteDialogRef: React.RefObject<HTMLDivElement>;
-  sessionDeleteTriggerRef: React.RefObject<HTMLButtonElement>;
   onCheckSessions: () => void;
   onSyncSessions: () => void;
   onSessionQueryChange: (value: string) => void;
@@ -84,15 +84,11 @@ type SessionManagementPageProps = {
   onDeleteSafetyConfirmedChange: (checked: boolean) => void;
 };
 
-function cx(...items: Array<string | false | undefined>) {
-  return items.filter(Boolean).join(" ");
-}
-
-function formatSessionTime(value?: number | null) {
-  if (!value) return "未知时间";
+function formatSessionTime(value?: number | null, lang: Lang = "zh") {
+  if (!value) return lang === "zh" ? "未知时间" : "Unknown time";
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "未知时间";
-  return date.toLocaleString("zh-CN", {
+  if (Number.isNaN(date.getTime())) return lang === "zh" ? "未知时间" : "Unknown time";
+  return date.toLocaleString(lang === "zh" ? "zh-CN" : undefined, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -100,8 +96,8 @@ function formatSessionTime(value?: number | null) {
   });
 }
 
-function compactPath(value?: string | null, max = 58) {
-  if (!value) return "未记录路径";
+function compactPath(value: string | null | undefined, max = 58, missing = "未记录路径") {
+  if (!value) return missing;
   const normalized = value.replace(/\\/g, "/");
   if (normalized.length <= max) return normalized;
   const parts = normalized.split("/").filter(Boolean);
@@ -140,8 +136,6 @@ export function SessionManagementPage({
   sessionDeleteConfirmOpen,
   sessionDeleteBusy,
   sessionDeleteSafetyConfirmed,
-  sessionDeleteDialogRef,
-  sessionDeleteTriggerRef,
   onCheckSessions,
   onSyncSessions,
   onSessionQueryChange,
@@ -154,277 +148,342 @@ export function SessionManagementPage({
   onDeleteSelectedSessions,
   onDeleteSafetyConfirmedChange,
 }: SessionManagementPageProps) {
+  const isChinese = lang === "zh";
+  const copy = isChinese
+    ? {
+        syncEyebrow: "会话同步",
+        title: "会话管理",
+        description: "检查本地会话是否跟当前供应商一致，需要时一键同步。不会修改聊天内容。",
+        syncTo: "同步到",
+        check: "检查会话",
+        checking: "检查中...",
+        sync: "同步会话",
+        syncing: "同步中...",
+        clickToCheck: "点击检查会话",
+        needsSync: (count: number) => `有 ${count} 条会话需要同步`,
+        allSynced: "全部会话已同步",
+        sessionCount: (count: number) => `${count} 条会话`,
+        local: "本地会话",
+        list: "会话列表",
+        shown: (shown: number, total: number) => `展示 ${shown} / ${total} 条`,
+        loaded: (count: number) => `当前加载 ${count} 条`,
+        search: "搜索标题 / 项目 / 供应商 / ID",
+        groupByProject: "按项目路径分组",
+        showInternal: (count: number) => `显示内部会话 (${count})`,
+        deleteSelected: "删除选中",
+        deleteMany: (count: number) => `永久删除 ${count} 条`,
+        selectAll: "选择当前列表中的全部会话",
+        selectProject: (path: string, count: number) => `选择项目 ${path} 的 ${count} 条会话`,
+        projectCount: (count: number, truncated: boolean) => `${truncated ? "已加载 " : ""}${count} 条`,
+        projectShown: (shown: number, total: number) => `显示 ${shown} / 共 ${total} 条`,
+        selectSession: "选择会话",
+        archived: "已归档",
+        internal: "内部",
+        pending: "待同步",
+        unknownProvider: "未知供应商",
+        noModel: "未记录",
+        noMatch: "没有匹配的会话。",
+        noSessions: "还没有读取到会话。点击右上角“检查会话”刷新。",
+        diagnostics: "诊断信息",
+        diagnosticsCount: (count: number) => `${count} 条 · 点击查看`,
+        deleteTitle: (count: number) => `永久删除 ${count} 条会话`,
+        irreversible: "此操作不可恢复",
+        deleteDescription: "所选会话将从 Codex 的本地数据中永久删除，不会移入回收站，也不会创建新的备份。",
+        deleteChildren: "由这些会话派生的子会话也会一并删除。",
+        closeClients: "请先关闭正在使用这些会话的 Codex 窗口或 CLI。",
+        pendingDelete: "待删除会话",
+        moreSessions: (count: number) => `另有 ${count} 条会话未在此处展开`,
+        safetyCheck: "我已关闭其他正在使用这些会话的 Codex 窗口或 CLI",
+        cancel: "取消",
+        deleting: "正在永久删除...",
+        confirmDelete: (count: number) => `确认永久删除 ${count} 条`,
+      }
+    : {
+        syncEyebrow: "SESSION SYNC",
+        title: "Session management",
+        description: "Check whether local sessions match the current provider and sync them when needed. Chat content is not changed.",
+        syncTo: "Sync to",
+        check: "Check sessions",
+        checking: "Checking...",
+        sync: "Sync sessions",
+        syncing: "Syncing...",
+        clickToCheck: "Check sessions to get started",
+        needsSync: (count: number) => `${count} session(s) need syncing`,
+        allSynced: "All sessions are synced",
+        sessionCount: (count: number) => `${count} sessions`,
+        local: "LOCAL SESSIONS",
+        list: "Sessions",
+        shown: (shown: number, total: number) => `${shown} / ${total} shown`,
+        loaded: (count: number) => `${count} loaded`,
+        search: "Search title / project / provider / ID",
+        groupByProject: "Group by project path",
+        showInternal: (count: number) => `Show internal sessions (${count})`,
+        deleteSelected: "Delete selected",
+        deleteMany: (count: number) => `Delete ${count} permanently`,
+        selectAll: "Select all sessions in the current list",
+        selectProject: (path: string, count: number) => `Select ${count} sessions in ${path}`,
+        projectCount: (count: number, truncated: boolean) => `${count}${truncated ? " loaded" : ""}`,
+        projectShown: (shown: number, total: number) => `${shown} / ${total} shown`,
+        selectSession: "Select session",
+        archived: "Archived",
+        internal: "Internal",
+        pending: "Needs sync",
+        unknownProvider: "Unknown provider",
+        noModel: "Not recorded",
+        noMatch: "No matching sessions.",
+        noSessions: "No sessions loaded. Click Check sessions to refresh.",
+        diagnostics: "Diagnostics",
+        diagnosticsCount: (count: number) => `${count} · click to view`,
+        deleteTitle: (count: number) => `Permanently delete ${count} session(s)`,
+        irreversible: "This cannot be undone",
+        deleteDescription: "Selected sessions will be permanently deleted from Codex local data. There is no recycle bin or new backup.",
+        deleteChildren: "Child sessions spawned from these sessions will also be deleted.",
+        closeClients: "Close other Codex windows or CLIs using these sessions first.",
+        pendingDelete: "Sessions to delete",
+        moreSessions: (count: number) => `${count} more session(s) not shown`,
+        safetyCheck: "I closed other Codex windows or CLIs using these sessions",
+        cancel: "Cancel",
+        deleting: "Deleting permanently...",
+        confirmDelete: (count: number) => `Delete ${count} permanently`,
+      };
+
+  const dialogOpen = sessionDeleteConfirmOpen && selectedSessions.length > 0;
+  const selectedVisibleCount = filteredSessions.filter((item) => selectedSessionSet.has(item.id)).length;
+  const allVisibleSelected = filteredSessions.length > 0 && selectedVisibleCount === filteredSessions.length;
+  const visibleSelectionIsPartial = selectedVisibleCount > 0 && !allVisibleSelected;
+
   return (
     <>
-      {sessionDeleteConfirmOpen && selectedSessions.length > 0 && (
-        <div className="update-mask" onClick={onCloseDeleteConfirm}>
-          <div
-            ref={sessionDeleteDialogRef}
-            className="update-dialog glass session-delete-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="session-delete-title"
-            aria-describedby="session-delete-description"
-            tabIndex={-1}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="update-head session-delete-head">
-              <div className="update-icon session-delete-icon"><Trash2 size={22} /></div>
-              <div>
-                <p className="eyebrow">Codex Storage</p>
-                <h3 id="session-delete-title">
-                  {lang === "zh" ? `永久删除 ${selectedSessions.length} 条会话` : `Permanently delete ${selectedSessions.length} session(s)`}
-                </h3>
-              </div>
-            </div>
-            <div className="update-body session-delete-body">
-              <div className="session-delete-warning">
-                <AlertCircle size={19} />
-                <div>
-                  <strong>{lang === "zh" ? "此操作不可恢复" : "This cannot be undone"}</strong>
-                  <p id="session-delete-description">
-                    {lang === "zh"
-                      ? "所选会话将从当前 Codex 存储中硬删除，不会移入回收站，也不会创建新的备份；Codex-X 无法撤销或恢复。"
-                      : "The selected sessions will be hard-deleted from the current Codex storage. No recycle bin or new backup will be created, and Codex-X cannot undo or restore them."}
-                  </p>
-                  <p>
-                    {lang === "zh"
-                      ? "由这些会话派生的子会话也会一并删除。"
-                      : "Child sessions spawned from these sessions will also be deleted."}
-                  </p>
-                  <p>
-                    {lang === "zh"
-                      ? "删除前请关闭其他正在使用这些会话的 Codex 窗口或 CLI；活动会话仍可能继续写入并导致删除失败。"
-                      : "Before deleting, close other Codex windows or CLIs using these sessions. An active session may keep writing and cause deletion to fail."}
-                  </p>
-                </div>
-              </div>
-              <div className="session-delete-list" aria-label={lang === "zh" ? "待删除会话" : "Sessions to delete"}>
-                {selectedSessions.slice(0, 8).map((item) => (
-                  <div className="session-delete-item" key={item.id}>
-                    <strong title={item.title}>{item.title || (lang === "zh" ? "未命名会话" : "Untitled session")}</strong>
-                    <code>#{shortId(item.id)}</code>
-                    <span title={item.cwd || item.rolloutPath || undefined}>{compactPath(item.cwd || item.rolloutPath, 72)}</span>
-                  </div>
-                ))}
-                {selectedSessions.length > 8 && (
-                  <p className="session-delete-more">
-                    {lang === "zh" ? `另有 ${selectedSessions.length - 8} 条会话未在此处展开` : `${selectedSessions.length - 8} more session(s) not shown`}
-                  </p>
-                )}
-              </div>
-              <label className="session-delete-process-check">
-                <input
-                  type="checkbox"
-                  checked={sessionDeleteSafetyConfirmed}
-                  onChange={(event) => onDeleteSafetyConfirmedChange(event.target.checked)}
-                  disabled={sessionDeleteBusy}
-                />
-                <span>
-                  {lang === "zh"
-                    ? "我已关闭其他正在使用这些会话的 Codex 窗口或 CLI"
-                    : "I closed other Codex windows or CLIs using these sessions"}
-                </span>
-              </label>
-            </div>
-            <div className="update-actions session-delete-actions">
-              <button className="secondary-btn" onClick={onCloseDeleteConfirm} disabled={sessionDeleteBusy} data-initial-focus>
-                {lang === "zh" ? "取消" : "Cancel"}
-              </button>
-              <button className="danger-btn session-delete-confirm-btn" onClick={onDeleteSelectedSessions} disabled={sessionDeleteBusy || !sessionDeleteSafetyConfirmed}>
-                {sessionDeleteBusy ? <Loader2 size={17} className="spin" /> : <Trash2 size={17} />}
-                {sessionDeleteBusy
-                  ? (lang === "zh" ? "正在永久删除..." : "Deleting permanently...")
-                  : (lang === "zh" ? `确认永久删除 ${selectedSessions.length} 条` : `Delete ${selectedSessions.length} permanently`)}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <section className={cx("panel glass sessions-panel", !active && "page-pane-hidden")}>
-        <div className="panel-head provider-title-row session-page-head">
+      <ModalShell
+        open={dialogOpen}
+        onClose={onCloseDeleteConfirm}
+        title={copy.deleteTitle(selectedSessions.length)}
+        description={copy.deleteDescription}
+        size="lg"
+        closeLabel={isChinese ? "关闭" : "Close"}
+        closeOnBackdrop={!sessionDeleteBusy}
+        closeOnEscape={!sessionDeleteBusy}
+        showCloseButton={!sessionDeleteBusy}
+        className="cx-session-delete-dialog"
+        bodyClassName="cx-session-delete-modal-body"
+        footer={(
+          <>
+            <Button variant="secondary" onClick={onCloseDeleteConfirm} disabled={sessionDeleteBusy} data-initial-focus>
+              {copy.cancel}
+            </Button>
+            <Button
+              variant="danger"
+              className="cx-session-delete-confirm"
+              icon={sessionDeleteBusy ? <Loader2 size={16} className="cx-session-spin" aria-hidden="true" /> : <Trash2 size={16} aria-hidden="true" />}
+              onClick={onDeleteSelectedSessions}
+              disabled={sessionDeleteBusy || !sessionDeleteSafetyConfirmed}
+            >
+              {sessionDeleteBusy ? copy.deleting : copy.confirmDelete(selectedSessions.length)}
+            </Button>
+          </>
+        )}
+      >
+        <div className="cx-session-delete-warning">
+          <AlertCircle size={19} strokeWidth={1.9} aria-hidden="true" />
           <div>
-            <p className="eyebrow">{lang === "zh" ? "会话同步" : "Session sync"}</p>
-            <h3>{lang === "zh" ? "会话管理" : "Session management"}</h3>
-            <p className="muted-desc">
-              {lang === "zh"
-                ? "检查本地会话是否跟当前供应商一致，需要时一键同步。不会修改聊天内容。"
-                : "Check whether local sessions match the current provider and sync them with one click when needed. Chat content is not changed."}
-            </p>
-          </div>
-          <div className="provider-title-actions session-title-actions">
-            <span className="session-provider-chip">
-              {lang === "zh" ? "同步到" : "Sync to"}: {sessionTargetLabel}
-            </span>
-            <button className="secondary-btn add-provider-btn lively-btn" onClick={onCheckSessions} disabled={loading}>
-              {actionBusy === "checkSessions" ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />} {actionBusy === "checkSessions" ? (lang === "zh" ? "检查中..." : "Checking...") : (lang === "zh" ? "检查会话" : "Check")}
-            </button>
-            <button className="primary-btn add-provider-btn lively-btn" onClick={onSyncSessions} disabled={loading || !sessionHasMismatches}>
-              {actionBusy === "syncSessions" ? <Loader2 size={18} className="spin" /> : <Zap size={18} />} {actionBusy === "syncSessions" ? (lang === "zh" ? "同步中..." : "Syncing...") : (lang === "zh" ? "同步会话" : "Sync sessions")}
-            </button>
+            <strong>{copy.irreversible}</strong>
+            <p>{copy.deleteChildren}</p>
+            <p>{copy.closeClients}</p>
           </div>
         </div>
 
-        <div className={cx("session-compact-summary", sessionHasMismatches ? "needs-sync" : "synced")}>
-          <span className="session-summary-status">
-            {!sessionStatus
-              ? <Info size={15} />
-              : sessionHasMismatches
-                ? <AlertCircle size={15} />
-                : <CheckCircle2 size={15} />}
-            {!sessionStatus
-              ? (lang === "zh" ? "点击检查会话" : "Check sessions to get started")
-              : sessionHasMismatches
-                ? (lang === "zh" ? `有 ${sessionSyncCount} 条会话需要同步` : `${sessionSyncCount} session(s) need syncing`)
-                : (lang === "zh" ? "全部会话已同步" : "All sessions are synced")}
-          </span>
-          <span>{lang === "zh" ? `${sessionStatus?.topLevelThreads ?? 0} 条会话` : `${sessionStatus?.topLevelThreads ?? 0} sessions`}</span>
-        </div>
-
-        <div className="session-list-card">
-          <div className="session-list-head session-list-head-rich">
-            <div>
-              <p className="eyebrow">{lang === "zh" ? "本地会话" : "Local threads"}</p>
-              <h4>{lang === "zh" ? "会话列表" : "Sessions"}</h4>
+        <div className="cx-session-delete-list" aria-label={copy.pendingDelete}>
+          {selectedSessions.slice(0, 8).map((item) => (
+            <div className="cx-session-delete-item" key={item.id}>
+              <strong title={item.title}>{item.title || (isChinese ? "未命名会话" : "Untitled session")}</strong>
+              <code>#{shortId(item.id)}</code>
+              <span title={item.cwd || item.rolloutPath || undefined}>
+                {compactPath(item.cwd || item.rolloutPath, 72, isChinese ? "未记录路径" : "No path recorded")}
+              </span>
             </div>
-            <span title={sessionPreviewTruncated ? (lang === "zh" ? `当前加载 ${visibleSessions.length} 条` : `${visibleSessions.length} loaded`) : undefined}>
-              {lang === "zh" ? `展示 ${filteredSessions.length} / ${sessionVisibleTotal} 条` : `${filteredSessions.length} / ${sessionVisibleTotal} shown`}
+          ))}
+          {selectedSessions.length > 8 && <p className="cx-session-delete-more">{copy.moreSessions(selectedSessions.length - 8)}</p>}
+        </div>
+
+        <Checkbox
+          className="cx-session-safety-check"
+          checked={sessionDeleteSafetyConfirmed}
+          onCheckedChange={onDeleteSafetyConfirmedChange}
+          disabled={sessionDeleteBusy}
+          label={copy.safetyCheck}
+        />
+      </ModalShell>
+
+      <section className={cx("cx-session-page", !active && "page-pane-hidden")}>
+        <header className="cx-session-header">
+          <div className="cx-session-heading">
+            <p className="cx-session-eyebrow"><RefreshCw size={13} strokeWidth={2} aria-hidden="true" />{copy.syncEyebrow}</p>
+            <h2>{copy.title}</h2>
+            <p className="cx-session-description">{copy.description}</p>
+          </div>
+          <div className="cx-session-header-actions">
+            <span className="cx-session-target"><span>{copy.syncTo}</span><strong>{sessionTargetLabel}</strong></span>
+            <button type="button" className="cx-session-button cx-session-button--secondary" onClick={onCheckSessions} disabled={loading} aria-busy={actionBusy === "checkSessions"}>
+              {actionBusy === "checkSessions" ? <Loader2 size={16} className="cx-session-spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
+              {actionBusy === "checkSessions" ? copy.checking : copy.check}
+            </button>
+            <button type="button" className="cx-session-button cx-session-button--primary" onClick={onSyncSessions} disabled={loading || !sessionHasMismatches} aria-busy={actionBusy === "syncSessions"}>
+              {actionBusy === "syncSessions" ? <Loader2 size={16} className="cx-session-spin" aria-hidden="true" /> : <Zap size={16} aria-hidden="true" />}
+              {actionBusy === "syncSessions" ? copy.syncing : copy.sync}
+            </button>
+          </div>
+        </header>
+
+        <div className={cx("cx-session-summary", sessionHasMismatches ? "cx-session-summary--needs-sync" : "cx-session-summary--synced")}>
+          <span className="cx-session-summary-status">
+            {!sessionStatus ? <Info size={15} aria-hidden="true" /> : sessionHasMismatches ? <AlertCircle size={15} aria-hidden="true" /> : <CheckCircle2 size={15} aria-hidden="true" />}
+            {!sessionStatus ? copy.clickToCheck : sessionHasMismatches ? copy.needsSync(sessionSyncCount) : copy.allSynced}
+          </span>
+          <span className="cx-session-summary-count">{copy.sessionCount(sessionStatus?.topLevelThreads ?? 0)}</span>
+        </div>
+
+        <div className="cx-session-list-card">
+          <div className="cx-session-list-heading">
+            <div>
+              <p className="cx-session-section-label">{copy.local}</p>
+              <h3>{copy.list}</h3>
+            </div>
+            <span
+              className="cx-session-total"
+              title={sessionPreviewTruncated ? copy.loaded(visibleSessions.length) : undefined}
+            >
+              {copy.shown(filteredSessions.length, sessionVisibleTotal)}
             </span>
           </div>
 
-          <div className="session-toolbar">
-            <label className="session-search">
-              <Search size={16} />
+          <div className="cx-session-toolbar">
+            <label className="cx-session-search">
+              <Search size={16} strokeWidth={1.9} aria-hidden="true" />
               <input
                 value={sessionQuery}
                 onChange={(event) => onSessionQueryChange(event.target.value)}
-                placeholder={lang === "zh" ? "搜索标题 / 项目 / 供应商 / ID" : "Search title / project / provider / ID"}
+                placeholder={copy.search}
+                aria-label={copy.search}
               />
             </label>
-            <label className="session-toggle">
-              <input type="checkbox" checked={sessionGroupByCwd} onChange={(event) => onSessionGroupByCwdChange(event.target.checked)} />
-              <span>{lang === "zh" ? "按项目路径分组" : "Group by cwd"}</span>
-            </label>
+            <Checkbox
+              className={cx("cx-session-toggle", sessionGroupByCwd && "cx-session-toggle--active")}
+              checked={sessionGroupByCwd}
+              onCheckedChange={onSessionGroupByCwdChange}
+              label={<><FolderTree size={15} strokeWidth={1.9} aria-hidden="true" /><span>{copy.groupByProject}</span></>}
+            />
             {(sessionStatus?.subagentThreads ?? 0) > 0 && (
-              <label className="session-toggle session-internal-toggle">
-                <input
-                  type="checkbox"
-                  checked={showInternalSessions}
-                  onChange={(event) => onShowInternalSessionsChange(event.target.checked)}
-                />
-                <span>{lang === "zh"
-                  ? `显示内部会话 (${sessionStatus?.subagentThreads ?? 0})`
-                  : `Show internal sessions (${sessionStatus?.subagentThreads ?? 0})`}</span>
-              </label>
+              <Checkbox
+                className={cx("cx-session-toggle", showInternalSessions && "cx-session-toggle--active")}
+                checked={showInternalSessions}
+                onCheckedChange={onShowInternalSessionsChange}
+                label={copy.showInternal(sessionStatus?.subagentThreads ?? 0)}
+              />
             )}
             <button
-              ref={sessionDeleteTriggerRef}
-              className={cx("small session-delete-trigger", selectedSessionIds.length > 0 ? "danger-btn active" : "secondary-btn")}
+              type="button"
+              className={cx("cx-session-button cx-session-delete-trigger", selectedSessionIds.length > 0 ? "cx-session-button--danger" : "cx-session-button--secondary")}
               onClick={onOpenDeleteConfirm}
               disabled={loading || sessionDeleteBusy || selectedSessionIds.length === 0}
-              title={selectedSessionIds.length > 0 ? undefined : (lang === "zh" ? "先勾选要删除的会话" : "Select sessions to delete")}
+              title={selectedSessionIds.length > 0 ? undefined : copy.deleteSelected}
             >
-              <Trash2 size={16} />
-              {selectedSessionIds.length > 0
-                ? (lang === "zh" ? `永久删除 ${selectedSessionIds.length} 条` : `Delete ${selectedSessionIds.length} permanently`)
-                : (lang === "zh" ? "删除选中" : "Delete selected")}
+              <Trash2 size={15} strokeWidth={1.9} aria-hidden="true" />
+              {selectedSessionIds.length > 0 ? copy.deleteMany(selectedSessionIds.length) : copy.deleteSelected}
             </button>
           </div>
 
-          {filteredSessions.length ? (
-            <div className="session-list enhanced-session-list">
-              <div className="session-column-head">
-                <span aria-hidden="true" />
-                <span>{lang === "zh" ? "会话" : "Session"}</span>
-                <span>{lang === "zh" ? "更新时间" : "Updated"}</span>
-                <span>{lang === "zh" ? "供应商" : "Provider"}</span>
-                <span>{lang === "zh" ? "模型" : "Model"}</span>
+          {filteredSessions.length > 0 ? (
+            <div className="cx-session-scroll" role="table" aria-label={copy.list}>
+              <div className="cx-session-column-head" role="row">
+                <Checkbox
+                  className="cx-session-select-all"
+                  checked={allVisibleSelected}
+                  indeterminate={visibleSelectionIsPartial}
+                  onCheckedChange={(checked) => onSetSessionGroupSelected(filteredSessions, checked)}
+                  aria-label={copy.selectAll}
+                  disabled={loading || sessionDeleteBusy}
+                />
+                <span>{isChinese ? "会话" : "Session"}</span>
+                <span>{isChinese ? "更新时间" : "Updated"}</span>
+                <span>{isChinese ? "供应商" : "Provider"}</span>
+                <span>{isChinese ? "模型" : "Model"}</span>
                 <span>ID</span>
               </div>
-              {groupedSessions.map(([group, items]) => {
-                const showGroupHeader = sessionGroupByCwd;
-                const projectSessions = allSessionsByCwd.get(group) || items;
-                const selectedProjectCount = projectSessions.filter((item) => selectedSessionSet.has(item.id)).length;
-                const projectSelected = selectedProjectCount === projectSessions.length;
-                const projectPartiallySelected = selectedProjectCount > 0 && !projectSelected;
-                const groupCountLabel = items.length === projectSessions.length
-                  ? (lang === "zh" ? `${sessionPreviewTruncated ? "已加载 " : ""}${projectSessions.length} 条` : `${projectSessions.length}${sessionPreviewTruncated ? " loaded" : ""}`)
-                  : (lang === "zh" ? `显示 ${items.length} / 共 ${projectSessions.length} 条` : `${items.length} / ${projectSessions.length} shown`);
-                return (
-                  <div className="session-group" key={group}>
-                    {showGroupHeader && (
-                      <label className={cx("session-group-title", projectSelected && "selected", projectPartiallySelected && "partial")}>
-                        <input
-                          className="session-checkbox"
-                          type="checkbox"
-                          ref={(input) => {
-                            if (input) input.indeterminate = projectPartiallySelected;
-                          }}
-                          checked={projectSelected}
-                          onChange={(event) => onSetSessionGroupSelected(projectSessions, event.target.checked)}
-                          aria-label={lang === "zh" ? `选择当前列表中项目 ${group} 的 ${projectSessions.length} 条会话` : `Select ${projectSessions.length} loaded sessions in project ${group}`}
-                        />
-                        <span title={group}>{compactPath(group, 96)}</span>
-                        <em>{groupCountLabel}</em>
-                      </label>
-                    )}
-                    {items.map((item) => (
-                      <label
-                        className={cx("session-row", item.needsSync && "needs-sync", selectedSessionSet.has(item.id) && "selected")}
-                        key={item.id}
-                      >
-                        <span className="session-select-box" title={lang === "zh" ? "选择这个会话" : "Select this session"}>
+              <div className="cx-session-table-body">
+                {groupedSessions.map(([group, items]) => {
+                  const projectSessions = allSessionsByCwd.get(group) || items;
+                  const selectedProjectCount = projectSessions.filter((item) => selectedSessionSet.has(item.id)).length;
+                  const projectSelected = projectSessions.length > 0 && selectedProjectCount === projectSessions.length;
+                  const projectPartiallySelected = selectedProjectCount > 0 && !projectSelected;
+                  const groupCountLabel = items.length === projectSessions.length
+                    ? copy.projectCount(projectSessions.length, sessionPreviewTruncated)
+                    : copy.projectShown(items.length, projectSessions.length);
+                  return (
+                    <div className="cx-session-group" key={group}>
+                      {sessionGroupByCwd && (
+                        <label className={cx("cx-session-group-heading", projectSelected && "cx-session-group-heading--selected", projectPartiallySelected && "cx-session-group-heading--partial")}>
                           <input
-                            className="session-checkbox"
+                            className="cx-session-checkbox"
                             type="checkbox"
-                            checked={selectedSessionSet.has(item.id)}
-                            onChange={() => onToggleSessionSelected(item.id)}
-                            aria-label={`${lang === "zh" ? "选择会话" : "Select session"}: ${item.title} (#${shortId(item.id)})`}
+                            ref={(input) => {
+                              if (input) input.indeterminate = projectPartiallySelected;
+                            }}
+                            checked={projectSelected}
+                            onChange={(event) => onSetSessionGroupSelected(projectSessions, event.target.checked)}
+                            aria-label={copy.selectProject(group, projectSessions.length)}
                           />
-                        </span>
-                        <div className="session-row-text">
-                          <div className="session-row-title">
-                            <strong>{item.title}</strong>
-                            {item.archived && <span className="session-state-text">{lang === "zh" ? "已归档" : "Archived"}</span>}
-                            {item.isSubagent && <span className="mini-tag">{lang === "zh" ? "内部" : "Internal"}</span>}
-                            {item.needsSync && (
-                              <span className="session-state-text warn">
-                                {lang === "zh" ? "待同步" : "Needs sync"}
-                              </span>
-                            )}
+                          <span title={group}>{compactPath(group, 96, isChinese ? "未记录路径" : "No path recorded")}</span>
+                          <em>{groupCountLabel}</em>
+                        </label>
+                      )}
+                      {items.map((item) => (
+                        <label className={cx("cx-session-row", item.needsSync && "cx-session-row--needs-sync", selectedSessionSet.has(item.id) && "cx-session-row--selected")} key={item.id}>
+                          <span className="cx-session-select-box" title={copy.selectSession}>
+                            <input
+                              className="cx-session-checkbox"
+                              type="checkbox"
+                              checked={selectedSessionSet.has(item.id)}
+                              onChange={() => onToggleSessionSelected(item.id)}
+                              aria-label={`${copy.selectSession}: ${item.title || (isChinese ? "未命名会话" : "Untitled session")} (#${shortId(item.id)})`}
+                            />
+                          </span>
+                          <div className="cx-session-row-copy">
+                            <div className="cx-session-row-title">
+                              <strong title={item.title}>{item.title || (isChinese ? "未命名会话" : "Untitled session")}</strong>
+                              {item.archived && <span className="cx-session-state">{copy.archived}</span>}
+                              {item.isSubagent && <span className="cx-session-state">{copy.internal}</span>}
+                              {item.needsSync && <span className="cx-session-state cx-session-state--warn">{copy.pending}</span>}
+                            </div>
+                            {!sessionGroupByCwd && <p title={item.cwd || item.rolloutPath || undefined}>{compactPath(item.cwd || item.rolloutPath, 72, isChinese ? "未记录路径" : "No path recorded")}</p>}
                           </div>
-                          {!showGroupHeader && <p title={item.cwd || item.rolloutPath || undefined}>{compactPath(item.cwd || item.rolloutPath, 72)}</p>}
-                        </div>
-                        <span className="session-meta-time" title={item.updatedAtMs ? new Date(item.updatedAtMs).toLocaleString() : undefined}>{formatSessionTime(item.updatedAtMs)}</span>
-                        <code className="session-meta-provider" title={item.modelProvider || undefined}>
-                          {item.modelProvider || "unknown"}
-                        </code>
-                        <span className="session-meta-model" title={item.model || undefined}>{item.model || "-"}</span>
-                        <small className="session-meta-id" title={item.id}>#{shortId(item.id)}</small>
-                      </label>
-                    ))}
-                  </div>
-                );
-              })}
+                          <span className="cx-session-meta cx-session-meta--time" title={item.updatedAtMs ? new Date(item.updatedAtMs).toLocaleString() : undefined}>{formatSessionTime(item.updatedAtMs, lang)}</span>
+                          <code className="cx-session-meta cx-session-meta--provider" title={item.modelProvider || undefined}>{item.modelProvider || copy.unknownProvider}</code>
+                          <span className="cx-session-meta cx-session-meta--model" title={item.model || undefined}>{item.model || copy.noModel}</span>
+                          <small className="cx-session-meta cx-session-meta--id" title={item.id}>#{shortId(item.id)}</small>
+                        </label>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           ) : (
-            <div className="session-empty">
-              <History size={22} />
-              <span>{sessionQuery ? (lang === "zh" ? "没有匹配的会话。" : "No matching sessions.") : (lang === "zh" ? "还没有读取到会话。点击右上角“检查会话”刷新。" : "No sessions loaded. Click Check to refresh.")}</span>
+            <div className="cx-session-empty">
+              <History size={22} strokeWidth={1.7} aria-hidden="true" />
+              <span>{sessionQuery ? copy.noMatch : copy.noSessions}</span>
             </div>
           )}
         </div>
 
         {sessionStatus?.warnings?.length ? (
-          <details className="session-warning-list session-scan-warnings">
+          <details className="cx-session-diagnostics">
             <summary>
-              <Info size={15} />
-              <span>{lang === "zh" ? "诊断信息" : "Diagnostics"}</span>
-              <small>{lang === "zh" ? `${sessionStatus.warnings.length} 条 · 点击查看` : `${sessionStatus.warnings.length} · click to view`}</small>
+              <AlertCircle size={15} strokeWidth={1.9} aria-hidden="true" />
+              <span>{copy.diagnostics}</span>
+              <small>{copy.diagnosticsCount(sessionStatus.warnings.length)}</small>
             </summary>
-            <div className="session-warning-items">
-              {sessionStatus.warnings.map((item, index) => <p key={index}><Info size={15} /> {item}</p>)}
+            <div className="cx-session-diagnostic-items">
+              {sessionStatus.warnings.map((item, index) => <p key={`${index}-${item}`}><Info size={14} aria-hidden="true" />{item}</p>)}
             </div>
           </details>
         ) : null}

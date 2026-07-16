@@ -1,6 +1,6 @@
 use crate::constants::AGENTS_FILENAME;
 use crate::error::Result;
-use crate::file_io::{io_err, write_json};
+use crate::file_io::{ensure_directory, io_err, write_json};
 use crate::paths::app_home;
 use crate::prompts::agents_path;
 use crate::{auth_path, config_path};
@@ -73,7 +73,7 @@ pub(crate) fn create_backup(codex_dir: &Path, action: &str) -> Result<Option<Str
         action
     );
     let dir = action_backup_root(codex_dir)?.join(&id);
-    fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
+    ensure_directory(&dir)?;
 
     if had_config {
         fs::copy(&cfg, dir.join("config.toml")).map_err(|e| io_err(&cfg, e))?;

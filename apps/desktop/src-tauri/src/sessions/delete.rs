@@ -312,10 +312,8 @@ fn active_session_storage_snapshot(
             .extend(sqlite_subagent_thread_ids(&conn, &cols)?);
 
         if cols.contains("model_provider") {
-            let has_user_event_col = sql_select_column(&cols, "has_user_event", "NULL");
             let cwd_col = sql_select_column(&cols, "cwd", "NULL");
-            let query =
-                format!("SELECT id, model_provider, {has_user_event_col}, {cwd_col} FROM threads");
+            let query = format!("SELECT id, model_provider, {cwd_col} FROM threads");
             let mut mismatch_stmt = conn
                 .prepare(&query)
                 .map_err(|error| CodexxError::Database(error.to_string()))?;
@@ -324,13 +322,12 @@ fn active_session_storage_snapshot(
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(2)?,
                     ))
                 })
                 .map_err(|error| CodexxError::Database(error.to_string()))?;
             for row in mismatches {
-                let (id, provider, has_user_event, cwd) =
+                let (id, provider, cwd) =
                     row.map_err(|error| CodexxError::Database(error.to_string()))?;
                 if sqlite_thread_needs_alignment(
                     &rollouts,
@@ -338,9 +335,7 @@ fn active_session_storage_snapshot(
                     &SqliteThreadIndexState {
                         thread_id: &id,
                         provider: provider.as_deref(),
-                        has_user_event,
                         cwd: cwd.as_deref(),
-                        has_user_event_column: cols.contains("has_user_event"),
                         cwd_column: cols.contains("cwd"),
                     },
                 ) {

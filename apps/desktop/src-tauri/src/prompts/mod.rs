@@ -20,7 +20,8 @@ pub(crate) use types::{BuiltinPromptStatus, SavedPrompt};
 #[cfg(test)]
 pub(crate) use catalog::{
     cached_prompt_fallback_statuses, delete_cached_prompt_ids, github_prompt_catalog_from_entries,
-    stable_remote_prompt_id, stale_cached_prompt_ids,
+    jsdelivr_prompt_catalog_from_entries, prompt_content_source_urls, stable_remote_prompt_id,
+    stale_cached_prompt_ids,
 };
 #[cfg(test)]
 pub(crate) use managed_agents::managed_agents_template_key_from_content;

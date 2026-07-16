@@ -133,7 +133,7 @@ You can use it to:
   </tr>
   <tr>
     <td align="center">📦 <b>Use it across platforms</b></td>
-    <td align="left">Available for macOS Apple Silicon / Intel, Windows installer / portable, and Linux packages. Check GitHub Releases from inside the app and open the download page when a new version is available.</td>
+    <td align="left">Available for macOS Apple Silicon / Intel, Windows MSI / portable, and Linux packages. Installed editions can download, verify, and install updates in the app; the portable edition keeps manual downloads.</td>
   </tr>
 </table>
 </div>
@@ -144,14 +144,14 @@ You can use it to:
 
 <p align="center">
   <img src="https://img.shields.io/badge/Template_library-5_total-2563eb?style=flat-square" alt="5 templates in the current library" />
-  <img src="https://img.shields.io/badge/Bundled_offline-3_templates-16a34a?style=flat-square" alt="3 templates bundled for offline use" />
+  <img src="https://img.shields.io/badge/Bundled_offline-5_templates-16a34a?style=flat-square" alt="5 templates bundled for offline use" />
   <img src="https://img.shields.io/badge/GitHub_sync-Automatic_updates-f59e0b?style=flat-square" alt="Automatic GitHub template sync" />
 </p>
 
 > [!TIP]
 > **Ready after installation, automatically expanded when online.**
 >
-> The app bundle includes 3 baseline templates for offline use. Opening the **Prompt** page automatically syncs 2 additional templates from GitHub `examples/`, bringing the current total to 5. Once a remote template has synced successfully, it is cached locally and remains available during temporary network outages.
+> The app bundle includes all 5 current templates for offline use. After launch, it synchronizes updates and newly added templates from GitHub `examples/` in the background, without waiting for the **Prompt** page to open. Successfully synchronized online versions are cached locally and remain available during temporary network outages.
 
 <div align="center">
 <table>
@@ -178,12 +178,12 @@ You can use it to:
   <tr>
     <td><a href="examples/gpt-5.6-sol-unrestricted.md"><code>gpt-5.6-sol-unrestricted.md</code></a></td>
     <td align="left">A GPT-5.6 SOL prompt focused on direct execution and bilingual tasks</td>
-    <td align="center">GitHub sync</td>
+    <td align="center">Bundled offline<br />GitHub updates</td>
   </tr>
   <tr>
     <td><a href="examples/%E6%B5%B7%E9%B8%A53.0%E7%A0%B4%E7%94%B2.md"><code>海鸥3.0破甲.md</code></a></td>
     <td align="left">A Chinese technical-operator persona with routing for coding, CTF, reverse engineering, memory, and protocol work</td>
-    <td align="center">GitHub sync</td>
+    <td align="center">Bundled offline<br />GitHub updates</td>
   </tr>
 </table>
 </div>
@@ -312,9 +312,9 @@ Manage Codex capability extensions from the **Skills & MCP** page instead of sea
 - macOS Intel `.dmg`
 - Windows `.msi`
 - Windows Portable `.zip`
-- Linux `.deb` / `.rpm`
+- Linux `.deb` / `.rpm` / `.AppImage`
 - Automatic GitHub Releases builds
-- In-app update checking
+- In-app updates for installed editions; manual updates for Windows Portable
 
 ## Tech Stack
 

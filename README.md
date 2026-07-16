@@ -133,7 +133,7 @@
   </tr>
   <tr>
     <td align="center">📦 <b>跨平台使用</b></td>
-    <td align="left">提供 macOS Apple Silicon / Intel、Windows 安装版 / 便携版和 Linux 安装包；应用内可检查 GitHub Releases 新版本并打开下载页。</td>
+    <td align="left">提供 macOS Apple Silicon / Intel、Windows MSI / 便携版和 Linux 安装包；安装版可在应用内直接下载、校验并安装更新，便携版继续使用手动下载。</td>
   </tr>
 </table>
 </div>
@@ -144,14 +144,14 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/当前模板库-5_套-2563eb?style=flat-square" alt="当前模板库 5 套" />
-  <img src="https://img.shields.io/badge/离线内置-3_套-16a34a?style=flat-square" alt="离线内置 3 套" />
+  <img src="https://img.shields.io/badge/离线内置-5_套-16a34a?style=flat-square" alt="离线内置 5 套" />
   <img src="https://img.shields.io/badge/GitHub_同步-自动更新-f59e0b?style=flat-square" alt="GitHub 自动同步" />
 </p>
 
 > [!TIP]
 > **安装后就能用，联网后自动补齐。**
 >
-> 安装包离线自带 3 套基础模板；打开【指令提示词】页面后，会从 GitHub `examples/` 自动同步新增模板。当前共 5 套，远程模板成功同步一次后会缓存到本地，临时离线仍可继续使用。
+> 安装包离线自带当前全部 5 套模板；软件启动后会在后台自动同步 GitHub `examples/` 的更新和新增模板，无需先打开【指令提示词】页面。同步成功的在线版本会缓存到本地，临时离线仍可继续使用。
 
 <div align="center">
 <table>
@@ -178,12 +178,12 @@
   <tr>
     <td><a href="examples/gpt-5.6-sol-unrestricted.md"><code>gpt-5.6-sol-unrestricted.md</code></a></td>
     <td align="left">gpt5.6-sol 破甲提示词，偏直接执行与中英文任务</td>
-    <td align="center">GitHub 同步</td>
+    <td align="center">离线内置<br />GitHub 更新</td>
   </tr>
   <tr>
     <td><a href="examples/%E6%B5%B7%E9%B8%A53.0%E7%A0%B4%E7%94%B2.md"><code>海鸥3.0破甲.md</code></a></td>
     <td align="left">中文技术操作员人格，覆盖 coding、CTF、逆向、内存与协议任务路由</td>
-    <td align="center">GitHub 同步</td>
+    <td align="center">离线内置<br />GitHub 更新</td>
   </tr>
 </table>
 </div>
@@ -312,9 +312,9 @@
 - macOS Intel `.dmg`
 - Windows `.msi`
 - Windows Portable `.zip`
-- Linux `.deb` / `.rpm`
+- Linux `.deb` / `.rpm` / `.AppImage`
 - GitHub Releases 自动构建发布
-- 应用内检查更新
+- 安装版支持应用内自动更新，Windows 便携版保留手动更新
 
 ## 技术栈
 

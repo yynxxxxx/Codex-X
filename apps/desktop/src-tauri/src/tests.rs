@@ -10,6 +10,117 @@ fn temp_codex_dir(name: &str) -> PathBuf {
     dir
 }
 
+#[test]
+fn codex_dir_input_expands_home_and_removes_matching_quotes() {
+    assert_eq!(
+        codex_dir_from_text("~/.codex-custom").expect("expand home"),
+        Some(home_dir().expect("home directory").join(".codex-custom"))
+    );
+    assert_eq!(
+        codex_dir_from_text(r#""C:\Users\Test User\.codex""#).expect("remove quotes"),
+        Some(PathBuf::from(r"C:\Users\Test User\.codex"))
+    );
+    assert_eq!(codex_dir_from_text("   ").expect("empty path"), None);
+    assert_eq!(
+        codex_dir_from_text("\"\"").expect("quoted empty path"),
+        None
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_file_link_codex_home_is_followed_again_after_target_switch() {
+    use std::os::windows::fs::symlink_file;
+
+    let root = temp_codex_dir("windows-file-link-codex-home");
+    let first = root.join("目标一");
+    let second = root.join("目标二");
+    let link = root.join(".codex");
+    fs::create_dir(&first).expect("create first target");
+    fs::create_dir(&second).expect("create second target");
+    match symlink_file(&first, &link) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(1314) => {
+            fs::remove_dir_all(root).expect("remove test directory");
+            return;
+        }
+        Err(error) => panic!("create file link: {error}"),
+    }
+
+    enable_prompt_content_inner(
+        Some(link.display().to_string()),
+        INSTRUCTION_FILENAME,
+        "first target prompt",
+        "builtin:gpt5.5-unrestricted",
+        "managed",
+        "test",
+        PromptInjectionMode::Replace,
+        "test-windows-file-link-first",
+    )
+    .expect("enable through first file link target");
+    assert_eq!(
+        fs::read_to_string(first.join(INSTRUCTION_FILENAME)).expect("read first target prompt"),
+        "first target prompt"
+    );
+
+    fs::remove_file(&link).expect("remove first file link");
+    symlink_file(&second, &link).expect("create second file link");
+    enable_prompt_content_inner(
+        Some(link.display().to_string()),
+        INSTRUCTION_FILENAME,
+        "second target prompt",
+        "builtin:gpt5.5-unrestricted",
+        "managed",
+        "test",
+        PromptInjectionMode::Replace,
+        "test-windows-file-link-second",
+    )
+    .expect("enable through second file link target");
+    assert_eq!(
+        fs::read_to_string(second.join(INSTRUCTION_FILENAME)).expect("read second target prompt"),
+        "second target prompt"
+    );
+
+    fs::remove_file(&link).expect("remove second file link");
+    symlink_file(PathBuf::from("目标一"), &link).expect("create relative file link");
+    assert_eq!(
+        resolve_codex_dir(Some(link.display().to_string())).expect("resolve relative target"),
+        first
+    );
+    fs::remove_file(&link).expect("remove relative file link");
+
+    symlink_file(root.join("missing-target"), &link).expect("create broken file link");
+    let missing_error = resolve_codex_dir(Some(link.display().to_string()))
+        .expect_err("reject missing file-link target");
+    assert!(missing_error.to_string().contains("目标不存在"));
+    assert!(fs::symlink_metadata(&link).is_ok());
+    fs::remove_file(&link).expect("remove broken file link");
+
+    let file_target = root.join("not-a-directory");
+    fs::write(&file_target, "keep").expect("create file target");
+    symlink_file(&file_target, &link).expect("create file link to file");
+    let file_error = resolve_codex_dir(Some(link.display().to_string()))
+        .expect_err("reject non-directory file-link target");
+    assert!(file_error.to_string().contains("不是文件夹"));
+    assert_eq!(
+        fs::read_to_string(&file_target).expect("read file target"),
+        "keep"
+    );
+    fs::remove_file(&link).expect("remove non-directory file link");
+
+    let loop_a = root.join("loop-a");
+    let loop_b = root.join("loop-b");
+    symlink_file(&loop_b, &loop_a).expect("create first loop link");
+    symlink_file(&loop_a, &loop_b).expect("create second loop link");
+    let loop_error =
+        resolve_codex_dir(Some(loop_a.display().to_string())).expect_err("reject file-link loop");
+    assert!(loop_error.to_string().contains("形成了循环"));
+    fs::remove_file(loop_a).expect("remove first loop link");
+    fs::remove_file(loop_b).expect("remove second loop link");
+
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
 fn provider_test_connection() -> Connection {
     let conn = Connection::open_in_memory().expect("open provider test database");
     conn.execute_batch(
@@ -610,6 +721,53 @@ fn github_catalog_rejects_markdown_without_a_download_url() {
 }
 
 #[test]
+fn jsdelivr_catalog_keeps_only_direct_markdown_files() {
+    let catalog = jsdelivr_prompt_catalog_from_entries(vec![
+        "/examples/new prompt.md".to_string(),
+        "/examples/NEW PROMPT.MD".to_string(),
+        "/examples/海鸥模板.md".to_string(),
+        "/examples/nested/ignored.md".to_string(),
+        "/examples/notes.txt".to_string(),
+        "/docs/ignored.md".to_string(),
+    ])
+    .expect("build jsDelivr prompt catalog");
+
+    assert_eq!(catalog.len(), 2);
+    assert!(catalog
+        .iter()
+        .any(|(_, filename)| filename == "new prompt.md"));
+    assert!(catalog
+        .iter()
+        .any(|(_, filename)| filename == "海鸥模板.md"));
+}
+
+#[test]
+fn jsdelivr_catalog_rejects_an_empty_markdown_listing() {
+    let catalog = jsdelivr_prompt_catalog_from_entries(vec![
+        "/examples/readme.txt".to_string(),
+        "/examples/nested/prompt.md".to_string(),
+    ]);
+
+    assert!(catalog.is_err());
+}
+
+#[test]
+fn prompt_download_sources_are_cdn_first_and_encode_the_filename() {
+    let sources = prompt_content_source_urls("模板 1#%.md");
+    let encoded = "%E6%A8%A1%E6%9D%BF%201%23%25%2Emd";
+
+    assert_eq!(sources.len(), 2);
+    assert_eq!(
+        sources[0],
+        format!("https://cdn.jsdelivr.net/gh/yynxxxxx/Codex-X@main/examples/{encoded}")
+    );
+    assert_eq!(
+        sources[1],
+        format!("https://raw.githubusercontent.com/yynxxxxx/Codex-X/main/examples/{encoded}")
+    );
+}
+
+#[test]
 fn empty_cache_fallback_uses_only_bundled_prompts() {
     let statuses = cached_prompt_fallback_statuses(Vec::new());
     let ids = statuses
@@ -621,7 +779,28 @@ fn empty_cache_fallback_uses_only_bundled_prompts() {
     assert_eq!(ids.len(), statuses.len());
     assert!(statuses
         .iter()
-        .all(|status| status.content_source == "bundled" && !status.cached));
+        .all(|status| status.content_source == "bundled"
+            && !status.cached
+            && status.sync_issue.is_none()));
+    let sol = statuses
+        .iter()
+        .find(|status| status.filename == "gpt-5.6-sol-unrestricted.md")
+        .expect("gpt-5.6 SOL is bundled");
+    assert_eq!(sol.id, "github-gpt-5-6-sol-unrestricted-33b86c71");
+    assert_eq!(sol.subtitle, "gpt5.6-sol 破甲提示词");
+    let seagull = statuses
+        .iter()
+        .find(|status| status.filename == "海鸥3.0破甲.md")
+        .expect("Seagull 3.0 is bundled");
+    assert_eq!(seagull.id, "github-3-0-b459e1e8");
+    assert_eq!(
+        stable_remote_prompt_id(&sol.filename),
+        "github-gpt-5-6-sol-unrestricted-33b86c71"
+    );
+    assert_eq!(
+        stable_remote_prompt_id(&seagull.filename),
+        "github-3-0-b459e1e8"
+    );
 }
 
 #[test]
@@ -660,6 +839,11 @@ fn cache_fallback_is_unique_and_keeps_remote_templates_offline() {
         cache("gpt5.5-unrestricted", "gpt5.5-unrestricted.md"),
         cache("gpt5.4-unrestricted", "gpt5.4-unrestricted.md"),
         cache("gpt5.5-jeli", "gpt5.5-jeli.md"),
+        cache(
+            "github-gpt-5-6-sol-unrestricted-33b86c71",
+            "gpt-5.6-sol-unrestricted.md",
+        ),
+        cache("github-3-0-b459e1e8", "海鸥3.0破甲.md"),
         cache("github-new", "new.md"),
         cache("legacy-new", "new.md"),
     ]);
@@ -672,7 +856,7 @@ fn cache_fallback_is_unique_and_keeps_remote_templates_offline() {
         .map(|status| status.filename.to_ascii_lowercase())
         .collect::<HashSet<_>>();
 
-    assert_eq!(statuses.len(), 4);
+    assert_eq!(statuses.len(), bundled_prompt_metas().len() + 1);
     assert_eq!(ids.len(), statuses.len());
     assert_eq!(filenames.len(), statuses.len());
     assert!(statuses.iter().any(|status| status.filename == "new.md"));
@@ -748,7 +932,7 @@ wire_api = "responses"
 
 #[test]
 fn append_mode_preserves_external_prompt_and_disable_removes_only_managed_agents() {
-    let codex_dir = temp_codex_dir("append-prompt");
+    let codex_dir = temp_codex_dir("追加-prompt");
     write_text(
         &config_path(&codex_dir),
         "model = \"gpt-5.5\"\nmodel_instructions_file = \"./user-original.md\"\n",
@@ -778,6 +962,19 @@ fn append_mode_preserves_external_prompt_and_disable_removes_only_managed_agents
     let agents = fs::read_to_string(agents_path(&codex_dir)).expect("read agents");
     assert!(agents.contains("# User AGENTS"));
     assert!(agents.contains("managed prompt"));
+    enable_prompt_content_inner(
+        Some(codex_dir.display().to_string()),
+        INSTRUCTION_FILENAME,
+        "managed prompt",
+        "builtin:gpt5.5-unrestricted",
+        "managed",
+        "test",
+        PromptInjectionMode::Append,
+        "test-append-again",
+    )
+    .expect("enable append again");
+    let agents = fs::read_to_string(agents_path(&codex_dir)).expect("read repeated agents");
+    assert_eq!(agents.matches(AGENTS_MANAGED_BEGIN).count(), 1);
 
     disable_instruction_inner(Some(codex_dir.display().to_string()), Some(true))
         .expect("disable managed append");
@@ -793,7 +990,7 @@ fn append_mode_preserves_external_prompt_and_disable_removes_only_managed_agents
 
 #[test]
 fn replace_mode_keeps_unrelated_agents_content() {
-    let codex_dir = temp_codex_dir("replace-prompt");
+    let codex_dir = temp_codex_dir("替换-prompt");
     write_text(&agents_path(&codex_dir), "# User AGENTS\nkeep this\n").expect("write agents");
 
     let enabled = enable_prompt_content_inner(
@@ -818,6 +1015,21 @@ fn replace_mode_keeps_unrelated_agents_content() {
     assert!(fs::read_to_string(config_path(&codex_dir))
         .expect("read config")
         .contains("model_instructions_file = \"./gpt5.5-unrestricted.md\""));
+    enable_prompt_content_inner(
+        Some(codex_dir.display().to_string()),
+        INSTRUCTION_FILENAME,
+        "updated managed prompt",
+        "builtin:gpt5.5-unrestricted",
+        "managed",
+        "test",
+        PromptInjectionMode::Replace,
+        "test-replace-again",
+    )
+    .expect("enable replace again");
+    assert_eq!(
+        fs::read_to_string(codex_dir.join(INSTRUCTION_FILENAME)).expect("read replaced prompt"),
+        "updated managed prompt"
+    );
     let _ = fs::remove_dir_all(codex_dir);
 }
 
@@ -1453,7 +1665,67 @@ fn provider_sync_rewrites_every_session_meta_and_preserves_item_ids() {
 }
 
 #[test]
-fn provider_sync_updates_every_session_database_and_index_metadata() {
+fn user_event_flag_does_not_make_sessions_need_provider_sync() {
+    let codex_dir = temp_codex_dir("user-event-flag-is-derived");
+    let parent_id = "019f6000-0000-7000-8000-000000000109";
+    let child_id = "019f6000-0000-7000-8000-000000000110";
+    let parent_rollout = codex_dir.join("sessions/rollout-parent-user-event.jsonl");
+    let child_rollout = codex_dir.join("sessions/rollout-child-user-event.jsonl");
+    for (path, id) in [(&parent_rollout, parent_id), (&child_rollout, child_id)] {
+        write_rollout_fixture(
+            path,
+            id,
+            Some("custom"),
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n",
+        );
+    }
+    let database = codex_dir.join("state_5.sqlite");
+    seed_thread_database(
+        &database,
+        &[(parent_id, &parent_rollout), (child_id, &child_rollout)],
+        Some((parent_id, child_id)),
+    );
+    Connection::open(&database)
+        .expect("open session database")
+        .execute_batch(
+            "ALTER TABLE threads ADD COLUMN has_user_event INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE threads ADD COLUMN cwd TEXT;
+             ALTER TABLE threads ADD COLUMN preview TEXT;
+             UPDATE threads
+             SET model_provider = 'custom', cwd = '/tmp/project', preview = 'visible';",
+        )
+        .expect("seed derived user event flags");
+
+    let status = session_sync_status_inner(
+        Some(codex_dir.display().to_string()),
+        Some("custom".to_string()),
+    )
+    .expect("scan matching sessions");
+    assert_eq!(status.top_level_threads, 1);
+    assert_eq!(status.subagent_threads, 1);
+    assert_eq!(status.mismatched_rollouts, 0);
+    assert_eq!(status.mismatched_threads, 0);
+    assert!(!status.needs_sync);
+    assert!(status.sessions.iter().all(|session| !session.needs_sync));
+
+    let result = sync_sessions_provider_inner(
+        Some(codex_dir.display().to_string()),
+        Some("custom".to_string()),
+    )
+    .expect("matching sessions are a no-op");
+    assert_eq!(result.updated_rollouts, 0);
+    assert_eq!(result.updated_threads, 0);
+    assert!(result.backup_dir.is_empty());
+    assert_eq!(
+        sqlite_count(&database, "SELECT SUM(has_user_event) FROM threads"),
+        0
+    );
+
+    let _ = fs::remove_dir_all(codex_dir);
+}
+
+#[test]
+fn provider_sync_updates_provider_and_cwd_without_touching_user_flag() {
     let codex_dir = temp_codex_dir("target-provider-all-dbs");
     let thread_id = "019f6000-0000-7000-8000-000000000111";
     let rollout = codex_dir.join("sessions/rollout-metadata.jsonl");
@@ -1493,7 +1765,7 @@ fn provider_sync_updates_every_session_database_and_index_metadata() {
     )
     .expect("sync all databases");
     assert_eq!(result.updated_rollouts, 1);
-    assert_eq!(result.updated_threads, 6);
+    assert_eq!(result.updated_threads, 4);
     for database in &databases {
         let repaired = Connection::open(database)
             .expect("open repaired sqlite")
@@ -1511,7 +1783,7 @@ fn provider_sync_updates_every_session_database_and_index_metadata() {
             .expect("read repaired metadata");
         assert_eq!(
             repaired,
-            ("custom".to_string(), 1, "/tmp/project".to_string())
+            ("custom".to_string(), 0, "/tmp/project".to_string())
         );
     }
 

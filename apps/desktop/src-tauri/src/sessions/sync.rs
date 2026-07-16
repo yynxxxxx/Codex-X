@@ -10,7 +10,7 @@ use super::transaction::{
 };
 use super::types::{SessionSyncResult, SessionSyncStatus};
 use crate::error::{CodexxError, Result};
-use crate::file_io::io_err;
+use crate::file_io::{ensure_directory, io_err};
 use crate::resolve_codex_dir;
 use std::fs;
 use std::io::Write;
@@ -75,7 +75,7 @@ impl Drop for SessionMaintenanceLock {
 
 pub(super) fn acquire_session_maintenance_lock(codex_dir: &Path) -> Result<SessionMaintenanceLock> {
     let tmp_dir = codex_dir.join("tmp");
-    fs::create_dir_all(&tmp_dir).map_err(|e| io_err(&tmp_dir, e))?;
+    ensure_directory(&tmp_dir)?;
     let legacy_lock = tmp_dir.join("provider-sync.lock");
     if legacy_lock.exists() {
         return Err(CodexxError::Config(format!(
@@ -121,7 +121,7 @@ where
     F: FnMut(MutationPoint) -> Result<()>,
 {
     let codex_dir = resolve_codex_dir(config_dir)?;
-    fs::create_dir_all(&codex_dir).map_err(|error| io_err(&codex_dir, error))?;
+    ensure_directory(&codex_dir)?;
     let target_provider = current_model_provider(&codex_dir, target_provider)?;
     let _maintenance_lock = acquire_session_maintenance_lock(&codex_dir)?;
     let discovery = discover_sqlite_databases(&codex_dir);

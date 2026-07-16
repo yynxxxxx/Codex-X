@@ -14,18 +14,16 @@ use std::time::Duration;
 #[derive(Debug, Default)]
 pub(super) struct SqliteUpdateCounts {
     provider_rows: usize,
-    user_event_rows: usize,
     cwd_rows: usize,
 }
 
 impl SqliteUpdateCounts {
     pub(super) fn total(&self) -> usize {
-        self.provider_rows + self.user_event_rows + self.cwd_rows
+        self.provider_rows + self.cwd_rows
     }
 
     fn add(&mut self, other: Self) {
         self.provider_rows += other.provider_rows;
-        self.user_event_rows += other.user_event_rows;
         self.cwd_rows += other.cwd_rows;
     }
 }
@@ -77,10 +75,8 @@ fn create_sqlite_rollback_table(conn: &Connection) -> Result<()> {
         "CREATE TEMP TABLE codexx_session_rollback (
             id TEXT PRIMARY KEY,
             model_provider TEXT,
-            has_user_event INTEGER,
             cwd TEXT,
             provider_changed INTEGER NOT NULL DEFAULT 0,
-            has_user_event_changed INTEGER NOT NULL DEFAULT 0,
             cwd_changed INTEGER NOT NULL DEFAULT 0
          );",
     )
@@ -192,30 +188,6 @@ fn apply_sqlite_updates(
             )
             .map_err(|error| CodexxError::Database(error.to_string()))?;
 
-        if update.columns.contains("id") && update.columns.contains("has_user_event") {
-            for thread_id in &rollouts.thread_ids_with_user_events {
-                update
-                    .conn
-                    .execute(
-                        "INSERT INTO temp.codexx_session_rollback
-                            (id, has_user_event, has_user_event_changed)
-                         SELECT id, has_user_event, 1 FROM threads
-                         WHERE id = ?1 AND COALESCE(has_user_event, 0) <> 1
-                         ON CONFLICT(id) DO UPDATE SET
-                            has_user_event = excluded.has_user_event,
-                            has_user_event_changed = 1",
-                        [thread_id],
-                    )
-                    .map_err(|error| CodexxError::Database(error.to_string()))?;
-                update.counts.user_event_rows += update
-                    .conn
-                    .execute(
-                        "UPDATE threads SET has_user_event = 1 WHERE id = ?1 AND COALESCE(has_user_event, 0) <> 1",
-                        [thread_id],
-                    )
-                    .map_err(|error| CodexxError::Database(error.to_string()))?;
-            }
-        }
         if update.columns.contains("id") && update.columns.contains("cwd") {
             for (thread_id, cwd) in &rollouts.cwd_by_thread_id {
                 update
@@ -312,20 +284,6 @@ fn restore_sqlite_update(
                 SELECT id FROM temp.codexx_session_rollback WHERE provider_changed = 1
              )",
         ];
-        if update.columns.contains("has_user_event") {
-            statements.push(
-                "UPDATE threads
-                 SET has_user_event = (
-                    SELECT rollback.has_user_event
-                    FROM temp.codexx_session_rollback AS rollback
-                    WHERE rollback.id = threads.id
-                 )
-                 WHERE id IN (
-                    SELECT id FROM temp.codexx_session_rollback
-                    WHERE has_user_event_changed = 1
-                 )",
-            );
-        }
         if update.columns.contains("cwd") {
             statements.push(
                 "UPDATE threads
