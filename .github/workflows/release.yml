@@ -131,7 +131,13 @@ jobs:
               --draft
           fi
 
-          release_id=$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id')
+          release_id=$(gh api "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\") | .id" \
+            | head -n 1)
+          if [ -z "$release_id" ]; then
+            echo "Unable to locate draft release for ${RELEASE_TAG}" >&2
+            exit 1
+          fi
           gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
             --jq '.[].id' | while read -r asset_id; do
               [ -z "$asset_id" ] || gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
