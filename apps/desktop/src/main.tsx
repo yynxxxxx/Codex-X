@@ -1724,34 +1724,6 @@ function App() {
     }
   };
 
-  const applySkinTheme = async () => {
-    setActionBusy("applySkin");
-    setError("");
-    try {
-      const result = await invoke<SkinActionResult>("apply_skin_theme");
-      setSkinCenterState(result.state);
-      setToast(result.message);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setActionBusy("");
-    }
-  };
-
-  const pauseSkinTheme = async () => {
-    setActionBusy("pauseSkin");
-    setError("");
-    try {
-      const result = await invoke<SkinActionResult>("pause_skin_theme");
-      setSkinCenterState(result.state);
-      setToast(result.message);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setActionBusy("");
-    }
-  };
-
   const openImportExistingSkillsMcpPreview = async () => {
     setActionBusy("previewExistingSkillsMcp");
     setError("");
@@ -2316,8 +2288,6 @@ function App() {
                   onImportZip={importSkinThemeZip}
                   onEnableTheme={enableSkinTheme}
                   onExportTheme={exportSkinTheme}
-                  onApplyTheme={applySkinTheme}
-                  onPauseTheme={pauseSkinTheme}
                 />
               </div>
             )}

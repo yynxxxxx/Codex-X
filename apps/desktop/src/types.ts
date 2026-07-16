@@ -254,15 +254,6 @@ export type SkinCenterState = {
   currentThemeId?: string | null;
   currentThemePath?: string | null;
   themes: SkinThemeSummary[];
-  runtime: SkinRuntimeStatus;
-};
-
-export type SkinRuntimeStatus = {
-  supported: boolean;
-  active: boolean;
-  port: number;
-  themeId?: string | null;
-  message: string;
 };
 
 export type SkinActionResult = {
