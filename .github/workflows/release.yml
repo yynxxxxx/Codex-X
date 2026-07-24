@@ -131,9 +131,14 @@ jobs:
               --draft
           fi
 
-          release_id=$(gh api "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\") | .id" \
-            | head -n 1)
+          release_id=""
+          for attempt in {1..10}; do
+            release_id=$(gh release view "$RELEASE_TAG" \
+              --json databaseId \
+              --jq '.databaseId' 2>/dev/null || true)
+            [ -z "$release_id" ] || break
+            sleep 2
+          done
           if [ -z "$release_id" ]; then
             echo "Unable to locate draft release for ${RELEASE_TAG}" >&2
             exit 1
