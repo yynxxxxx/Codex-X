@@ -532,7 +532,7 @@ function ProviderForm({
                 <option value="">{copy.providerPresetPlaceholder}</option>
                 {providerPresets.map((preset) => (
                   <option value={preset.id} key={preset.id}>
-                    {preset.providerName} · {preset.baseUrl}
+                    {preset.providerName} · {preset.model} · {preset.baseUrl}
                   </option>
                 ))}
               </select>

@@ -129,10 +129,34 @@ const blankProviderForm: SavedProvider = {
 
 const providerPresets: readonly ProviderPreset[] = [
   {
-    id: "minimax",
+    id: "minimax-global-m3",
     providerName: "MiniMax",
     baseUrl: "https://api.minimax.io/anthropic",
     model: "MiniMax-M3",
+    wireApi: "anthropic",
+    requiresOpenaiAuth: false,
+  },
+  {
+    id: "minimax-global-m2-7",
+    providerName: "MiniMax",
+    baseUrl: "https://api.minimax.io/anthropic",
+    model: "MiniMax-M2.7",
+    wireApi: "anthropic",
+    requiresOpenaiAuth: false,
+  },
+  {
+    id: "minimax-cn-m3",
+    providerName: "MiniMax",
+    baseUrl: "https://api.minimaxi.com/anthropic",
+    model: "MiniMax-M3",
+    wireApi: "anthropic",
+    requiresOpenaiAuth: false,
+  },
+  {
+    id: "minimax-cn-m2-7",
+    providerName: "MiniMax",
+    baseUrl: "https://api.minimaxi.com/anthropic",
+    model: "MiniMax-M2.7",
     wireApi: "anthropic",
     requiresOpenaiAuth: false,
   },
