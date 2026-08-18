@@ -58,6 +58,15 @@ export type OfficialFormValue = {
   configText: string;
 };
 
+export type ProviderPreset = {
+  id: string;
+  providerName: string;
+  baseUrl: string;
+  model: string;
+  wireApi: string;
+  requiresOpenaiAuth: boolean;
+};
+
 export type ProviderCopy = {
   eyebrow: string;
   title: string;
@@ -110,6 +119,8 @@ export type ProviderCopy = {
   fetchingModelsLabel: string;
   chooseModelLabel: (count: number) => string;
   wireApiLabel: string;
+  providerPresetLabel: string;
+  providerPresetPlaceholder: string;
   requiresAuthLabel: string;
   authPreviewTitle: string;
   authPreviewDescription: string;
@@ -136,6 +147,8 @@ export type ProvidersPageProps = {
   actionBusy?: string;
   editingProviderId: string | null;
   providerForm: ProviderFormValue;
+  providerPresets: readonly ProviderPreset[];
+  onApplyProviderPreset: (preset: ProviderPreset) => void;
   officialForm: OfficialFormValue;
   officialAuthRef?: Ref<HTMLTextAreaElement>;
   officialTomlRef?: Ref<HTMLTextAreaElement>;
@@ -497,6 +510,8 @@ function OfficialForm({
 function ProviderForm({
   copy,
   providerForm,
+  providerPresets,
+  onApplyProviderPreset,
   loading,
   editingProviderId,
   providerAuthPreview,
@@ -517,7 +532,7 @@ function ProviderForm({
   onProviderTomlDraftChange,
   onResetProviderToml,
   onSaveProvider,
-}: Pick<ProvidersPageProps, "copy" | "providerForm" | "loading" | "editingProviderId" | "providerAuthPreview" | "providerTomlDraft" | "providerTomlRef" | "apiKeyVisible" | "availableModels" | "fetchingModels" | "onCancelMode" | "onApiKeyChange" | "onBaseUrlChange" | "onProviderNameChange" | "onProviderModelChange" | "onFetchModels" | "onWireApiChange" | "onRequiresAuthChange" | "onToggleApiKeyVisibility" | "onProviderTomlDraftChange" | "onResetProviderToml" | "onSaveProvider">) {
+}: Pick<ProvidersPageProps, "copy" | "providerForm" | "providerPresets" | "onApplyProviderPreset" | "loading" | "editingProviderId" | "providerAuthPreview" | "providerTomlDraft" | "providerTomlRef" | "apiKeyVisible" | "availableModels" | "fetchingModels" | "onCancelMode" | "onApiKeyChange" | "onBaseUrlChange" | "onProviderNameChange" | "onProviderModelChange" | "onFetchModels" | "onWireApiChange" | "onRequiresAuthChange" | "onToggleApiKeyVisibility" | "onProviderTomlDraftChange" | "onResetProviderToml" | "onSaveProvider">) {
   const modelListId = useId();
   const canFetchModels = Boolean(providerForm.baseUrl.trim() && providerForm.apiKey.trim());
   const formBusy = loading || fetchingModels;
@@ -538,6 +553,24 @@ function ProviderForm({
           <div><h3>{copy.apiConfigTitle}</h3><p>{copy.apiConfigDescription}</p></div>
         </div>
         <div className="cx-providers-form-grid cx-providers-form-grid--provider">
+          {!editingProviderId && providerPresets.length > 0 && (
+            <Field label={copy.providerPresetLabel} className="cx-providers-field--full">
+              <select
+                value=""
+                onChange={(event) => {
+                  const preset = providerPresets.find((item) => item.id === event.target.value);
+                  if (preset) onApplyProviderPreset(preset);
+                }}
+              >
+                <option value="">{copy.providerPresetPlaceholder}</option>
+                {providerPresets.map((preset) => (
+                  <option value={preset.id} key={preset.id}>
+                    {preset.providerName} · {preset.model} · {preset.baseUrl}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
           <Field label={copy.apiKeyLabel} className="cx-providers-field--full">
             <div className="cx-providers-secret-input">
               <input
@@ -601,6 +634,7 @@ function ProviderForm({
             <select value={providerForm.wireApi} onChange={(event) => onWireApiChange(event.target.value)} disabled={formBusy}>
               <option value="responses">responses</option>
               <option value="chat">chat</option>
+              <option value="anthropic">anthropic</option>
             </select>
           </Field>
           <Checkbox

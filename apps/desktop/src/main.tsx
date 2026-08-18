@@ -12,7 +12,7 @@ import { OverviewPage } from "./pages/OverviewPage";
 import { AboutPage, SettingsPage, TomlConfigPage } from "./pages/UtilityPages";
 import { PromptsPage } from "./pages/PromptsPage";
 import { SkillsMcpPage } from "./pages/SkillsMcpPage";
-import { ProvidersPage, type ProviderCopy, type ProviderRow } from "./pages/ProvidersPage";
+import { ProvidersPage, type ProviderCopy, type ProviderPreset, type ProviderRow } from "./pages/ProvidersPage";
 import { AppShell, type AppTab, type AppTheme } from "./components/AppShell";
 import {
   AppToast,
@@ -129,6 +129,41 @@ const blankProviderForm: SavedProvider = {
   requiresOpenaiAuth: false,
 };
 
+const providerPresets: readonly ProviderPreset[] = [
+  {
+    id: "minimax-global-m3",
+    providerName: "MiniMax",
+    baseUrl: "https://api.minimax.io/anthropic",
+    model: "MiniMax-M3",
+    wireApi: "anthropic",
+    requiresOpenaiAuth: false,
+  },
+  {
+    id: "minimax-global-m2-7",
+    providerName: "MiniMax",
+    baseUrl: "https://api.minimax.io/anthropic",
+    model: "MiniMax-M2.7",
+    wireApi: "anthropic",
+    requiresOpenaiAuth: false,
+  },
+  {
+    id: "minimax-cn-m3",
+    providerName: "MiniMax",
+    baseUrl: "https://api.minimaxi.com/anthropic",
+    model: "MiniMax-M3",
+    wireApi: "anthropic",
+    requiresOpenaiAuth: false,
+  },
+  {
+    id: "minimax-cn-m2-7",
+    providerName: "MiniMax",
+    baseUrl: "https://api.minimaxi.com/anthropic",
+    model: "MiniMax-M2.7",
+    wireApi: "anthropic",
+    requiresOpenaiAuth: false,
+  },
+];
+
 const blankPromptForm: SavedPrompt = {
   id: "",
   title: "",
@@ -198,6 +233,8 @@ const dict = {
       baseUrl: "Base URL",
       model: "模型",
       wireApi: "Wire API",
+      preset: "Provider template",
+      presetPlaceholder: "Choose a provider template",
       apiKey: "API Key",
       apiKeyPlaceholder: "用于写入 auth.json",
       requiresAuth: "requires_openai_auth",
@@ -299,6 +336,8 @@ const dict = {
       baseUrl: "Base URL",
       model: "Model",
       wireApi: "Wire API",
+      preset: "Provider template",
+      presetPlaceholder: "Choose a provider template",
       apiKey: "API Key",
       apiKeyPlaceholder: "Written to auth.json",
       requiresAuth: "requires_openai_auth",
@@ -404,6 +443,8 @@ function getProviderPageCopy(lang: Lang): ProviderCopy {
     fetchingModelsLabel: isChinese ? "获取中" : "Fetching",
     chooseModelLabel: (count) => isChinese ? `选择已获取的模型（${count}）` : `Choose a fetched model (${count})`,
     wireApiLabel: t.provider.wireApi,
+    providerPresetLabel: t.provider.preset,
+    providerPresetPlaceholder: t.provider.presetPlaceholder,
     requiresAuthLabel: t.provider.requiresAuth,
     authPreviewTitle: "auth.json (JSON)",
     authPreviewDescription: isChinese
@@ -2214,6 +2255,25 @@ function App() {
     setProviderMode("form");
   };
 
+  const applyProviderPreset = (preset: ProviderPreset) => {
+    resetAvailableProviderModels();
+    setEditingProviderId(null);
+    setEditingDetectedProvider(false);
+    const next: SavedProvider = {
+      ...blankProviderForm,
+      id: customProviderId(preset.providerName),
+      providerName: preset.providerName,
+      baseUrl: preset.baseUrl,
+      model: preset.model,
+      wireApi: preset.wireApi,
+      requiresOpenaiAuth: preset.requiresOpenaiAuth,
+    };
+    setProviderForm(next);
+    setProviderTomlDraft(buildProviderTomlPreview(next));
+    setProviderTomlDirty(false);
+    setProviderMode("form");
+  };
+
   const openEditProvider = (provider: SavedProvider) => {
     resetAvailableProviderModels();
     setEditingProviderId(provider.id);
@@ -2528,6 +2588,8 @@ function App() {
                   wireApi: providerForm.wireApi,
                   requiresOpenaiAuth: providerForm.requiresOpenaiAuth,
                 }}
+                providerPresets={providerPresets}
+                onApplyProviderPreset={applyProviderPreset}
                 officialForm={officialForm}
                 officialAuthRef={officialAuthEditorRef}
                 officialTomlRef={officialTomlEditorRef}
