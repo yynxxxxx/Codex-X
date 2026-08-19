@@ -158,7 +158,7 @@ fn atomic_write_mode(path: &Path) -> Option<u32> {
         .map(|metadata| metadata.permissions().mode() & 0o777)
 }
 
-fn create_atomic_temp(path: &Path, tmp: &Path, private: bool) -> Result<fs::File> {
+fn create_atomic_temp(_path: &Path, tmp: &Path, private: bool) -> Result<fs::File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
 
@@ -166,7 +166,9 @@ fn create_atomic_temp(path: &Path, tmp: &Path, private: bool) -> Result<fs::File
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-        let mode = private.then_some(0o600).or_else(|| atomic_write_mode(path));
+        let mode = private
+            .then_some(0o600)
+            .or_else(|| atomic_write_mode(_path));
         if let Some(mode) = mode {
             options.mode(mode);
             let file = options.open(tmp).map_err(|error| io_err(tmp, error))?;

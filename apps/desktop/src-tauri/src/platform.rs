@@ -1,9 +1,10 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::{mpsc, OnceLock};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,15 +14,27 @@ use std::env;
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_CODEX_PACKAGE_IDENTITIES: &[&str] =
     &["OpenAI.Codex", "OpenAI.CodexBeta", "OpenAI.ChatGPT-Desktop"];
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 const WINDOWS_CODEX_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe", "codex.exe"];
 
+const CODEX_RESTART_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROGRAM_TIMEOUT: Duration = Duration::from_secs(2);
 const PROGRAM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CHILD_TERMINATION_GRACE: Duration = Duration::from_millis(250);
 
 static CODEX_VERSION: OnceLock<String> = OnceLock::new();
+static CODEX_RESTART_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRestartResult {
+    pub success: bool,
+    pub was_running: bool,
+    pub restarted: bool,
+    pub platform: String,
+    pub message: String,
+}
 
 fn version_line(stdout: &str, stderr: &str, success: bool) -> Option<String> {
     let lines = stdout.lines().chain(stderr.lines()).map(str::trim);
@@ -172,8 +185,13 @@ fn receive_output(
     }
 }
 
-fn run_program(program: &Path, args: &[&str], deadline: Option<Instant>) -> Option<Output> {
-    let timeout = remaining_timeout(deadline, PROGRAM_TIMEOUT)?;
+fn run_program_with_timeout(
+    program: &Path,
+    args: &[&str],
+    deadline: Option<Instant>,
+    maximum: Duration,
+) -> Option<Output> {
+    let timeout = remaining_timeout(deadline, maximum)?;
     let command_deadline = Instant::now().checked_add(timeout)?;
     let mut command = program_command(program, args);
     command
@@ -220,6 +238,10 @@ fn run_program(program: &Path, args: &[&str], deadline: Option<Instant>) -> Opti
         stdout,
         stderr,
     })
+}
+
+fn run_program(program: &Path, args: &[&str], deadline: Option<Instant>) -> Option<Output> {
+    run_program_with_timeout(program, args, deadline, PROGRAM_TIMEOUT)
 }
 
 fn command_version(program: &Path, deadline: Option<Instant>) -> Option<String> {
@@ -680,6 +702,295 @@ fn windows_app_version(_deadline: Option<Instant>) -> Option<String> {
     None
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn is_allowed_windows_package_identity(identity: &str) -> bool {
+    WINDOWS_CODEX_PACKAGE_IDENTITIES
+        .iter()
+        .any(|allowed| identity.eq_ignore_ascii_case(allowed))
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[allow(dead_code)]
+fn windows_path_is_within(path: &str, root: &str) -> bool {
+    let path = path.trim().replace('/', "\\").to_ascii_lowercase();
+    let root = root
+        .trim()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+    !root.is_empty()
+        && path
+            .strip_prefix(&root)
+            .is_some_and(|suffix| suffix.starts_with('\\'))
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[allow(dead_code)]
+fn is_safe_windows_desktop_process(
+    executable_name: &str,
+    executable_path: &str,
+    package_locations: &[&str],
+) -> bool {
+    let path_name = executable_path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or_default();
+    WINDOWS_CODEX_EXECUTABLES.iter().any(|allowed| {
+        executable_name.eq_ignore_ascii_case(allowed) && path_name.eq_ignore_ascii_case(allowed)
+    }) && package_locations
+        .iter()
+        .any(|location| windows_path_is_within(executable_path, location))
+}
+
+#[allow(dead_code)]
+fn unsupported_restart_result(platform: &str) -> CodexRestartResult {
+    CodexRestartResult {
+        success: false,
+        was_running: false,
+        restarted: false,
+        platform: platform.to_string(),
+        message: "当前平台暂不支持 Codex Desktop 重启".to_string(),
+    }
+}
+
+fn busy_restart_result(platform: &str) -> CodexRestartResult {
+    CodexRestartResult {
+        success: false,
+        was_running: false,
+        restarted: false,
+        platform: platform.to_string(),
+        message: "Codex 正在重启，请稍后重试".to_string(),
+    }
+}
+
+fn restart_codex_desktop_with(
+    platform: &str,
+    action: impl FnOnce() -> CodexRestartResult,
+) -> CodexRestartResult {
+    let lock = CODEX_RESTART_LOCK.get_or_init(|| Mutex::new(()));
+    let Ok(_guard) = lock.try_lock() else {
+        return busy_restart_result(platform);
+    };
+    action()
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowsRestartOutput {
+    success: bool,
+    was_running: bool,
+    restarted: bool,
+    code: String,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_restart_script() -> String {
+    debug_assert!(WINDOWS_CODEX_PACKAGE_IDENTITIES
+        .iter()
+        .all(|identity| is_allowed_windows_package_identity(identity)));
+    let packages = WINDOWS_CODEX_PACKAGE_IDENTITIES.join("','");
+    let executables = WINDOWS_CODEX_EXECUTABLES.join("','");
+    WINDOWS_RESTART_SCRIPT_TEMPLATE
+        .replace("__PACKAGES__", &packages)
+        .replace("__EXECUTABLES__", &executables)
+}
+
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_RESTART_SCRIPT_TEMPLATE: &str = r#"
+$ErrorActionPreference = 'Stop'
+$allowedPackages = @('__PACKAGES__')
+$allowedExecutables = @('__EXECUTABLES__')
+
+function Write-Result([bool]$success, [bool]$wasRunning, [bool]$restarted, [string]$code) {
+  [pscustomobject]@{
+    success = $success
+    wasRunning = $wasRunning
+    restarted = $restarted
+    code = $code
+  } | ConvertTo-Json -Compress
+}
+
+function Get-SafeDesktopProcesses($packages) {
+  $safe = @()
+  $processes = @(Get-CimInstance Win32_Process | Where-Object { $allowedExecutables -contains $_.Name })
+  foreach ($process in $processes) {
+    $path = [string]$process.ExecutablePath
+    if ([string]::IsNullOrWhiteSpace($path)) { continue }
+    foreach ($package in $packages) {
+      $root = ([string]$package.InstallLocation).TrimEnd('\')
+      if ([string]::IsNullOrWhiteSpace($root)) { continue }
+      if ($path.StartsWith($root + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $safe += [pscustomobject]@{ Process = $process; Package = $package }
+        break
+      }
+    }
+  }
+  return @($safe)
+}
+
+try {
+  $packages = @(Get-AppxPackage | Where-Object { $allowedPackages -contains $_.Name })
+  if ($packages.Count -eq 0) {
+    Write-Result $false $false $false 'package_not_found'
+    exit 0
+  }
+
+  $targets = @(Get-SafeDesktopProcesses $packages)
+  $wasRunning = $targets.Count -gt 0
+  $runningPackageName = if ($wasRunning) { [string]$targets[0].Package.Name } else { $null }
+  $oldPids = @($targets | ForEach-Object { [int]$_.Process.ProcessId })
+
+  $currentSafe = @(Get-SafeDesktopProcesses $packages)
+  foreach ($target in $targets) {
+    $pidValue = [int]$target.Process.ProcessId
+    if (@($currentSafe | Where-Object { [int]$_.Process.ProcessId -eq $pidValue }).Count -eq 0) { continue }
+    $process = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
+    if ($null -ne $process) { [void]$process.CloseMainWindow() }
+  }
+
+  $graceDeadline = [DateTime]::UtcNow.AddSeconds(4)
+  do {
+    $currentSafe = @(Get-SafeDesktopProcesses $packages)
+    $remaining = @($currentSafe | Where-Object { $oldPids -contains [int]$_.Process.ProcessId })
+    if ($remaining.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 150
+  } while ([DateTime]::UtcNow -lt $graceDeadline)
+
+  foreach ($target in $remaining) {
+    Stop-Process -Id ([int]$target.Process.ProcessId) -Force -ErrorAction SilentlyContinue
+  }
+
+  $forceDeadline = [DateTime]::UtcNow.AddSeconds(3)
+  do {
+    $currentSafe = @(Get-SafeDesktopProcesses $packages)
+    $remaining = @($currentSafe | Where-Object { $oldPids -contains [int]$_.Process.ProcessId })
+    if ($remaining.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 150
+  } while ([DateTime]::UtcNow -lt $forceDeadline)
+  if ($remaining.Count -gt 0) {
+    Write-Result $false $wasRunning $false 'close_timeout'
+    exit 0
+  }
+
+  $selected = $null
+  if (-not [string]::IsNullOrWhiteSpace($runningPackageName)) {
+    $selected = $packages | Where-Object { $_.Name -eq $runningPackageName } | Select-Object -First 1
+  }
+  if ($null -eq $selected) {
+    foreach ($identity in $allowedPackages) {
+      $selected = $packages | Where-Object { $_.Name -eq $identity } | Select-Object -First 1
+      if ($null -ne $selected) { break }
+    }
+  }
+  if ($null -eq $selected) {
+    Write-Result $false $wasRunning $false 'package_not_found'
+    exit 0
+  }
+
+  $manifest = Get-AppxPackageManifest -Package $selected
+  $applications = @($manifest.Package.Applications.Application)
+  $application = $applications | Where-Object {
+    $allowedExecutables -contains [System.IO.Path]::GetFileName([string]$_.Executable)
+  } | Select-Object -First 1
+  if ($null -eq $application) { $application = $applications | Select-Object -First 1 }
+  $applicationId = [string]$application.Id
+  $familyName = [string]$selected.PackageFamilyName
+  if ([string]::IsNullOrWhiteSpace($applicationId) -or [string]::IsNullOrWhiteSpace($familyName)) {
+    Write-Result $false $wasRunning $false 'launch_target_missing'
+    exit 0
+  }
+
+  $aumid = 'shell:AppsFolder\' + $familyName + '!' + $applicationId
+  Start-Process -FilePath 'explorer.exe' -ArgumentList $aumid
+
+  $launchDeadline = [DateTime]::UtcNow.AddSeconds(10)
+  $started = $false
+  do {
+    Start-Sleep -Milliseconds 200
+    $started = @(Get-SafeDesktopProcesses @($selected)).Count -gt 0
+    if ($started) { break }
+  } while ([DateTime]::UtcNow -lt $launchDeadline)
+
+  if (-not $started) {
+    Write-Result $false $wasRunning $false 'launch_timeout'
+    exit 0
+  }
+  Write-Result $true $wasRunning $wasRunning 'ok'
+} catch {
+  Write-Result $false $false $false 'operation_failed'
+}
+"#;
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_restart_result_from_output(parsed: Option<WindowsRestartOutput>) -> CodexRestartResult {
+    let Some(parsed) = parsed else {
+        return CodexRestartResult {
+            success: false,
+            was_running: false,
+            restarted: false,
+            platform: "windows".to_string(),
+            message: "Codex 重启失败，无法完成安全的 Desktop 进程检测".to_string(),
+        };
+    };
+    let message = if parsed.success {
+        if parsed.was_running {
+            "Codex 已重新启动"
+        } else {
+            "Codex 已启动"
+        }
+    } else {
+        match parsed.code.as_str() {
+            "package_not_found" => "未找到已安装的 Codex Desktop",
+            "close_timeout" => "Codex Desktop 未能在限定时间内退出",
+            "launch_target_missing" => "未找到可安全启动的 Codex Desktop 应用入口",
+            "launch_timeout" => "Codex Desktop 启动后未在限定时间内出现",
+            _ => "Codex 重启失败，未找到可安全重启的 Codex Desktop",
+        }
+    };
+    CodexRestartResult {
+        success: parsed.success,
+        was_running: parsed.was_running,
+        restarted: parsed.restarted,
+        platform: "windows".to_string(),
+        message: message.to_string(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_restart_result() -> CodexRestartResult {
+    let script = windows_restart_script();
+    let deadline = Instant::now() + CODEX_RESTART_TIMEOUT;
+    let output = run_program_with_timeout(
+        Path::new("powershell.exe"),
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+        Some(deadline),
+        CODEX_RESTART_TIMEOUT,
+    );
+    let parsed = output
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<WindowsRestartOutput>(&output.stdout).ok());
+    windows_restart_result_from_output(parsed)
+}
+
+pub fn restart_codex_desktop() -> CodexRestartResult {
+    let platform = std::env::consts::OS;
+    restart_codex_desktop_with(platform, || {
+        #[cfg(target_os = "windows")]
+        {
+            return windows_restart_result();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            return unsupported_restart_result("macos");
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            unsupported_restart_result(platform)
+        }
+    })
+}
+
 fn path_codex_candidates(deadline: Option<Instant>) -> Vec<PathBuf> {
     let mut candidates = ["codex", "codex.exe", "codex.cmd"]
         .into_iter()
@@ -805,13 +1116,17 @@ pub fn detect_codex_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cached_codex_version, latest_windows_package_version, plist_string_value, run_program,
-        version_line, visit_named_files,
+        cached_codex_version, is_allowed_windows_package_identity, is_safe_windows_desktop_process,
+        latest_windows_package_version, plist_string_value, restart_codex_desktop_with,
+        run_program, unsupported_restart_result, version_line, visit_named_files,
+        windows_restart_result_from_output, windows_restart_script, CodexRestartResult,
+        WindowsRestartOutput,
     };
     use std::fs;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::OnceLock;
+    use std::sync::{mpsc, OnceLock};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -929,6 +1244,120 @@ mod tests {
         )
         .is_none());
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn windows_package_identity_allowlist_is_exact() {
+        for identity in super::WINDOWS_CODEX_PACKAGE_IDENTITIES {
+            assert!(is_allowed_windows_package_identity(identity));
+        }
+        assert!(!is_allowed_windows_package_identity(
+            "OpenAI.Codex.Untrusted"
+        ));
+        assert!(!is_allowed_windows_package_identity("Other.Codex"));
+    }
+
+    #[test]
+    fn arbitrary_windows_package_cannot_be_a_restart_target() {
+        assert!(!is_allowed_windows_package_identity(
+            "Contoso.ChatGPT-Desktop"
+        ));
+        assert!(!is_allowed_windows_package_identity("OpenAI.Codex_Evil"));
+    }
+
+    #[test]
+    fn restart_script_is_built_only_from_the_official_allowlists() {
+        let script = windows_restart_script();
+        for identity in super::WINDOWS_CODEX_PACKAGE_IDENTITIES {
+            assert!(script.contains(identity));
+        }
+        for executable in super::WINDOWS_CODEX_EXECUTABLES {
+            assert!(script.contains(executable));
+        }
+        assert!(!script.contains("Contoso.ChatGPT-Desktop"));
+    }
+
+    #[test]
+    fn desktop_process_matching_rejects_obvious_cli_paths() {
+        let package = r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3.4_x64__publisher";
+        assert!(is_safe_windows_desktop_process(
+            "Codex.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3.4_x64__publisher\app\Codex.exe",
+            &[package],
+        ));
+        assert!(!is_safe_windows_desktop_process(
+            "codex.exe",
+            r"C:\Users\tester\AppData\Roaming\npm\node_modules\@openai\codex\codex.exe",
+            &[package],
+        ));
+        assert!(!is_safe_windows_desktop_process(
+            "codex.exe",
+            r"C:\Tools\codex.exe",
+            &[package],
+        ));
+    }
+
+    #[test]
+    fn restart_result_serializes_with_camel_case_fields() {
+        let value = serde_json::to_value(CodexRestartResult {
+            success: true,
+            was_running: true,
+            restarted: true,
+            platform: "windows".to_string(),
+            message: "Codex 已重新启动".to_string(),
+        })
+        .expect("serialize restart result");
+        assert_eq!(value["wasRunning"], true);
+        assert_eq!(value["restarted"], true);
+        assert!(value.get("was_running").is_none());
+    }
+
+    #[test]
+    fn missing_desktop_returns_a_clear_result_without_panicking() {
+        let result = windows_restart_result_from_output(Some(WindowsRestartOutput {
+            success: false,
+            was_running: false,
+            restarted: false,
+            code: "package_not_found".to_string(),
+        }));
+        assert!(!result.success);
+        assert!(result.message.contains("未找到已安装"));
+    }
+
+    #[test]
+    fn concurrent_restart_requests_do_not_run_together() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first = thread::spawn(move || {
+            restart_codex_desktop_with("test", || {
+                entered_tx.send(()).expect("signal restart entry");
+                release_rx.recv().expect("wait for test release");
+                CodexRestartResult {
+                    success: true,
+                    was_running: true,
+                    restarted: true,
+                    platform: "test".to_string(),
+                    message: "done".to_string(),
+                }
+            })
+        });
+        entered_rx.recv().expect("first restart acquired lock");
+        let second = restart_codex_desktop_with("test", || {
+            panic!("concurrent restart action must not execute")
+        });
+        assert!(!second.success);
+        assert!(second.message.contains("正在重启"));
+        release_tx.send(()).expect("release first restart");
+        assert!(first.join().expect("join first restart").success);
+    }
+
+    #[test]
+    fn unsupported_platform_returns_safely() {
+        let result = unsupported_restart_result("linux");
+        assert!(!result.success);
+        assert_eq!(result.platform, "linux");
+        assert!(!result.was_running);
+        assert!(!result.restarted);
     }
 
     #[test]

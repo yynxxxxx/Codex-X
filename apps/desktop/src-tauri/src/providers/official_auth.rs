@@ -44,15 +44,17 @@ struct OfficialConfigSnapshot {
     config: Option<String>,
     #[serde(default)]
     auth: Option<Value>,
+    #[serde(default)]
+    prevent_history_restore: bool,
 }
 
 enum SnapshotState {
     Missing,
-    Reset(OfficialConfigCandidate),
+    Reset(OfficialConfigCandidate, bool),
     Ready(OfficialConfigCandidate),
 }
 
-fn canonical_identity(path: &Path) -> String {
+pub(crate) fn canonical_codex_identity(path: &Path) -> String {
     fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
@@ -60,7 +62,7 @@ fn canonical_identity(path: &Path) -> String {
 }
 
 pub(crate) fn official_snapshot_path(codex_dir: &Path) -> Result<PathBuf> {
-    let identity = canonical_identity(codex_dir);
+    let identity = canonical_codex_identity(codex_dir);
     let digest = Sha256::digest(identity.as_bytes());
     Ok(app_home()?
         .join("official-configs")
@@ -305,6 +307,7 @@ fn write_snapshot(
     config: Option<String>,
     model: Option<String>,
     auth: Option<Value>,
+    prevent_history_restore: bool,
 ) -> Result<()> {
     let path = official_snapshot_path(codex_dir)?;
     if let Some(parent) = path.parent() {
@@ -312,11 +315,12 @@ fn write_snapshot(
     }
     let snapshot = OfficialConfigSnapshot {
         version: SNAPSHOT_VERSION,
-        codex_dir: canonical_identity(codex_dir),
+        codex_dir: canonical_codex_identity(codex_dir),
         captured_at: Local::now().to_rfc3339(),
         model,
         config,
         auth,
+        prevent_history_restore,
     };
     let value = serde_json::to_value(snapshot)
         .map_err(|error| CodexxError::Config(format!("序列化官方配置快照失败: {error}")))?;
@@ -334,7 +338,7 @@ pub(crate) fn save_official_config_snapshot(
             "官方 auth.json 没有可用认证信息，请先完成官方登录".to_string(),
         ));
     }
-    write_snapshot(codex_dir, config, model, Some(auth.clone()))
+    write_snapshot(codex_dir, config, model, Some(auth.clone()), false)
 }
 
 pub(crate) fn mark_official_config_reset(
@@ -342,7 +346,15 @@ pub(crate) fn mark_official_config_reset(
     config: Option<String>,
     model: Option<String>,
 ) -> Result<()> {
-    write_snapshot(codex_dir, config, model, None)
+    write_snapshot(codex_dir, config, model, None, false)
+}
+
+pub(crate) fn mark_official_config_deleted_reset(
+    codex_dir: &Path,
+    config: Option<String>,
+    model: Option<String>,
+) -> Result<()> {
+    write_snapshot(codex_dir, config, model, None, true)
 }
 
 pub(crate) fn capture_live_official_config_before_provider_switch(
@@ -370,9 +382,10 @@ pub(crate) fn capture_live_official_config_before_provider_switch(
         is_chatgpt_auth(auth) || (has_explicit_official_route && has_openai_api_key(auth))
     });
 
-    let previous = match load_snapshot(codex_dir)? {
-        SnapshotState::Ready(candidate) | SnapshotState::Reset(candidate) => Some(candidate),
-        SnapshotState::Missing => None,
+    let (previous, prevent_history_restore) = match load_snapshot(codex_dir)? {
+        SnapshotState::Ready(candidate) => (Some(candidate), false),
+        SnapshotState::Reset(candidate, blocked) => (Some(candidate), blocked),
+        SnapshotState::Missing => (None, false),
     };
     let config = live_config.or_else(|| {
         previous
@@ -391,7 +404,13 @@ pub(crate) fn capture_live_official_config_before_provider_switch(
     if config.is_none() && auth.is_none() {
         return Ok(false);
     }
-    write_snapshot(codex_dir, config, model, auth)?;
+    write_snapshot(
+        codex_dir,
+        config,
+        model,
+        auth.clone(),
+        prevent_history_restore && auth.is_none(),
+    )?;
     Ok(true)
 }
 
@@ -458,7 +477,7 @@ fn snapshot_state(
     if !matches!(
         snapshot.version,
         SNAPSHOT_VERSION | MODEL_ONLY_SNAPSHOT_VERSION | LEGACY_SNAPSHOT_VERSION
-    ) || snapshot.codex_dir != canonical_identity(codex_dir)
+    ) || snapshot.codex_dir != canonical_codex_identity(codex_dir)
     {
         return Err(CodexxError::Config(format!(
             "官方配置快照与当前 CODEX_HOME 不匹配: {}",
@@ -467,12 +486,15 @@ fn snapshot_state(
     }
     let source = "Codex-X 官方配置快照".to_string();
     let Some(auth) = snapshot.auth else {
-        return Ok(SnapshotState::Reset(OfficialConfigCandidate {
-            auth: None,
-            config_text: snapshot.config,
-            model: snapshot.model,
-            source,
-        }));
+        return Ok(SnapshotState::Reset(
+            OfficialConfigCandidate {
+                auth: None,
+                config_text: snapshot.config,
+                model: snapshot.model,
+                source,
+            },
+            snapshot.prevent_history_restore,
+        ));
     };
     if !auth.is_object() || !auth_value_has_material(&auth) {
         return Err(CodexxError::Config(format!(
@@ -520,7 +542,7 @@ fn latest_official_backup(codex_dir: &Path) -> Result<Option<OfficialConfigCandi
     if !root.is_dir() {
         return Ok(None);
     }
-    let identity = canonical_identity(codex_dir);
+    let identity = canonical_codex_identity(codex_dir);
     let mut candidates = Vec::new();
     for entry in fs::read_dir(&root).map_err(|error| io_err(&root, error))? {
         let entry = entry.map_err(|error| io_err(&root, error))?;
@@ -536,7 +558,7 @@ fn latest_official_backup(codex_dir: &Path) -> Result<Option<OfficialConfigCandi
             continue;
         };
         if !meta.had_auth
-            || canonical_identity(Path::new(&meta.codex_dir)) != identity
+            || canonical_codex_identity(Path::new(&meta.codex_dir)) != identity
             || !backup_config_is_official(&dir, &meta)
         {
             continue;
@@ -664,7 +686,7 @@ pub(crate) fn official_config_candidate(
             }
             return complete_candidate_config(codex_dir, candidate, None).map(Some);
         }
-        SnapshotState::Reset(reset) if !include_history_after_reset => {
+        SnapshotState::Reset(reset, _) if !include_history_after_reset => {
             if let Some(live) = live_official_auth_candidate(codex_dir)? {
                 return complete_candidate_config(codex_dir, live, Some(&reset)).map(Some);
             }
@@ -673,7 +695,10 @@ pub(crate) fn official_config_candidate(
             }
             return complete_candidate_config(codex_dir, reset, None).map(Some);
         }
-        SnapshotState::Reset(reset) => {
+        SnapshotState::Reset(reset, true) => {
+            return complete_candidate_config(codex_dir, reset, None).map(Some);
+        }
+        SnapshotState::Reset(reset, false) => {
             if let Some(live) = live_official_auth_candidate(codex_dir)? {
                 return complete_candidate_config(codex_dir, live, Some(&reset)).map(Some);
             }
@@ -701,10 +726,17 @@ pub(crate) fn official_config_candidate(
         .transpose()
 }
 
+pub(crate) fn official_history_restore_blocked(codex_dir: &Path) -> Result<bool> {
+    Ok(matches!(
+        load_snapshot(codex_dir)?,
+        SnapshotState::Reset(_, true)
+    ))
+}
+
 pub(crate) fn official_auth_available(codex_dir: &Path) -> Result<bool> {
     match load_snapshot(codex_dir)? {
         SnapshotState::Ready(_) => return Ok(true),
-        SnapshotState::Reset(_) => return Ok(live_official_auth_candidate(codex_dir)?.is_some()),
+        SnapshotState::Reset(_, _) => return Ok(live_official_auth_candidate(codex_dir)?.is_some()),
         SnapshotState::Missing => {}
     }
     if live_official_auth_candidate(codex_dir)?.is_some() {
@@ -826,17 +858,19 @@ js_repl = false
 "#;
         let snapshot = OfficialConfigSnapshot {
             version: SNAPSHOT_VERSION,
-            codex_dir: canonical_identity(&codex_dir),
+            codex_dir: canonical_codex_identity(&codex_dir),
             captured_at: "2026-08-11T00:00:00+08:00".to_string(),
             model: Some("official-model".to_string()),
             config: Some(config.to_string()),
             auth: None,
+            prevent_history_restore: false,
         };
 
         let candidate = match snapshot_state(&codex_dir, Path::new("snapshot.json"), snapshot)
             .expect("classify reset snapshot")
         {
-            SnapshotState::Reset(candidate) => candidate,
+            SnapshotState::Reset(candidate, false) => candidate,
+            SnapshotState::Reset(_, true) => panic!("ordinary reset must allow explicit history"),
             SnapshotState::Missing | SnapshotState::Ready(_) => {
                 panic!("v3 auth-less snapshot must remain an explicit reset")
             }

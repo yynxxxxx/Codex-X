@@ -28,11 +28,14 @@ import type {
   AppUpdateInfo,
   BuiltinPromptDetail,
   BuiltinPromptStatus,
+  CodexRestartResult,
   CodexState,
   ImportResult,
   InstructionMode,
   InstructionTemplate,
   Lang,
+  OfficialAccountDraft,
+  OfficialAccountSummary,
   OfficialAuthCandidate,
   OfficialConfigDraft,
   PromptInjectionMode,
@@ -63,6 +66,7 @@ const THEME_KEY = "codexx.theme";
 const STARTUP_WIZARD_SEEN_KEY = "codexx.startupWizardSeen";
 const ACTIVE_PROVIDER_KEY = "codexx.activeProviderId";
 const PROMPT_INJECTION_MODE_KEY = "codexx.promptInjectionMode";
+const AUTO_RESTART_CODEX_KEY = "codexx.autoRestartCodexAfterConfigChange";
 const FALLBACK_GITHUB_REPO = "yynxxxxx/Codex-X";
 
 type ThemeTransitionDocument = Document & {
@@ -349,12 +353,23 @@ function getProviderPageCopy(lang: Lang): ProviderCopy {
     title: t.provider.title,
     subtitle: t.provider.subtitle,
     importLabel: t.provider.importCc,
+    restartCodexLabel: isChinese ? "重启 Codex" : "Restart Codex",
+    restartingCodexLabel: isChinese ? "正在重启..." : "Restarting...",
     addLabel: t.provider.add,
+    addOfficialAccountLabel: isChinese ? "新增官方账号" : "Add official account",
+    saveCurrentOfficialLabel: isChinese ? "保存当前登录" : "Save current login",
+    captureOfficialTitle: isChinese ? "保存当前 OpenAI 登录" : "Save current OpenAI login",
+    captureOfficialDescription: isChinese
+      ? "为当前登录设置一个名称。认证内容只保存在本机，不会显示在账号列表中。"
+      : "Name the current login. Credentials remain on this device and are never shown in the account list.",
+    captureOfficialNameLabel: isChinese ? "账号名称" : "Account name",
+    captureOfficialConfirmLabel: isChinese ? "保存登录" : "Save login",
     noProviders: t.provider.noProviders,
     currentLabel: isChinese ? "当前使用" : "Current",
     enableLabel: isChinese ? "启用" : "Enable",
     testLabel: isChinese ? "测试连接" : "Test connection",
     editLabel: t.provider.edit,
+    copyLabel: isChinese ? "复制供应商" : "Copy provider",
     removeLabel: t.provider.remove,
     deleteTitle: isChinese ? "删除供应商" : "Delete provider",
     deleteDescription: (providerName) => isChinese
@@ -363,6 +378,9 @@ function getProviderPageCopy(lang: Lang): ProviderCopy {
     deleteCurrentDescription: (providerName) => isChinese
       ? `“${providerName}”当前正在使用。删除前会先热切换到 OpenAI Official，确定继续吗？`
       : `“${providerName}” is currently active. Codex-X will hot-switch to OpenAI Official before deleting it. Continue?`,
+    deleteCurrentOfficialDescription: isChinese
+      ? "删除当前官方账号会清除当前 OpenAI 登录状态，需要重新登录或切换其他已保存账号。"
+      : "Deleting the current official account clears the current OpenAI login. You will need to sign in again or switch to another saved account.",
     deleteCancelLabel: isChinese ? "取消" : "Cancel",
     deleteConfirmLabel: isChinese ? "确认删除" : "Delete",
     noBaseUrlLabel: "no base_url",
@@ -400,6 +418,7 @@ function getProviderPageCopy(lang: Lang): ProviderCopy {
     baseUrlLabel: isChinese ? "API 请求地址" : t.provider.baseUrl,
     nameLabel: t.provider.name,
     modelLabel: t.provider.model,
+    accountNameLabel: isChinese ? "账号名称" : "Account name",
     fetchModelsLabel: isChinese ? "获取模型列表" : "Fetch models",
     fetchingModelsLabel: isChinese ? "获取中" : "Fetching",
     chooseModelLabel: (count) => isChinese ? `选择已获取的模型（${count}）` : `Choose a fetched model (${count})`,
@@ -558,13 +577,19 @@ function savedProviderApiKey(provider: SavedProvider) {
     || extractTomlProviderApiKey(provider.tomlConfig, providerId || undefined);
 }
 
-function providerIdentityKey(baseUrl?: string | null, apiKey?: string | null, providerName?: string | null) {
-  const normalizedUrl = normalizeProviderBaseUrl(baseUrl);
+function providerIdentityKey(
+  provider: Pick<SavedProvider, "baseUrl" | "providerName" | "model" | "wireApi" | "requiresOpenaiAuth">,
+  apiKey?: string | null,
+) {
+  const normalizedUrl = normalizeProviderBaseUrl(provider.baseUrl);
   if (!normalizedUrl) return "";
   const normalizedKey = (apiKey || "").trim();
   return JSON.stringify([
     normalizedUrl,
-    normalizedKey ? `key:${normalizedKey}` : `name:${normalizeProviderName(providerName)}`,
+    normalizedKey ? `key:${normalizedKey}` : `name:${normalizeProviderName(provider.providerName)}`,
+    provider.model.trim(),
+    provider.wireApi.trim().toLowerCase(),
+    provider.requiresOpenaiAuth,
   ]);
 }
 
@@ -756,10 +781,13 @@ function App() {
   );
   const [skillsMcpTab, setSkillsMcpTab] = React.useState<"mcp" | "skills">("mcp");
   const [editingProviderId, setEditingProviderId] = React.useState<string | null>(null);
+  const [copyingProviderId, setCopyingProviderId] = React.useState<string | null>(null);
+  const [editingOfficialAccountId, setEditingOfficialAccountId] = React.useState<string | null>(null);
   const [editingDetectedProvider, setEditingDetectedProvider] = React.useState(false);
   const [editingPromptId, setEditingPromptId] = React.useState<string | null>(null);
   const [editingBuiltinPrompt, setEditingBuiltinPrompt] = React.useState<BuiltinPromptDetail | null>(null);
   const [savedProviders, setSavedProviders] = React.useState<SavedProvider[]>([]);
+  const [officialAccounts, setOfficialAccounts] = React.useState<OfficialAccountSummary[]>([]);
   const [activeProviderId, setActiveProviderId] = React.useState(() => localStorage.getItem(ACTIVE_PROVIDER_KEY) || "");
   const [savedPrompts, setSavedPrompts] = React.useState<SavedPrompt[]>([]);
   const [builtinPromptStatus, setBuiltinPromptStatus] = React.useState<BuiltinPromptStatus[]>([]);
@@ -798,10 +826,15 @@ function App() {
   const [availableProviderModels, setAvailableProviderModels] = React.useState<ProviderModel[]>([]);
   const [providerModelsLoading, setProviderModelsLoading] = React.useState(false);
   const [actionBusy, setActionBusy] = React.useState<string>("");
+  const [isRestartingCodex, setIsRestartingCodex] = React.useState(false);
+  const [autoRestartCodex, setAutoRestartCodex] = React.useState(
+    () => localStorage.getItem(AUTO_RESTART_CODEX_KEY) === "1",
+  );
   const [promptSyncing, setPromptSyncing] = React.useState(false);
   const [promptCatalogReady, setPromptCatalogReady] = React.useState(false);
   const [promptForm, setPromptForm] = React.useState<SavedPrompt>(blankPromptForm);
   const [officialForm, setOfficialForm] = React.useState({
+    name: "",
     model: "gpt-5.5",
     authJson: "",
     configText: buildOfficialTomlPreview("gpt-5.5"),
@@ -835,6 +868,7 @@ function App() {
   const skillsMcpRequestRef = React.useRef(0);
   const activeConfigDirKeyRef = React.useRef("");
   const themeTransitionTimerRef = React.useRef<number | null>(null);
+  const restartingCodexRef = React.useRef(false);
   const providerTomlPreview = React.useMemo(() => buildProviderTomlPreview(providerForm), [providerForm]);
   const providerAuthPreview = React.useMemo(() => buildProviderAuthPreview(providerForm), [providerForm]);
   const activeBuiltinTemplateId = state?.instructionTemplateKey?.startsWith("builtin:")
@@ -964,6 +998,10 @@ function App() {
   React.useEffect(() => {
     localStorage.setItem(PROMPT_INJECTION_MODE_KEY, promptInjectionMode);
   }, [promptInjectionMode]);
+
+  React.useEffect(() => {
+    localStorage.setItem(AUTO_RESTART_CODEX_KEY, autoRestartCodex ? "1" : "0");
+  }, [autoRestartCodex]);
 
   React.useEffect(() => {
     activeConfigDirKeyRef.current = normalizedConfigDirForComparison(configDir);
@@ -1107,7 +1145,7 @@ function App() {
   const canonicalSavedProviders = React.useMemo(() => {
     const groups = new Map<string, SavedProvider[]>();
     savedProviders.forEach((provider) => {
-      const identity = providerIdentityKey(provider.baseUrl, savedProviderApiKey(provider), provider.providerName);
+      const identity = providerIdentityKey(provider, savedProviderApiKey(provider));
       const key = identity || `id:${provider.id}`;
       const group = groups.get(key);
       if (group) group.push(provider);
@@ -1147,71 +1185,96 @@ function App() {
     }));
   }, [canonicalSavedProviders, effectiveActiveProviderId]);
 
-  const providerRows = React.useMemo(() => {
-    const officialRow = {
-      id: "openai-official",
-      source: "official" as const,
-      providerName: "OpenAI Official",
-      baseUrl: "https://chatgpt.com/codex",
-      model: state?.model || "official",
-      apiKey: "",
-      wireApi: "official",
-      requiresOpenaiAuth: false,
-      isCurrent: Boolean(state?.isOfficialProvider),
-    };
+  const providerPageRows = React.useMemo<ProviderRow[]>(() => {
+    const selectedOfficial = officialAccounts.find((account) => account.selected);
+    const officialRows: ProviderRow[] = officialAccounts.length === 0
+      ? [{
+        id: "openai-official",
+        source: "official",
+        providerName: "OpenAI Official",
+        baseUrl: state?.model || "official",
+        model: state?.model || "official",
+        wireApi: "official",
+        requiresOpenaiAuth: false,
+        isCurrent: Boolean(state?.isOfficialProvider),
+        sourceLabel: lang === "zh" ? "兼容模式" : "Legacy mode",
+        editable: true,
+        deletable: false,
+        testable: false,
+        officialKind: "legacy",
+      }]
+      : officialAccounts.map((account) => ({
+        id: `openai-official-${account.id}`,
+        source: "official",
+        providerName: `OpenAI Official · ${account.name}`,
+        baseUrl: account.model || "official",
+        model: account.model || "official",
+        wireApi: "official",
+        requiresOpenaiAuth: false,
+        isCurrent: Boolean(state?.isOfficialProvider && account.selected),
+        sourceLabel: lang === "zh" ? "已保存账号" : "Saved account",
+        editable: true,
+        deletable: true,
+        testable: false,
+        officialAccountId: account.id,
+        officialKind: "saved",
+      }));
+    if (officialAccounts.length > 0 && state?.isOfficialProvider && !selectedOfficial) {
+      officialRows.unshift({
+        id: "openai-official-unsaved",
+        source: "official",
+        providerName: lang === "zh" ? "OpenAI Official · 未保存登录" : "OpenAI Official · Unsaved login",
+        baseUrl: state.model || "official",
+        model: state.model || "official",
+        wireApi: "official",
+        requiresOpenaiAuth: false,
+        isCurrent: true,
+        sourceLabel: lang === "zh" ? "未保存" : "Unsaved",
+        editable: false,
+        deletable: false,
+        testable: false,
+        officialKind: "unsaved",
+      });
+    }
+
+    const thirdPartyRows: ProviderRow[] = [];
     const seen = new Set<string>();
-    const rows: Array<typeof officialRow | (typeof detectedRows)[number] | (typeof localRows)[number]> = [officialRow];
     localRows.forEach((row) => {
-      const key = providerIdentityKey(row.baseUrl, savedProviderApiKey(row), row.providerName);
+      const key = providerIdentityKey(row, savedProviderApiKey(row));
       if (key) seen.add(key);
-      rows.push(row);
+      thirdPartyRows.push({
+        ...row,
+        editable: true,
+        deletable: true,
+        testable: true,
+        testingKey: `${row.source}-${row.id}`,
+      });
     });
     detectedRows.forEach((row) => {
       if (row.id === "detected-custom" && inferredActiveProviderId) return;
-      const key = providerIdentityKey(row.baseUrl, row.apiKey, row.providerName);
+      const key = providerIdentityKey(row, row.apiKey);
       if (key && seen.has(key)) return;
       if (key) seen.add(key);
-      rows.push(row);
+      thirdPartyRows.push({
+        ...row,
+        editable: true,
+        deletable: false,
+        testable: true,
+        testingKey: `${row.source}-${row.id}`,
+      });
     });
-    return rows;
-  }, [detectedRows, inferredActiveProviderId, localRows, state?.isOfficialProvider, state?.model]);
+    return [...officialRows, ...thirdPartyRows];
+  }, [detectedRows, inferredActiveProviderId, lang, localRows, officialAccounts, state?.isOfficialProvider, state?.model]);
 
   const findLocalProviderForRow = React.useCallback((row: ProviderRow) => {
     if (row.source === "official") return undefined;
     return canonicalSavedProviders.find((item) =>
       row.source === "local"
         ? item.id === row.id
-        : providerIdentityKey(item.baseUrl, savedProviderApiKey(item), item.providerName)
-          === providerIdentityKey(row.baseUrl, row.apiKey, row.providerName),
+        : providerIdentityKey(item, savedProviderApiKey(item))
+          === providerIdentityKey(row, row.apiKey),
     );
   }, [canonicalSavedProviders]);
-
-  const providerPageRows = React.useMemo<ProviderRow[]>(() => providerRows.map((row) => {
-    const local = row.source === "official"
-      ? undefined
-      : canonicalSavedProviders.find((item) =>
-        row.source === "local"
-          ? item.id === row.id
-          : providerIdentityKey(item.baseUrl, savedProviderApiKey(item), item.providerName)
-            === providerIdentityKey(row.baseUrl, row.apiKey, row.providerName),
-      );
-    return {
-      id: row.id,
-      source: row.source,
-      providerName: row.providerName,
-      baseUrl: row.baseUrl,
-      model: row.model,
-      apiKey: row.apiKey,
-      wireApi: row.wireApi,
-      requiresOpenaiAuth: row.requiresOpenaiAuth,
-      isCurrent: row.isCurrent,
-      sourceLabel: row.source === "official" ? (lang === "zh" ? "Codex 登录" : "Codex login") : undefined,
-      editable: row.source === "official" || Boolean(local) || row.source === "detected",
-      deletable: Boolean(local),
-      testable: row.source !== "official",
-      testingKey: `${row.source}-${row.id}`,
-    };
-  }), [canonicalSavedProviders, lang, providerRows]);
 
   const visibleSessions = React.useMemo(
     () => (sessionStatus?.sessions || []).filter((item) => showInternalSessions || !item.isSubagent),
@@ -1327,6 +1390,8 @@ function App() {
           providerModelsRequestRef.current += 1;
           setProviderMode("list");
           setEditingProviderId(null);
+          setCopyingProviderId(null);
+          setEditingOfficialAccountId(null);
           setEditingDetectedProvider(false);
           setProviderTomlDirty(false);
           setProviderTomlDraft("");
@@ -1341,11 +1406,14 @@ function App() {
 
         void Promise.allSettled([
           invoke<SavedProvider[]>("list_saved_providers"),
+          invoke<OfficialAccountSummary[]>("list_official_accounts", { configDir: next.codexDir }),
           invoke<SavedPrompt[]>("list_saved_prompts"),
           invoke<BuiltinPromptStatus[]>("get_builtin_prompt_status"),
-        ]).then(([providers, prompts, promptStatus]) => {
+        ]).then(([providers, accounts, prompts, promptStatus]) => {
           if (requestId !== refreshRequestRef.current) return;
           if (providers.status === "fulfilled") setSavedProviders(providers.value);
+          if (accounts.status === "fulfilled") setOfficialAccounts(accounts.value);
+          else setError(String(accounts.reason));
           if (prompts.status === "fulfilled") setSavedPrompts(prompts.value);
           if (promptStatus.status === "fulfilled") {
             setBuiltinPromptStatus(uniqueBuiltinPromptStatuses(promptStatus.value));
@@ -1419,12 +1487,61 @@ function App() {
     void Promise.allSettled([
       invoke<SavedPrompt[]>("list_saved_prompts"),
       invoke<SavedProvider[]>("list_saved_providers"),
+      invoke<OfficialAccountSummary[]>("list_official_accounts", { configDir: result.state.codexDir }),
     ])
-      .then(([prompts, providers]) => {
+      .then(([prompts, providers, accounts]) => {
         if (prompts.status === "fulfilled") setSavedPrompts(prompts.value);
         if (providers.status === "fulfilled") setSavedProviders(providers.value);
+        if (accounts.status === "fulfilled") setOfficialAccounts(accounts.value);
       })
       .catch(() => undefined);
+  };
+
+  const restartCodex = React.useCallback(async ({
+    automatic = false,
+    configMessage = "",
+  }: { automatic?: boolean; configMessage?: string } = {}) => {
+    if (restartingCodexRef.current) return;
+    restartingCodexRef.current = true;
+    setIsRestartingCodex(true);
+    setError("");
+    try {
+      const result = await invoke<CodexRestartResult>("restart_codex_app");
+      if (result.success) {
+        setToast(result.message);
+      } else if (automatic) {
+        setError(lang === "zh"
+          ? `${configMessage || "配置已应用"}，但 Codex 自动重启失败。你可以点击“重启 Codex”再次尝试。`
+          : "The configuration was applied, but Codex could not restart automatically. Use Restart Codex to try again.");
+      } else {
+        setError(lang === "zh"
+          ? `Codex 重启失败：${result.message}`
+          : "Codex restart failed. No safely restartable Codex Desktop was found.");
+      }
+    } catch {
+      if (automatic) {
+        setError(lang === "zh"
+          ? `${configMessage || "配置已应用"}，但 Codex 自动重启失败。你可以点击“重启 Codex”再次尝试。`
+          : "The configuration was applied, but Codex could not restart automatically. Use Restart Codex to try again.");
+      } else {
+        setError(lang === "zh" ? "Codex 重启失败，请稍后重试" : "Codex restart failed. Try again later.");
+      }
+    } finally {
+      restartingCodexRef.current = false;
+      setIsRestartingCodex(false);
+    }
+  }, [lang]);
+
+  const handleConfigActionResult = (
+    before: CodexState | null,
+    result: ActionResult,
+  ) => {
+    handleActionResult(result);
+    const liveChanged = Boolean(before)
+      && (before?.configText !== result.state.configText || before?.authText !== result.state.authText);
+    if (autoRestartCodex && liveChanged) {
+      void restartCodex({ automatic: true, configMessage: result.message });
+    }
   };
 
   const switchInstructionTemplate = (templateId: string) =>
@@ -1626,7 +1743,10 @@ function App() {
 
   const normalizedProviderForm = (tomlConfig = providerTomlDraft || providerForm.tomlConfig || buildProviderTomlPreview(providerForm)): SavedProvider => ({
     ...providerForm,
-    id: editingProviderId || uniqueId(providerForm.id || customProviderId(providerForm.providerName || providerForm.baseUrl), savedProviders.map((item) => item.id)),
+    id: editingProviderId
+      || (copyingProviderId
+        ? providerForm.id
+        : uniqueId(providerForm.id || customProviderId(providerForm.providerName || providerForm.baseUrl), savedProviders.map((item) => item.id))),
     providerName: providerForm.providerName.trim(),
     baseUrl: providerForm.baseUrl.trim().replace(/\/+$/, ""),
     model: providerForm.model.trim(),
@@ -1669,6 +1789,7 @@ function App() {
         : "Provider name, API URL, and model are required");
       return;
     }
+    const before = state;
     return call(
       async () => {
         let provider = pendingProvider;
@@ -1692,10 +1813,11 @@ function App() {
         return { applied, providerList };
       },
       ({ applied, providerList }) => {
-        if (applied) handleActionResult(applied);
+        if (applied) handleConfigActionResult(before, applied);
         setSavedProviders(providerList);
         setProviderMode("list");
         setEditingProviderId(null);
+        setCopyingProviderId(null);
         setEditingDetectedProvider(false);
         setProviderTomlDirty(false);
         setToast(applied
@@ -1705,15 +1827,17 @@ function App() {
     );
   };
 
-  const switchProvider = (provider: SavedProvider) =>
-    call(
+  const switchProvider = (provider: SavedProvider) => {
+    const before = state;
+    return call(
       () => applyProviderConfig(provider),
       (result) => {
         localStorage.setItem(ACTIVE_PROVIDER_KEY, provider.id);
         setActiveProviderId(provider.id);
-        handleActionResult(result);
+        handleConfigActionResult(before, result);
       },
     );
+  };
 
   const resetAvailableProviderModels = () => {
     providerModelsRequestRef.current += 1;
@@ -1775,15 +1899,83 @@ function App() {
 
   const saveProviderConfig = saveProviderOnly;
 
-  const switchOfficialProvider = () =>
-    call(
+  const switchOfficialProvider = () => {
+    const before = state;
+    return call(
       () => invoke<ActionResult>("switch_official_provider", { configDir: configDir || null }),
       (result) => {
         localStorage.removeItem(ACTIVE_PROVIDER_KEY);
         setActiveProviderId("");
-        handleActionResult(result);
+        handleConfigActionResult(before, result);
       },
     );
+  };
+
+  const switchOfficialAccount = (accountId: string) => {
+    const before = state;
+    return call(
+      () => invoke<ActionResult>("switch_official_account", {
+        configDir: configDir || null,
+        accountId,
+      }),
+      (result) => {
+        localStorage.removeItem(ACTIVE_PROVIDER_KEY);
+        setActiveProviderId("");
+        handleConfigActionResult(before, result);
+      },
+    );
+  };
+
+  const prepareNewOfficialAccount = () => {
+    const before = state;
+    return call(
+      () => invoke<ActionResult>("prepare_new_official_account", { configDir: configDir || null }),
+      (result) => {
+        localStorage.removeItem(ACTIVE_PROVIDER_KEY);
+        setActiveProviderId("");
+        setEditingOfficialAccountId(null);
+        setProviderMode("list");
+        handleConfigActionResult(before, result);
+      },
+    );
+  };
+
+  const captureCurrentOfficialAccount = async (name: string) => {
+    const loadingToken = beginLoading();
+    setError("");
+    try {
+      const result = await invoke<ActionResult>("capture_current_official_account", {
+        configDir: configDir || null,
+        name,
+      });
+      handleActionResult(result);
+      return true;
+    } catch (captureError) {
+      setError(String(captureError));
+      return false;
+    } finally {
+      endLoading(loadingToken);
+    }
+  };
+
+  const deleteOfficialAccount = async (accountId: string) => {
+    const before = state;
+    const loadingToken = beginLoading();
+    setError("");
+    try {
+      const result = await invoke<ActionResult>("delete_official_account", {
+        configDir: configDir || null,
+        accountId,
+      });
+      handleConfigActionResult(before, result);
+      return true;
+    } catch (deleteError) {
+      setError(String(deleteError));
+      return false;
+    } finally {
+      endLoading(loadingToken);
+    }
+  };
 
   const restoreOfficialProvider = () =>
     call(
@@ -1797,6 +1989,7 @@ function App() {
       ({ result, draft }) => {
         if (draft) {
           setOfficialForm({
+            name: "",
             model: draft.model || "gpt-5.5",
             authJson: draft.authJson,
             configText: draft.configText || buildOfficialTomlPreview(draft.model || "gpt-5.5"),
@@ -1821,6 +2014,7 @@ function App() {
         return;
       }
       setOfficialForm((current) => ({
+        ...current,
         model: candidate.model || current.model || state?.model || "gpt-5.5",
         authJson: candidate.authJson,
         configText: candidate.configText || current.configText,
@@ -1833,8 +2027,9 @@ function App() {
     }
   };
 
-  const resetOfficialProvider = () =>
-    call(
+  const resetOfficialProvider = () => {
+    const before = state;
+    return call(
       () => invoke<ActionResult>("reset_official_provider", {
         input: {
           configDir: configDir || null,
@@ -1847,15 +2042,17 @@ function App() {
         localStorage.removeItem(ACTIVE_PROVIDER_KEY);
         setActiveProviderId("");
         setOfficialForm({
+          name: "",
           model: result.state.model || officialForm.model || "gpt-5.5",
           authJson: officialAuthPlaceholder,
           configText: result.state.configText
             || officialForm.configText
             || buildOfficialTomlPreview(result.state.model || officialForm.model || "gpt-5.5"),
         });
-        handleActionResult(result);
+        handleConfigActionResult(before, result);
       },
     );
+  };
 
   const importFromCcSwitch = async () => {
     const actionToken = beginActionBusy("importCcSwitch");
@@ -2144,7 +2341,7 @@ function App() {
 
   const officialAuthPlaceholder = '{\n  "OPENAI_API_KEY": null,\n  "auth_mode": "chatgpt",\n  "tokens": {\n    "access_token": "",\n    "refresh_token": "",\n    "id_token": ""\n  }\n}';
 
-  const openOfficialEdit = async () => {
+  const openOfficialEdit = async (accountId?: string) => {
     const requestId = ++officialDraftRequestRef.current;
     const actionToken = beginActionBusy("loadOfficialDraft");
     const liveIsOfficial = Boolean(state?.isOfficialProvider);
@@ -2153,7 +2350,9 @@ function App() {
       ? state.configText
       : "";
     setEditingDetectedProvider(false);
+    setEditingOfficialAccountId(accountId || null);
     setOfficialForm({
+      name: "",
       model: fallbackModel,
       authJson: liveIsOfficial && state?.authText ? state.authText : officialAuthPlaceholder,
       configText: fallbackConfigText,
@@ -2161,28 +2360,58 @@ function App() {
     setProviderMode("official");
     setError("");
     try {
-      const draft = await invoke<OfficialConfigDraft | null>("get_official_config_draft", {
-        configDir: configDir || null,
-      });
-      if (requestId !== officialDraftRequestRef.current) return;
-      if (draft) {
-        setOfficialForm({
-          model: draft.model || fallbackModel,
-          authJson: draft.authJson,
-          configText: draft.configText || fallbackConfigText,
+      if (accountId) {
+        const account = await invoke<OfficialAccountDraft>("get_official_account", {
+          configDir: configDir || null,
+          accountId,
         });
+        if (requestId !== officialDraftRequestRef.current) return;
+        setOfficialForm({
+          name: account.name,
+          model: account.model || fallbackModel,
+          authJson: account.authJson,
+          configText: account.configText,
+        });
+      } else {
+        const draft = await invoke<OfficialConfigDraft | null>("get_official_config_draft", {
+          configDir: configDir || null,
+        });
+        if (requestId !== officialDraftRequestRef.current) return;
+        if (draft) {
+          setOfficialForm({
+            name: "",
+            model: draft.model || fallbackModel,
+            authJson: draft.authJson,
+            configText: draft.configText || fallbackConfigText,
+          });
+        }
       }
-    } catch (e) {
-      if (requestId === officialDraftRequestRef.current) setError(String(e));
+    } catch (editError) {
+      if (requestId === officialDraftRequestRef.current) setError(String(editError));
     } finally {
       endActionBusy(actionToken);
     }
   };
 
-  const saveOfficialConfig = () =>
+  const saveOfficialConfig = () => {
+    if (editingOfficialAccountId && !officialForm.name.trim()) {
+      setError(lang === "zh" ? "账号名称不能为空" : "Account name is required");
+      return;
+    }
+    const before = state;
     call(
-      () =>
-        invoke<ActionResult>("save_official_config", {
+      () => editingOfficialAccountId
+        ? invoke<ActionResult>("update_official_account", {
+          input: {
+            configDir: configDir || null,
+            accountId: editingOfficialAccountId,
+            name: officialForm.name,
+            model: officialForm.model,
+            authJson: officialForm.authJson,
+            configText: officialForm.configText,
+          },
+        })
+        : invoke<ActionResult>("save_official_config", {
           input: {
             configDir: configDir || null,
             model: officialForm.model,
@@ -2191,10 +2420,12 @@ function App() {
           },
         }),
       (result) => {
-        handleActionResult(result);
+        handleConfigActionResult(before, result);
+        setEditingOfficialAccountId(null);
         setProviderMode("list");
       },
     );
+  };
 
   const openAddProvider = () => {
     const liveToml = state?.configText?.trim() || "";
@@ -2207,6 +2438,7 @@ function App() {
     };
     resetAvailableProviderModels();
     setEditingProviderId(null);
+    setCopyingProviderId(null);
     setEditingDetectedProvider(false);
     setProviderForm(next);
     setProviderTomlDraft(liveToml || buildProviderTomlPreview(next));
@@ -2217,9 +2449,30 @@ function App() {
   const openEditProvider = (provider: SavedProvider) => {
     resetAvailableProviderModels();
     setEditingProviderId(provider.id);
+    setCopyingProviderId(null);
     setEditingDetectedProvider(false);
     setProviderForm(provider);
     setProviderTomlDraft(provider.tomlConfig?.trim() || buildProviderTomlPreview(provider));
+    setProviderTomlDirty(false);
+    setProviderMode("form");
+  };
+
+  const openCopyProvider = (provider: SavedProvider) => {
+    resetAvailableProviderModels();
+    const providerName = `${provider.providerName} ${lang === "zh" ? "副本" : "Copy"}`;
+    const id = uniqueId(customProviderId(providerName), savedProviders.map((item) => item.id));
+    const copy = {
+      ...provider,
+      id,
+      providerName,
+      apiKey: provider.apiKey || "",
+      tomlConfig: provider.tomlConfig || "",
+    };
+    setEditingProviderId(null);
+    setCopyingProviderId(provider.id);
+    setEditingDetectedProvider(false);
+    setProviderForm(copy);
+    setProviderTomlDraft(copy.tomlConfig.trim() || buildProviderTomlPreview(copy));
     setProviderTomlDirty(false);
     setProviderMode("form");
   };
@@ -2231,6 +2484,7 @@ function App() {
       savedProviders.map((item) => item.id),
     );
     setEditingProviderId(id);
+    setCopyingProviderId(null);
     setEditingDetectedProvider(true);
     const next = {
       id,
@@ -2249,18 +2503,20 @@ function App() {
   };
 
   const removeProvider = async (id: string, isCurrent: boolean) => {
+    const before = state;
     const loadingToken = beginLoading();
     setError("");
     try {
+      let switched: ActionResult | null = null;
       if (isCurrent) {
-        const result = await invoke<ActionResult>("switch_official_provider", { configDir: configDir || null });
+        switched = await invoke<ActionResult>("switch_official_provider", { configDir: configDir || null });
         localStorage.removeItem(ACTIVE_PROVIDER_KEY);
         setActiveProviderId("");
-        setState(result.state);
       }
       await invoke<void>("delete_saved_provider", { id, configDir: configDir || null });
       const providerList = await invoke<SavedProvider[]>("list_saved_providers");
       setSavedProviders(providerList);
+      if (switched) handleConfigActionResult(before, switched);
       setToast(lang === "zh" ? "供应商已删除" : "Provider deleted");
       return true;
     } catch (e) {
@@ -2519,7 +2775,9 @@ function App() {
                 loading={loading}
                 testingId={providerTestingId}
                 actionBusy={actionBusy}
+                isRestartingCodex={isRestartingCodex}
                 editingProviderId={editingProviderId || (editingDetectedProvider ? providerForm.id : null)}
+                editingOfficialAccountId={editingOfficialAccountId}
                 providerForm={{
                   apiKey: providerForm.apiKey || "",
                   baseUrl: providerForm.baseUrl,
@@ -2534,7 +2792,9 @@ function App() {
                 officialInfo={{
                   officialUrl: "https://chatgpt.com/codex",
                   authPath: state.authPath,
-                  current: state.isOfficialProvider ? "OpenAI Official" : state.modelProvider,
+                  current: state.isOfficialProvider
+                    ? officialAccounts.find((account) => account.selected)?.name || "OpenAI Official"
+                    : state.modelProvider,
                 }}
                 providerAuthPreview={<JsonPreview text={providerAuthPreview} />}
                 providerTomlDraft={providerTomlDraft}
@@ -2543,11 +2803,16 @@ function App() {
                 availableModels={availableProviderModels.map((model) => model.id)}
                 fetchingModels={providerModelsLoading}
                 onImportCcSwitch={importFromCcSwitch}
+                onRestartCodex={() => void restartCodex()}
                 onAddProvider={openAddProvider}
+                onPrepareNewOfficialAccount={prepareNewOfficialAccount}
+                showSaveCurrentOfficial={Boolean(state.isOfficialProvider && !officialAccounts.some((account) => account.selected))}
+                onCaptureCurrentOfficial={captureCurrentOfficialAccount}
                 onLoadCcSwitchOfficial={() => void loadCcSwitchOfficial()}
                 onEnableProvider={(row) => {
                   if (row.source === "official") {
-                    switchOfficialProvider();
+                    if (row.officialAccountId) switchOfficialAccount(row.officialAccountId);
+                    else switchOfficialProvider();
                     return;
                   }
                   const local = findLocalProviderForRow(row);
@@ -2568,14 +2833,19 @@ function App() {
                 }}
                 onEditProvider={(row) => {
                   if (row.source === "official") {
-                    void openOfficialEdit();
+                    void openOfficialEdit(row.officialAccountId);
                     return;
                   }
                   const local = findLocalProviderForRow(row);
                   if (local) openEditProvider(local);
                   else if (row.source === "detected") openEditDetectedProvider(row);
                 }}
+                onCopyProvider={(row) => {
+                  const local = findLocalProviderForRow(row);
+                  if (local) openCopyProvider(local);
+                }}
                 onDeleteProvider={(row) => {
+                  if (row.officialAccountId) return deleteOfficialAccount(row.officialAccountId);
                   const local = findLocalProviderForRow(row);
                   return local ? removeProvider(local.id, row.isCurrent) : Promise.resolve(false);
                 }}
@@ -2584,9 +2854,12 @@ function App() {
                 onCancelMode={() => {
                   officialDraftRequestRef.current += 1;
                   setProviderMode("list");
+                  setEditingOfficialAccountId(null);
+                  setCopyingProviderId(null);
                   setEditingDetectedProvider(false);
                   setProviderTomlDirty(false);
                 }}
+                onOfficialNameChange={(value) => setOfficialForm((current) => ({ ...current, name: value }))}
                 onOfficialModelChange={(value) => setOfficialForm((current) => ({ ...current, model: value }))}
                 onOfficialAuthChange={(value) => setOfficialForm((current) => ({ ...current, authJson: value }))}
                 onOfficialConfigChange={(value) => setOfficialForm((current) => ({ ...current, configText: value }))}
@@ -2602,7 +2875,7 @@ function App() {
                 onProviderNameChange={(value) => setProviderForm((current) => ({
                   ...current,
                   providerName: value,
-                  id: editingProviderId || customProviderId(value),
+                  id: (editingProviderId || copyingProviderId) ? current.id : customProviderId(value),
                 }))}
                 onProviderModelChange={(value) => setProviderForm((current) => ({ ...current, model: value }))}
                 onFetchModels={() => void fetchProviderModels()}
@@ -2846,8 +3119,16 @@ function App() {
                     ? "重新检测 CODEX_HOME、config.toml、auth.json 和 SQLite 会话库。"
                     : "Recheck CODEX_HOME, config.toml, auth.json and SQLite session stores.",
                   recheckLabel: lang === "zh" ? "重新检测" : "Recheck",
+                  autoRestartTitle: lang === "zh"
+                    ? "配置变更后自动重启 Codex"
+                    : "Automatically restart Codex after configuration changes",
+                  autoRestartDescription: lang === "zh"
+                    ? "应用当前供应商或影响 Codex 运行配置后，自动重新启动 Codex Desktop。可能中断当前正在进行的会话。"
+                    : "Restart Codex Desktop after applying configuration changes. This may interrupt an active session.",
                 }}
                 onLanguageChange={setLang}
+                autoRestartChecked={autoRestartCodex}
+                onAutoRestartChange={setAutoRestartCodex}
                 recheckBusy={loading || refreshing}
                 onRecheck={() => {
                   localStorage.removeItem(STARTUP_WIZARD_SEEN_KEY);

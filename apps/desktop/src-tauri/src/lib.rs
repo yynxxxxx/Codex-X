@@ -52,6 +52,7 @@ use live_config::{
 #[cfg(test)]
 use paths::app_home;
 use paths::home_dir;
+use platform::CodexRestartResult;
 use prompts::{
     agents_path, builtin_prompt_content, builtin_prompt_detail_inner, builtin_prompt_status_inner,
     bundled_prompt_meta, delete_prompt_inner, get_saved_prompt_inner,
@@ -82,14 +83,19 @@ use providers::{
     upsert_provider_on_connection, CcSwitchCodexRow, ProviderUpsertKind, ProviderUpsertMode,
 };
 use providers::{
-    build_provider_toml_draft_inner, delete_saved_provider_inner, fetch_provider_models_inner,
-    get_official_config_draft_inner, import_ccswitch_codex_providers_inner,
-    list_saved_providers_inner, read_ccswitch_official_auth_inner, reset_official_provider_inner,
+    build_provider_toml_draft_inner, capture_current_official_account_inner,
+    delete_official_account_inner, delete_saved_provider_inner, fetch_provider_models_inner,
+    get_official_account_inner, get_official_config_draft_inner,
+    import_ccswitch_codex_providers_inner, list_official_accounts_inner,
+    list_saved_providers_inner, prepare_new_official_account_inner,
+    read_ccswitch_official_auth_inner, reset_official_provider_inner,
     restore_official_provider_inner, save_active_provider_inner, save_official_config_inner,
-    save_provider_inner, save_provider_toml_config_inner, switch_official_provider_inner,
-    switch_provider_inner, test_provider_connection_inner, ImportResult, OfficialAuthCandidate,
-    OfficialConfigDraft, OfficialConfigInput, ProviderConnectionResult, ProviderInput,
-    ProviderModelsResult, ProviderTomlInput, SavedProvider,
+    save_provider_inner, save_provider_toml_config_inner, switch_official_account_inner,
+    switch_official_provider_inner, switch_provider_inner, test_provider_connection_inner,
+    update_official_account_inner, ImportResult, OfficialAccountDraft, OfficialAccountSummary,
+    OfficialAccountUpdateInput, OfficialAuthCandidate, OfficialConfigDraft, OfficialConfigInput,
+    ProviderConnectionResult, ProviderInput, ProviderModelsResult, ProviderTomlInput,
+    SavedProvider,
 };
 #[cfg(test)]
 use sessions::{
@@ -572,6 +578,13 @@ fn get_about_info_inner(config_dir: Option<String>) -> Result<AboutInfo> {
 }
 
 #[tauri::command]
+async fn restart_codex_app() -> Result<CodexRestartResult> {
+    tauri::async_runtime::spawn_blocking(platform::restart_codex_desktop)
+        .await
+        .map_err(|e| CodexxError::Config(format!("重启 Codex 失败: {e}")))
+}
+
+#[tauri::command]
 async fn get_about_info(config_dir: Option<String>) -> Result<AboutInfo> {
     tauri::async_runtime::spawn_blocking(move || get_about_info_inner(config_dir))
         .await
@@ -902,6 +915,73 @@ async fn get_codex_state(config_dir: Option<String>) -> Result<CodexState> {
 fn get_codex_state_inner(config_dir: Option<String>) -> Result<CodexState> {
     let codex_dir = resolve_codex_dir(config_dir)?;
     build_state_after_migration(codex_dir)
+}
+
+#[tauri::command]
+async fn list_official_accounts(config_dir: Option<String>) -> Result<Vec<OfficialAccountSummary>> {
+    tauri::async_runtime::spawn_blocking(move || list_official_accounts_inner(config_dir))
+        .await
+        .map_err(|e| CodexxError::Config(format!("读取官方账号列表失败: {e}")))?
+}
+
+#[tauri::command]
+async fn get_official_account(
+    config_dir: Option<String>,
+    account_id: String,
+) -> Result<OfficialAccountDraft> {
+    tauri::async_runtime::spawn_blocking(move || get_official_account_inner(config_dir, account_id))
+        .await
+        .map_err(|e| CodexxError::Config(format!("读取官方账号失败: {e}")))?
+}
+
+#[tauri::command]
+async fn capture_current_official_account(
+    config_dir: Option<String>,
+    name: String,
+) -> Result<ActionResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        capture_current_official_account_inner(config_dir, name)
+    })
+    .await
+    .map_err(|e| CodexxError::Config(format!("保存当前官方登录失败: {e}")))?
+}
+
+#[tauri::command]
+async fn update_official_account(input: OfficialAccountUpdateInput) -> Result<ActionResult> {
+    tauri::async_runtime::spawn_blocking(move || update_official_account_inner(input))
+        .await
+        .map_err(|e| CodexxError::Config(format!("更新官方账号失败: {e}")))?
+}
+
+#[tauri::command]
+async fn switch_official_account(
+    config_dir: Option<String>,
+    account_id: String,
+) -> Result<ActionResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        switch_official_account_inner(config_dir, account_id)
+    })
+    .await
+    .map_err(|e| CodexxError::Config(format!("切换官方账号失败: {e}")))?
+}
+
+#[tauri::command]
+async fn delete_official_account(
+    config_dir: Option<String>,
+    account_id: String,
+) -> Result<ActionResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_official_account_inner(config_dir, account_id)
+    })
+    .await
+    .map_err(|e| CodexxError::Config(format!("删除官方账号失败: {e}")))?
+}
+
+#[tauri::command]
+async fn prepare_new_official_account(config_dir: Option<String>) -> Result<ActionResult> {
+    tauri::async_runtime::spawn_blocking(move || prepare_new_official_account_inner(config_dir))
+        .await
+        .map_err(|e| CodexxError::Config(format!("准备新的官方登录失败: {e}")))?
 }
 
 #[tauri::command]
@@ -1341,6 +1421,7 @@ pub fn run() {
         .on_window_event(desktop_lifecycle::handle_window_event)
         .invoke_handler(tauri::generate_handler![
             get_about_info,
+            restart_codex_app,
             check_app_update,
             get_skills_mcp_state,
             preview_existing_skills_mcp,
@@ -1370,6 +1451,13 @@ pub fn run() {
             save_active_provider,
             delete_saved_provider,
             get_codex_state,
+            list_official_accounts,
+            get_official_account,
+            capture_current_official_account,
+            update_official_account,
+            switch_official_account,
+            delete_official_account,
+            prepare_new_official_account,
             switch_official_provider,
             get_official_config_draft,
             restore_official_provider,

@@ -97,6 +97,14 @@ export type CodexState = {
   lastBackup?: BackupEntry;
 };
 
+export type CodexRestartResult = {
+  success: boolean;
+  wasRunning: boolean;
+  restarted: boolean;
+  platform: string;
+  message: string;
+};
+
 export type ActionResult = {
   ok: boolean;
   message: string;
@@ -109,6 +117,27 @@ export type OfficialConfigDraft = {
   configText: string;
   model?: string;
   source: string;
+};
+
+export type OfficialAccountSummary = {
+  id: string;
+  name: string;
+  model?: string;
+  selected: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt?: string;
+};
+
+export type OfficialAccountDraft = {
+  id: string;
+  name: string;
+  model?: string;
+  configText: string;
+  authJson: string;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt?: string;
 };
 
 export type OfficialAuthCandidate = {

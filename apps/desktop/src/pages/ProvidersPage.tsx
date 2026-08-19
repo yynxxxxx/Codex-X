@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
+  Copy,
   Download,
   Eye,
   EyeOff,
@@ -15,6 +16,8 @@ import {
   RefreshCw,
   RotateCcw,
   Trash2,
+  UserPlus,
+  RotateCw,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { Ref } from "react";
@@ -41,6 +44,8 @@ export type ProviderRow = {
   testable?: boolean;
   testingKey?: string;
   meta?: ReactNode;
+  officialAccountId?: string;
+  officialKind?: "legacy" | "saved" | "unsaved";
 };
 
 export type ProviderFormValue = {
@@ -53,6 +58,7 @@ export type ProviderFormValue = {
 };
 
 export type OfficialFormValue = {
+  name: string;
   model: string;
   authJson: string;
   configText: string;
@@ -63,16 +69,26 @@ export type ProviderCopy = {
   title: string;
   subtitle: string;
   importLabel: string;
+  restartCodexLabel: string;
+  restartingCodexLabel: string;
   addLabel: string;
+  addOfficialAccountLabel: string;
+  saveCurrentOfficialLabel: string;
+  captureOfficialTitle: string;
+  captureOfficialDescription: string;
+  captureOfficialNameLabel: string;
+  captureOfficialConfirmLabel: string;
   noProviders: string;
   currentLabel: string;
   enableLabel: string;
   testLabel: string;
   editLabel: string;
+  copyLabel: string;
   removeLabel: string;
   deleteTitle: string;
   deleteDescription: (providerName: string) => string;
   deleteCurrentDescription: (providerName: string) => string;
+  deleteCurrentOfficialDescription: string;
   deleteCancelLabel: string;
   deleteConfirmLabel: string;
   noBaseUrlLabel: string;
@@ -106,6 +122,7 @@ export type ProviderCopy = {
   baseUrlLabel: string;
   nameLabel: string;
   modelLabel: string;
+  accountNameLabel: string;
   fetchModelsLabel: string;
   fetchingModelsLabel: string;
   chooseModelLabel: (count: number) => string;
@@ -134,7 +151,9 @@ export type ProvidersPageProps = {
   loading: boolean;
   testingId: string;
   actionBusy?: string;
+  isRestartingCodex: boolean;
   editingProviderId: string | null;
+  editingOfficialAccountId: string | null;
   providerForm: ProviderFormValue;
   officialForm: OfficialFormValue;
   officialAuthRef?: Ref<HTMLTextAreaElement>;
@@ -147,15 +166,21 @@ export type ProvidersPageProps = {
   availableModels: readonly string[];
   fetchingModels: boolean;
   onImportCcSwitch: () => void;
+  onRestartCodex: () => void;
   onAddProvider: () => void;
+  onPrepareNewOfficialAccount: () => void;
+  showSaveCurrentOfficial: boolean;
+  onCaptureCurrentOfficial: (name: string) => Promise<boolean>;
   onLoadCcSwitchOfficial: () => void;
   onRestoreOfficial: () => void;
   onResetOfficial: () => void;
   onEnableProvider: (row: ProviderRow) => void;
   onTestProvider: (row: ProviderRow) => void;
   onEditProvider: (row: ProviderRow) => void;
+  onCopyProvider: (row: ProviderRow) => void;
   onDeleteProvider: (row: ProviderRow) => Promise<boolean>;
   onCancelMode: () => void;
+  onOfficialNameChange: (value: string) => void;
   onOfficialModelChange: (value: string) => void;
   onOfficialAuthChange: (value: string) => void;
   onOfficialConfigChange: (value: string) => void;
@@ -236,20 +261,42 @@ function ListPage({
   loading,
   testingId,
   actionBusy,
+  isRestartingCodex,
   onImportCcSwitch,
+  onRestartCodex,
   onAddProvider,
+  onPrepareNewOfficialAccount,
+  showSaveCurrentOfficial,
+  onCaptureCurrentOfficial,
   onRestoreOfficial,
   onEnableProvider,
   onTestProvider,
   onEditProvider,
+  onCopyProvider,
   onDeleteProvider,
-}: Pick<ProvidersPageProps, "copy" | "providerRows" | "loading" | "testingId" | "actionBusy" | "onImportCcSwitch" | "onAddProvider" | "onRestoreOfficial" | "onEnableProvider" | "onTestProvider" | "onEditProvider" | "onDeleteProvider">) {
+}: Pick<ProvidersPageProps, "copy" | "providerRows" | "loading" | "testingId" | "actionBusy" | "onImportCcSwitch" | "onAddProvider" | "isRestartingCodex" | "onRestartCodex" | "onPrepareNewOfficialAccount" | "showSaveCurrentOfficial" | "onCaptureCurrentOfficial" | "onRestoreOfficial" | "onEnableProvider" | "onTestProvider" | "onEditProvider" | "onCopyProvider" | "onDeleteProvider">) {
   const [providerToDelete, setProviderToDelete] = useState<ProviderRow | null>(null);
+  const [captureDialogOpen, setCaptureDialogOpen] = useState(false);
+  const [captureName, setCaptureName] = useState("");
+  const [capturing, setCapturing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const providerActionsBusy = loading || Boolean(actionBusy);
 
   const closeDeleteDialog = () => {
     if (!deleting) setProviderToDelete(null);
+  };
+
+  const confirmCapture = async () => {
+    if (!captureName.trim() || capturing) return;
+    setCapturing(true);
+    try {
+      if (await onCaptureCurrentOfficial(captureName.trim())) {
+        setCaptureDialogOpen(false);
+        setCaptureName("");
+      }
+    } finally {
+      setCapturing(false);
+    }
   };
 
   const confirmDelete = async () => {
@@ -279,6 +326,35 @@ function ListPage({
           >
             {actionBusy === "importCcSwitch" ? <Loader2 size={15} className="cx-providers-spin" aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />}
             {copy.importLabel}
+          </button>
+          <button
+            type="button"
+            className="cx-providers-button cx-providers-button--secondary"
+            onClick={onRestartCodex}
+            disabled={providerActionsBusy || isRestartingCodex}
+          >
+            <RotateCw size={15} className={isRestartingCodex ? "cx-providers-spin" : undefined} aria-hidden="true" />
+            {isRestartingCodex ? copy.restartingCodexLabel : copy.restartCodexLabel}
+          </button>
+          {showSaveCurrentOfficial && (
+            <button
+              type="button"
+              className="cx-providers-button cx-providers-button--primary"
+              onClick={() => setCaptureDialogOpen(true)}
+              disabled={providerActionsBusy}
+            >
+              <CheckCircle2 size={15} aria-hidden="true" />
+              {copy.saveCurrentOfficialLabel}
+            </button>
+          )}
+          <button
+            type="button"
+            className="cx-providers-button cx-providers-button--secondary"
+            onClick={onPrepareNewOfficialAccount}
+            disabled={providerActionsBusy}
+          >
+            <UserPlus size={15} aria-hidden="true" />
+            {copy.addOfficialAccountLabel}
           </button>
           <button type="button" className="cx-providers-button cx-providers-button--dark" onClick={onAddProvider} disabled={providerActionsBusy}>
             <Plus size={15} aria-hidden="true" />
@@ -318,7 +394,7 @@ function ListPage({
                 >
                   {copy.enableLabel}
                 </button>
-                {row.source === "official" && (
+                {row.source === "official" && row.officialKind === "legacy" && (
                   <ActionIconButton
                     icon={RotateCcw}
                     label={copy.restoreOfficialLabel}
@@ -333,6 +409,9 @@ function ListPage({
                     onClick={() => onTestProvider(row)}
                     disabled={providerActionsBusy || isTesting}
                   />
+                )}
+                {row.source === "local" && (
+                  <ActionIconButton icon={Copy} label={copy.copyLabel} onClick={() => onCopyProvider(row)} disabled={providerActionsBusy} />
                 )}
                 {row.editable !== false && (
                   <ActionIconButton icon={PencilLine} label={copy.editLabel} onClick={() => onEditProvider(row)} disabled={providerActionsBusy} />
@@ -351,9 +430,11 @@ function ListPage({
         onClose={closeDeleteDialog}
         title={copy.deleteTitle}
         description={providerToDelete
-          ? providerToDelete.isCurrent
-            ? copy.deleteCurrentDescription(providerToDelete.providerName)
-            : copy.deleteDescription(providerToDelete.providerName)
+          ? providerToDelete.source === "official" && providerToDelete.isCurrent
+            ? copy.deleteCurrentOfficialDescription
+            : providerToDelete.isCurrent
+              ? copy.deleteCurrentDescription(providerToDelete.providerName)
+              : copy.deleteDescription(providerToDelete.providerName)
           : undefined}
         size="sm"
         closeLabel={copy.deleteCancelLabel}
@@ -377,6 +458,44 @@ function ListPage({
           <span aria-hidden="true"><AlertTriangle size={22} /></span>
           <strong>{providerToDelete?.providerName}</strong>
         </div>
+      </ModalShell>
+
+      <ModalShell
+        open={captureDialogOpen}
+        onClose={() => {
+          if (!capturing) setCaptureDialogOpen(false);
+        }}
+        title={copy.captureOfficialTitle}
+        description={copy.captureOfficialDescription}
+        size="sm"
+        closeLabel={copy.deleteCancelLabel}
+        closeOnBackdrop={!capturing}
+        closeOnEscape={!capturing}
+        showCloseButton={!capturing}
+        footer={(
+          <>
+            <Button variant="secondary" onClick={() => setCaptureDialogOpen(false)} disabled={capturing}>
+              {copy.deleteCancelLabel}
+            </Button>
+            <Button
+              variant="primary"
+              icon={capturing ? <Loader2 size={16} className="cx-providers-spin" /> : <CheckCircle2 size={16} />}
+              onClick={() => void confirmCapture()}
+              disabled={capturing || !captureName.trim()}
+            >
+              {copy.captureOfficialConfirmLabel}
+            </Button>
+          </>
+        )}
+      >
+        <Field label={copy.captureOfficialNameLabel}>
+          <input
+            value={captureName}
+            onChange={(event) => setCaptureName(event.target.value)}
+            disabled={capturing}
+            autoFocus
+          />
+        </Field>
       </ModalShell>
     </>
   );
@@ -406,7 +525,9 @@ function OfficialForm({
   officialInfo,
   loading,
   actionBusy,
+  editingOfficialAccountId,
   onCancelMode,
+  onOfficialNameChange,
   onOfficialModelChange,
   onOfficialAuthChange,
   onOfficialConfigChange,
@@ -414,7 +535,7 @@ function OfficialForm({
   onLoadCcSwitchOfficial,
   onRestoreOfficial,
   onResetOfficial,
-}: Pick<ProvidersPageProps, "copy" | "officialForm" | "officialAuthRef" | "officialTomlRef" | "officialInfo" | "loading" | "actionBusy" | "onCancelMode" | "onOfficialModelChange" | "onOfficialAuthChange" | "onOfficialConfigChange" | "onSaveOfficial" | "onLoadCcSwitchOfficial" | "onRestoreOfficial" | "onResetOfficial">) {
+}: Pick<ProvidersPageProps, "copy" | "officialForm" | "officialAuthRef" | "officialTomlRef" | "officialInfo" | "loading" | "actionBusy" | "editingOfficialAccountId" | "onCancelMode" | "onOfficialNameChange" | "onOfficialModelChange" | "onOfficialAuthChange" | "onOfficialConfigChange" | "onSaveOfficial" | "onLoadCcSwitchOfficial" | "onRestoreOfficial" | "onResetOfficial">) {
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const loadingCcSwitch = actionBusy === "loadCcSwitchOfficial";
   const formBusy = loading || actionBusy === "loadOfficialDraft" || loadingCcSwitch;
@@ -433,6 +554,11 @@ function OfficialForm({
         <div><span>{copy.officialCurrentLabel}</span><code>{officialInfo.current}</code></div>
       </div>
       <div className="cx-providers-form-grid cx-providers-form-grid--single">
+        {editingOfficialAccountId && (
+          <Field label={copy.accountNameLabel}>
+            <input value={officialForm.name} onChange={(event) => onOfficialNameChange(event.target.value)} disabled={formBusy} />
+          </Field>
+        )}
         <Field label={copy.modelLabel}><input value={officialForm.model} onChange={(event) => onOfficialModelChange(event.target.value)} disabled={formBusy} /></Field>
       </div>
       <Field label={copy.officialTomlLabel} className="cx-providers-editor-field">
@@ -457,18 +583,22 @@ function OfficialForm({
         />
       </Field>
       <div className="cx-providers-form-actions cx-providers-form-actions--save cx-providers-official-actions">
-        <button type="button" className="cx-providers-button cx-providers-button--secondary" onClick={onLoadCcSwitchOfficial} disabled={formBusy}>
-          {loadingCcSwitch
-            ? <Loader2 size={15} className="cx-providers-spin" aria-hidden="true" />
-            : <Download size={15} aria-hidden="true" />}
-          {copy.loadCcSwitchOfficialLabel}
-        </button>
-        <button type="button" className="cx-providers-button cx-providers-button--secondary" onClick={onRestoreOfficial} disabled={formBusy}>
-          <RotateCcw size={15} aria-hidden="true" />{copy.restoreOfficialLabel}
-        </button>
-        <button type="button" className="cx-providers-button cx-providers-button--secondary" onClick={() => setResetConfirmOpen(true)} disabled={formBusy}>
-          <FilePlus2 size={15} aria-hidden="true" />{copy.resetOfficialLabel}
-        </button>
+        {!editingOfficialAccountId && (
+          <>
+            <button type="button" className="cx-providers-button cx-providers-button--secondary" onClick={onLoadCcSwitchOfficial} disabled={formBusy}>
+              {loadingCcSwitch
+                ? <Loader2 size={15} className="cx-providers-spin" aria-hidden="true" />
+                : <Download size={15} aria-hidden="true" />}
+              {copy.loadCcSwitchOfficialLabel}
+            </button>
+            <button type="button" className="cx-providers-button cx-providers-button--secondary" onClick={onRestoreOfficial} disabled={formBusy}>
+              <RotateCcw size={15} aria-hidden="true" />{copy.restoreOfficialLabel}
+            </button>
+            <button type="button" className="cx-providers-button cx-providers-button--secondary" onClick={() => setResetConfirmOpen(true)} disabled={formBusy}>
+              <FilePlus2 size={15} aria-hidden="true" />{copy.resetOfficialLabel}
+            </button>
+          </>
+        )}
         <button type="button" className="cx-providers-button cx-providers-button--primary" onClick={onSaveOfficial} disabled={formBusy}><CheckCircle2 size={15} aria-hidden="true" />{copy.officialSaveLabel}</button>
       </div>
       <ModalShell

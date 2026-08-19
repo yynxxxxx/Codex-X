@@ -40,7 +40,13 @@ const CCSWITCH_LOCAL_PROVIDER_SOURCE: &str = "cc-switch-local";
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ProviderIdentity {
     Credential([u8; 32]),
-    Unauthenticated { base_url: String, name: String },
+    Unauthenticated {
+        base_url: String,
+        name: String,
+        model: String,
+        wire_api: String,
+        requires_openai_auth: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +144,20 @@ fn effective_provider_api_key(provider: &SavedProvider) -> Option<String> {
         })
 }
 
+fn normalized_provider_model(provider: &SavedProvider) -> String {
+    provider.model.trim().to_string()
+}
+
+fn normalized_provider_wire_api(provider: &SavedProvider) -> String {
+    provider.wire_api.trim().to_ascii_lowercase()
+}
+
+fn same_provider_profile_fields(left: &SavedProvider, right: &SavedProvider) -> bool {
+    normalized_provider_model(left) == normalized_provider_model(right)
+        && normalized_provider_wire_api(left) == normalized_provider_wire_api(right)
+        && left.requires_openai_auth == right.requires_openai_auth
+}
+
 pub(crate) fn provider_identity(provider: &SavedProvider) -> Option<ProviderIdentity> {
     use sha2::{Digest, Sha256};
 
@@ -145,20 +165,35 @@ pub(crate) fn provider_identity(provider: &SavedProvider) -> Option<ProviderIden
     if base_url.is_empty() {
         return None;
     }
+    let model = normalized_provider_model(provider);
+    let wire_api = normalized_provider_wire_api(provider);
     if let Some(api_key) = effective_provider_api_key(provider) {
-        // Hash the complete endpoint/credential tuple so neither the key nor a
-        // reusable key-only fingerprint is persisted, logged, or sent to the UI.
+        // Hash the complete profile so the credential cannot be recovered or
+        // correlated independently of its endpoint and runtime settings.
         let mut hasher = Sha256::new();
-        hasher.update(b"codex-x/provider-identity/v1\0");
-        hasher.update(base_url.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(api_key.as_bytes());
+        hasher.update(b"codex-x/provider-profile-identity/v2\0");
+        for part in [
+            base_url.as_str(),
+            api_key.as_str(),
+            model.as_str(),
+            wire_api.as_str(),
+        ] {
+            hasher.update(part.as_bytes());
+            hasher.update(b"\0");
+        }
+        hasher.update([u8::from(provider.requires_openai_auth)]);
         let digest: [u8; 32] = hasher.finalize().into();
         return Some(ProviderIdentity::Credential(digest));
     }
 
     let name = normalized_provider_name(&provider.provider_name);
-    (!name.is_empty()).then_some(ProviderIdentity::Unauthenticated { base_url, name })
+    (!name.is_empty()).then_some(ProviderIdentity::Unauthenticated {
+        base_url,
+        name,
+        model,
+        wire_api,
+        requires_openai_auth: provider.requires_openai_auth,
+    })
 }
 
 pub(crate) fn provider_template_from_document(
@@ -212,7 +247,7 @@ fn same_provider_endpoint_and_name(left: &SavedProvider, right: &SavedProvider) 
 }
 
 fn compatible_provider_match(left: &SavedProvider, right: &SavedProvider) -> bool {
-    if !same_provider_endpoint_and_name(left, right) {
+    if !same_provider_endpoint(left, right) || !same_provider_profile_fields(left, right) {
         return false;
     }
     match (
@@ -220,7 +255,10 @@ fn compatible_provider_match(left: &SavedProvider, right: &SavedProvider) -> boo
         effective_provider_api_key(right),
     ) {
         (Some(left), Some(right)) => left == right,
-        _ => true,
+        _ => {
+            normalized_provider_name(&left.provider_name)
+                == normalized_provider_name(&right.provider_name)
+        }
     }
 }
 
@@ -274,7 +312,10 @@ pub(crate) fn matching_saved_provider_ids_for_live(
     }
     stable
         .into_iter()
-        .filter(|candidate| same_provider_endpoint_and_name(live, candidate))
+        .filter(|candidate| {
+            same_provider_endpoint_and_name(live, candidate)
+                && same_provider_profile_fields(live, candidate)
+        })
         .map(|candidate| candidate.id.clone())
         .collect()
 }
@@ -500,7 +541,8 @@ fn conflicting_provider_ids(
                 provider_identity(&candidate.provider).as_ref() == Some(identity)
             }) || (is_historical_custom_provider_id(&candidate.provider.id)
                 && !is_historical_custom_provider_id(&provider.id)
-                && same_provider_endpoint_and_name(&candidate.provider, provider))
+                && same_provider_endpoint_and_name(&candidate.provider, provider)
+                && same_provider_profile_fields(&candidate.provider, provider))
         })
         .map(|candidate| candidate.provider.id.clone())
         .collect()
@@ -794,6 +836,7 @@ pub(crate) fn consolidate_legacy_provider_duplicates_on_connection(
                 let mut candidates = rows.iter().filter(|candidate| {
                     !is_historical_custom_provider_id(&candidate.provider.id)
                         && same_provider_endpoint_and_name(&ghost.provider, &candidate.provider)
+                        && same_provider_profile_fields(&ghost.provider, &candidate.provider)
                 });
                 candidates.next()?;
                 candidates
@@ -1204,6 +1247,152 @@ mod tests {
     }
 
     #[test]
+    fn manual_profiles_keep_same_endpoint_and_key_with_different_models() {
+        let conn = test_connection();
+        let mut gpt = provider("waibi-gpt", "Waibi GPT", Some("test-key-shared"));
+        gpt.model = "gpt-5.6".to_string();
+        let mut deepseek = provider("waibi-deepseek", "Waibi DeepSeek", Some("test-key-shared"));
+        deepseek.model = "deepseek-v3".to_string();
+
+        upsert_provider_on_connection(&conn, gpt, ProviderUpsertMode::Manual).unwrap();
+        upsert_provider_on_connection(&conn, deepseek, ProviderUpsertMode::Manual).unwrap();
+
+        assert_eq!(provider_count(&conn), 2);
+    }
+
+    #[test]
+    fn manual_profiles_deduplicate_an_identical_profile() {
+        let conn = test_connection();
+        let first = provider("profile-first", "First Name", Some("test-key-shared"));
+        let second = provider("profile-second", "Renamed Profile", Some("test-key-shared"));
+
+        let added =
+            upsert_provider_on_connection(&conn, first, ProviderUpsertMode::Manual).unwrap();
+        let merged =
+            upsert_provider_on_connection(&conn, second, ProviderUpsertMode::Manual).unwrap();
+
+        assert_eq!(added.kind, ProviderUpsertKind::Added);
+        assert_eq!(merged.kind, ProviderUpsertKind::Merged);
+        assert_eq!(merged.provider.id, "profile-first");
+        assert_eq!(provider_count(&conn), 1);
+    }
+
+    #[test]
+    fn manual_profiles_keep_different_keys_for_the_same_model() {
+        let conn = test_connection();
+        let first = provider("profile-first", "Same API", Some("test-key-first"));
+        let second = provider("profile-second", "Same API", Some("test-key-second"));
+
+        upsert_provider_on_connection(&conn, first, ProviderUpsertMode::Manual).unwrap();
+        upsert_provider_on_connection(&conn, second, ProviderUpsertMode::Manual).unwrap();
+
+        assert_eq!(provider_count(&conn), 2);
+    }
+
+    #[test]
+    fn manual_profiles_keep_different_wire_apis() {
+        let conn = test_connection();
+        let first = provider("responses-profile", "Responses", Some("test-key-shared"));
+        let mut second = provider("chat-profile", "Chat", Some("test-key-shared"));
+        second.wire_api = "chat".to_string();
+
+        upsert_provider_on_connection(&conn, first, ProviderUpsertMode::Manual).unwrap();
+        upsert_provider_on_connection(&conn, second, ProviderUpsertMode::Manual).unwrap();
+
+        assert_eq!(provider_count(&conn), 2);
+    }
+
+    #[test]
+    fn manual_profiles_keep_different_auth_requirements() {
+        let conn = test_connection();
+        let first = provider("auth-profile", "Auth", Some("test-key-shared"));
+        let mut second = provider("no-auth-profile", "No Auth", Some("test-key-shared"));
+        second.requires_openai_auth = false;
+
+        upsert_provider_on_connection(&conn, first, ProviderUpsertMode::Manual).unwrap();
+        upsert_provider_on_connection(&conn, second, ProviderUpsertMode::Manual).unwrap();
+
+        assert_eq!(provider_count(&conn), 2);
+    }
+
+    #[test]
+    fn live_provider_profile_matches_only_its_model() {
+        let mut gpt = provider("waibi-gpt", "Waibi GPT", Some("test-key-shared"));
+        gpt.model = "gpt-5.6".to_string();
+        let mut deepseek = provider("waibi-deepseek", "Waibi DeepSeek", Some("test-key-shared"));
+        deepseek.model = "deepseek-v3".to_string();
+
+        let mut live_gpt = gpt.clone();
+        live_gpt.id = "custom".to_string();
+        live_gpt.provider_name = "Waibi GPT".to_string();
+        assert_eq!(
+            unique_saved_provider_id_for_live(&live_gpt, &[gpt.clone(), deepseek.clone()]),
+            Some("waibi-gpt".to_string())
+        );
+
+        let mut live_deepseek = deepseek.clone();
+        live_deepseek.id = "custom".to_string();
+        live_deepseek.provider_name = "Waibi DeepSeek".to_string();
+        assert_eq!(
+            unique_saved_provider_id_for_live(&live_deepseek, &[gpt, deepseek]),
+            Some("waibi-deepseek".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_cleanup_keeps_same_credentials_with_different_models() {
+        let conn = test_connection();
+        let mut gpt = provider("waibi-gpt", "Waibi", Some("test-key-shared"));
+        gpt.model = "gpt-5.6".to_string();
+        let mut deepseek = provider("waibi-deepseek", "Waibi", Some("test-key-shared"));
+        deepseek.model = "deepseek-v3".to_string();
+        write_provider_on_connection(&conn, &gpt).unwrap();
+        write_provider_on_connection(&conn, &deepseek).unwrap();
+
+        assert_eq!(
+            consolidate_legacy_provider_duplicates_on_connection(&conn).unwrap(),
+            0
+        );
+        assert_eq!(provider_count(&conn), 2);
+    }
+
+    #[test]
+    fn editing_model_updates_the_requested_provider_id() {
+        let conn = test_connection();
+        let original = provider("waibi-gpt", "Waibi GPT", Some("test-key-shared"));
+        upsert_provider_on_connection(&conn, original, ProviderUpsertMode::Manual).unwrap();
+
+        let mut edited = provider("waibi-gpt", "Waibi GPT", Some("test-key-shared"));
+        edited.model = "gpt-5.6".to_string();
+        let result =
+            upsert_provider_on_connection(&conn, edited, ProviderUpsertMode::Manual).unwrap();
+
+        assert_eq!(result.kind, ProviderUpsertKind::Updated);
+        assert_eq!(result.provider.id, "waibi-gpt");
+        assert_eq!(result.provider.model, "gpt-5.6");
+        assert_eq!(provider_count(&conn), 1);
+    }
+
+    #[test]
+    fn repeated_ccswitch_source_updates_in_place_after_profile_change() {
+        let conn = test_connection();
+        let initial = provider("cc-row", "CC GPT", Some("test-key-shared"));
+        upsert_ccswitch_provider_on_connection(&conn, initial, "stable-source").unwrap();
+
+        let mut changed = provider("cc-row", "CC DeepSeek", Some("test-key-shared"));
+        changed.model = "deepseek-v3".to_string();
+        changed.wire_api = "chat".to_string();
+        let result =
+            upsert_ccswitch_provider_on_connection(&conn, changed, "stable-source").unwrap();
+
+        assert_eq!(result.kind, ProviderUpsertKind::Updated);
+        assert_eq!(result.provider.id, "cc-row");
+        assert_eq!(result.provider.model, "deepseek-v3");
+        assert_eq!(result.provider.wire_api, "chat");
+        assert_eq!(provider_count(&conn), 1);
+    }
+
+    #[test]
     fn provider_upsert_deduplicates_safe_matches_and_keeps_distinct_credentials() {
         let stable = test_connection();
         let mut existing = provider("cc-stable-id", "Old name", Some("sk-old"));
@@ -1308,14 +1497,14 @@ mod tests {
 
         let mut changed = provider("cc-old", "Imported changed", Some("sk-shared"));
         changed.base_url = "https://shared.example.com/v1".to_string();
-        changed.model = "remote-model".to_string();
+        changed.model = "local-model".to_string();
         let result = upsert_ccswitch_provider_on_connection(&conn, changed, "cc-row")
             .expect("merge source update into manual record");
 
         assert_eq!(result.kind, ProviderUpsertKind::Merged);
         assert_eq!(result.provider.id, "manual-local");
         assert_eq!(result.provider.provider_name, "Imported changed");
-        assert_eq!(result.provider.model, "remote-model");
+        assert_eq!(result.provider.model, "local-model");
         assert_eq!(
             result.provider.toml_config.as_deref(),
             Some("model = \"local-model\"")
@@ -1510,7 +1699,7 @@ enabled = true
     fn legacy_consolidation_keeps_local_id_but_next_import_is_authoritative() {
         let conn = test_connection();
         let mut imported = provider("imported-old", "Imported old", Some("sk-same"));
-        imported.model = "old-model".to_string();
+        imported.model = "latest-model".to_string();
         write_provider_with_origin(&conn, &imported, Some((CCSWITCH_PROVIDER_SOURCE, "cc-row")))
             .unwrap();
         let mut manual = provider("manual-local", "Edited locally", Some("sk-same"));

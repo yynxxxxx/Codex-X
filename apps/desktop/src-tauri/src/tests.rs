@@ -202,7 +202,7 @@ fn provider_base_url_canonicalization_preserves_path_case() {
 }
 
 #[test]
-fn provider_identity_uses_url_and_effective_credential_not_model_or_name() {
+fn provider_identity_uses_the_complete_profile_but_not_authenticated_name() {
     let direct = provider_fixture(
         "direct",
         "Magic AI",
@@ -216,7 +216,7 @@ fn provider_identity_uses_url_and_effective_credential_not_model_or_name() {
         "Renamed Provider",
         "https://example.com/v1",
         None,
-        "gpt-5.5",
+        "gpt-5.6-sol",
         Some(
             r#"model_provider = "custom"
 [model_providers.custom]
@@ -229,13 +229,25 @@ experimental_bearer_token = "sk-same"
         "Magic AI",
         "https://example.com/v1",
         Some("sk-other"),
-        "gpt-5.5",
+        "gpt-5.6-sol",
+        None,
+    );
+    let different_model = provider_fixture(
+        "different-model",
+        "Magic AI",
+        "https://example.com/v1",
+        Some("sk-same"),
+        "deepseek-v3",
         None,
     );
     assert_eq!(provider_identity(&direct), provider_identity(&toml));
     assert_ne!(
         provider_identity(&direct),
         provider_identity(&different_key)
+    );
+    assert_ne!(
+        provider_identity(&direct),
+        provider_identity(&different_model)
     );
 
     let anonymous_a = provider_fixture(
@@ -251,6 +263,14 @@ experimental_bearer_token = "sk-same"
         "acme api",
         "https://EXAMPLE.com/v1",
         None,
+        "one",
+        None,
+    );
+    let anonymous_other_model = provider_fixture(
+        "anonymous-other-model",
+        "acme api",
+        "https://example.com/v1",
+        None,
         "two",
         None,
     );
@@ -258,10 +278,14 @@ experimental_bearer_token = "sk-same"
         provider_identity(&anonymous_a),
         provider_identity(&anonymous_b)
     );
+    assert_ne!(
+        provider_identity(&anonymous_a),
+        provider_identity(&anonymous_other_model)
+    );
 }
 
 #[test]
-fn manual_provider_save_upserts_same_url_and_key_but_keeps_different_keys() {
+fn manual_provider_save_keeps_distinct_profiles_for_models_and_keys() {
     let conn = provider_test_connection();
     let first = normalize_saved_provider(provider_fixture(
         "first",
@@ -285,12 +309,12 @@ fn manual_provider_save_upserts_same_url_and_key_but_keeps_different_keys() {
         None,
     ))
     .expect("normalize renamed");
-    let merged = upsert_provider_on_connection(&conn, renamed, ProviderUpsertMode::Manual)
-        .expect("merge same identity");
-    assert_eq!(merged.kind, ProviderUpsertKind::Merged);
-    assert_eq!(merged.provider.id, "first");
-    assert_eq!(merged.provider.provider_name, "Second Name");
-    assert_eq!(merged.provider.model, "model-b");
+    let second_add = upsert_provider_on_connection(&conn, renamed, ProviderUpsertMode::Manual)
+        .expect("keep a different model profile");
+    assert_eq!(second_add.kind, ProviderUpsertKind::Added);
+    assert_eq!(second_add.provider.id, "second");
+    assert_eq!(second_add.provider.provider_name, "Second Name");
+    assert_eq!(second_add.provider.model, "model-b");
 
     let other_key = normalize_saved_provider(provider_fixture(
         "third",
@@ -301,10 +325,10 @@ fn manual_provider_save_upserts_same_url_and_key_but_keeps_different_keys() {
         None,
     ))
     .expect("normalize other key");
-    let second_add = upsert_provider_on_connection(&conn, other_key, ProviderUpsertMode::Manual)
+    let third_add = upsert_provider_on_connection(&conn, other_key, ProviderUpsertMode::Manual)
         .expect("keep different credential");
-    assert_eq!(second_add.kind, ProviderUpsertKind::Added);
-    assert_eq!(list_saved_providers_on_connection(&conn).unwrap().len(), 2);
+    assert_eq!(third_add.kind, ProviderUpsertKind::Added);
+    assert_eq!(list_saved_providers_on_connection(&conn).unwrap().len(), 3);
 }
 
 #[test]
@@ -329,35 +353,34 @@ experimental_bearer_token = "sk-same"
 
     let imported_toml = r#"# authoritative cc-switch template
 model_provider = "custom"
-model = "cc-model"
+model = "local-model"
 service_tier = "priority"
 
 [model_providers.custom]
 name = "CC Name"
 base_url = "https://example.com/v1"
 wire_api = "responses"
-requires_openai_auth = false
+requires_openai_auth = true
 
 [projects."/work/project"]
 trust_level = "trusted"
 "#;
-    let mut imported_fixture = provider_fixture(
+    let imported_fixture = provider_fixture(
         "cc-switch-id",
         "CC Name",
         "https://EXAMPLE.com:443/v1/",
         Some("sk-same"),
-        "cc-model",
+        "local-model",
         Some(imported_toml),
     );
-    imported_fixture.requires_openai_auth = false;
     let imported = normalize_saved_provider(imported_fixture).expect("normalize import");
     let result = upsert_ccswitch_provider_on_connection(&conn, imported.clone(), "cc-switch-id")
         .expect("merge import");
     assert_eq!(result.kind, ProviderUpsertKind::Merged);
     assert_eq!(result.provider.id, "local");
     assert_eq!(result.provider.provider_name, "CC Name");
-    assert_eq!(result.provider.model, "cc-model");
-    assert!(!result.provider.requires_openai_auth);
+    assert_eq!(result.provider.model, "local-model");
+    assert!(result.provider.requires_openai_auth);
     let normalized_toml = result.provider.toml_config.as_deref().unwrap();
     assert!(normalized_toml.contains("# authoritative cc-switch template"));
     assert!(normalized_toml.contains("name = \"CC Name\""));
@@ -393,7 +416,7 @@ fn provider_migration_keeps_the_latest_exact_credential_record() {
         "Imported Name",
         "https://example.com/v1",
         Some("sk-same"),
-        "imported-model",
+        "local-model",
         Some("local preserved toml"),
     );
     let different_key = provider_fixture(
@@ -464,7 +487,7 @@ fn provider_migration_keeps_the_latest_exact_credential_record() {
     assert_eq!(rows.len(), 4);
     let survivor = rows.iter().find(|row| row.id == "later-id").unwrap();
     assert_eq!(survivor.provider_name, "Imported Name");
-    assert_eq!(survivor.model, "imported-model");
+    assert_eq!(survivor.model, "local-model");
     assert_eq!(
         survivor.toml_config.as_deref(),
         Some("local preserved toml")
