@@ -326,12 +326,20 @@
 
 .cx-skills-row-copy {
   min-width: 0;
+  display: grid;
+  align-items: center;
+  gap: 6px;
+}
+
+.cx-skills-row-title {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 9px;
 }
 
-.cx-skills-row-copy > strong {
+.cx-skills-row-copy > strong,
+.cx-skills-row-title > strong {
   display: block;
   overflow: hidden;
   color: #2a2e34;
@@ -349,6 +357,116 @@
   padding: 0 6px;
   border-radius: 5px;
   font-size: 11px;
+}
+
+.cx-skills-row-copy > p,
+.cx-skills-note p {
+  margin: 0;
+  color: #737983;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.cx-skills-row-copy > p span,
+.cx-skills-note p span {
+  margin-right: 5px;
+  color: #555c66;
+  font-weight: 650;
+}
+
+.cx-skills-note {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.cx-skills-note p {
+  flex: 1 1 auto;
+}
+
+.cx-skills-note > button {
+  min-height: 24px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  color: #657188;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.cx-skills-note > button:hover {
+  color: #2454b3;
+}
+
+.cx-skills-note-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.cx-skills-note-editor textarea {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: 8px 9px;
+  border: 1px solid #d8dce2;
+  border-radius: 6px;
+  color: #30343a;
+  background: #fbfcfd;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cx-skills-note-editor textarea:focus {
+  border-color: #7c9bd9;
+  outline: 2px solid rgba(37, 99, 235, 0.16);
+  outline-offset: 1px;
+}
+
+.cx-skills-note-editor > div {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.cx-skills-note-editor > div > span {
+  margin-right: auto;
+  color: #9298a1;
+  font-size: 10px;
+}
+
+.cx-skills-note-editor button {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid #dce0e6;
+  border-radius: 6px;
+  color: #596272;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.cx-skills-note-editor button:last-child {
+  border-color: #315fb9;
+  color: #ffffff;
+  background: #315fb9;
+}
+
+.cx-skills-note-editor button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .cx-skills-row-control,
@@ -1444,11 +1562,12 @@
   }
 
   .cx-skills-row {
-    grid-template-columns: 34px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .cx-skills-row-control {
     grid-column: 2;
+    align-self: start;
     justify-content: flex-start;
   }
 

@@ -1,14 +1,17 @@
 mod mcp;
+mod notes;
 mod skills;
 mod types;
 
 pub(crate) use mcp::{sort_managed_mcp_servers, toggle_codex_mcp_inner};
+pub(crate) use notes::update_skills_mcp_note_inner;
 pub(crate) use skills::{
     check_skill_updates_inner, install_skill_zip_inner, normalize_legacy_zip_skill_dirs,
     sort_managed_skills, toggle_codex_skill_inner,
 };
 pub(crate) use types::{
-    ManagedMcpServer, SkillsMcpActionResult, SkillsMcpImportPreview, SkillsMcpState,
+    ManagedMcpServer, SkillMcpNoteUpdate, SkillsMcpActionResult, SkillsMcpImportPreview,
+    SkillsMcpState,
 };
 
 #[cfg(test)]
@@ -24,6 +27,7 @@ use mcp::{
     db_managed_mcp, import_ccswitch_mcp_servers_for_codex, list_mcp_from_config, mcp_summary,
     preview_ccswitch_mcp_servers_for_codex, save_managed_mcp,
 };
+use notes::{load_notes, MCP_NOTE_KIND, SKILL_NOTE_KIND};
 use skills::{
     codex_skills_dir, copy_dir_recursive, disabled_skills_dir, sanitize_dir_name, scan_skill_dir,
 };
@@ -85,7 +89,19 @@ pub(crate) fn build_skills_mcp_state_inner(config_dir: Option<String>) -> Result
             command,
             url,
             config_json: config,
+            note: None,
         });
+    }
+    let notes = load_notes(&codex_dir)?;
+    for skill in &mut skills {
+        skill.note = notes
+            .get(&(SKILL_NOTE_KIND.to_string(), skill.id.clone()))
+            .cloned();
+    }
+    for server in &mut mcp_servers {
+        server.note = notes
+            .get(&(MCP_NOTE_KIND.to_string(), server.id.clone()))
+            .cloned();
     }
     sort_managed_mcp_servers(&mut mcp_servers);
     sort_managed_skills(&mut skills);
@@ -226,6 +242,7 @@ mod tests {
             command: Some(id.to_string()),
             url: None,
             config_json: json!({ "command": id }),
+            note: None,
         }
     }
 

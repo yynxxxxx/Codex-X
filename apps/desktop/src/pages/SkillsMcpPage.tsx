@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useEffect, useId, useState } from "react";
 import type { ChangeEvent, RefObject } from "react";
 import {
   AlertCircle,
@@ -6,11 +6,15 @@ import {
   Download,
   FolderInput,
   Loader2,
+  MessageSquarePlus,
   PackageOpen,
+  Pencil,
   PlugZap,
   RefreshCw,
+  Save,
   Sparkles,
   Upload,
+  X,
 } from "lucide-react";
 
 import { PageTransition } from "../components/PageTransition";
@@ -40,6 +44,7 @@ export type SkillsMcpPageProps = {
   onCheckUpdates: MaybeAsyncAction;
   onToggleSkill: (id: string, enabled: boolean) => void | Promise<void>;
   onToggleMcp: (id: string, enabled: boolean) => void | Promise<void>;
+  onSaveNote: (itemKind: "skill" | "mcp", itemId: string, note: string) => Promise<void>;
 };
 
 type SkillsMcpCopy = ReturnType<typeof getCopy>;
@@ -74,6 +79,13 @@ function getCopy(lang: Lang) {
         importing: "正在导入",
         confirmImport: "导入",
         warnings: "需要留意",
+        sourceDescription: "说明",
+        myNote: "我的备注",
+        addNote: "添加备注",
+        editNote: "编辑备注",
+        notePlaceholder: "记录这个项目的用途...",
+        saveNote: "保存备注",
+        cancelNote: "取消",
       }
     : {
         eyebrow: "SKILLS / MCP",
@@ -103,11 +115,87 @@ function getCopy(lang: Lang) {
         importing: "Importing",
         confirmImport: "Import",
         warnings: "Review these items",
+        sourceDescription: "Description",
+        myNote: "My note",
+        addNote: "Add note",
+        editNote: "Edit note",
+        notePlaceholder: "Record what you use this item for...",
+        saveNote: "Save note",
+        cancelNote: "Cancel",
       };
 }
 
 function run(action: MaybeAsyncAction) {
   void action();
+}
+
+function NoteEditor({
+  itemKind,
+  itemId,
+  note,
+  copy,
+  onSave,
+}: {
+  itemKind: "skill" | "mcp";
+  itemId: string;
+  note?: string | null;
+  copy: SkillsMcpCopy;
+  onSave: SkillsMcpPageProps["onSaveNote"];
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(note ?? "");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!editing) setDraft(note ?? "");
+  }, [editing, note]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await onSave(itemKind, itemId, draft);
+      setEditing(false);
+    } catch {
+      // The parent reports the error; keep the draft open for retry.
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <div className="cx-skills-note">
+        {note ? <p><span>{copy.myNote}:</span>{note}</p> : null}
+        <button type="button" onClick={() => setEditing(true)} aria-label={note ? copy.editNote : copy.addNote}>
+          {note ? <Pencil size={13} aria-hidden="true" /> : <MessageSquarePlus size={13} aria-hidden="true" />}
+          {note ? copy.editNote : copy.addNote}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="cx-skills-note-editor">
+      <textarea
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        placeholder={copy.notePlaceholder}
+        maxLength={1000}
+        disabled={saving}
+        aria-label={copy.myNote}
+        autoFocus
+      />
+      <div>
+        <span>{draft.length}/1000</span>
+        <button type="button" onClick={() => setEditing(false)} disabled={saving} title={copy.cancelNote} aria-label={copy.cancelNote}>
+          <X size={15} aria-hidden="true" />
+        </button>
+        <button type="button" onClick={() => void save()} disabled={saving} title={copy.saveNote} aria-label={copy.saveNote}>
+          {saving ? <Loader2 size={15} className="cx-skills-spin" aria-hidden="true" /> : <Save size={15} aria-hidden="true" />}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function McpRow({
@@ -116,12 +204,14 @@ function McpRow({
   disabled,
   copy,
   onToggle,
+  onSaveNote,
 }: {
   server: ManagedMcpServer;
   busy: boolean;
   disabled: boolean;
   copy: SkillsMcpCopy;
   onToggle: SkillsMcpPageProps["onToggleMcp"];
+  onSaveNote: SkillsMcpPageProps["onSaveNote"];
 }) {
   const name = server.name || server.id;
   const details = [server.summary, server.transport, server.source].filter(Boolean).join("\n");
@@ -129,6 +219,8 @@ function McpRow({
     <article className="cx-skills-row">
       <div className="cx-skills-row-copy">
         <strong title={details ? `${name}\n${details}` : name}>{name}</strong>
+        {server.summary && <p><span>{copy.sourceDescription}:</span>{server.summary}</p>}
+        <NoteEditor itemKind="mcp" itemId={server.id} note={server.note} copy={copy} onSave={onSaveNote} />
       </div>
       <div className="cx-skills-row-control">
         {busy && <Loader2 size={15} className="cx-skills-spin" aria-hidden="true" />}
@@ -149,12 +241,14 @@ function SkillRow({
   disabled,
   copy,
   onToggle,
+  onSaveNote,
 }: {
   skill: ManagedSkill;
   busy: boolean;
   disabled: boolean;
   copy: SkillsMcpCopy;
   onToggle: SkillsMcpPageProps["onToggleSkill"];
+  onSaveNote: SkillsMcpPageProps["onSaveNote"];
 }) {
   const name = skill.name || skill.directory;
   const updateTone = skill.updateStatus.includes("失败") || skill.updateStatus.toLowerCase().includes("fail")
@@ -169,12 +263,16 @@ function SkillRow({
   return (
     <article className="cx-skills-row">
       <div className="cx-skills-row-copy">
-        <strong title={details ? `${name}\n${details}` : name}>{name}</strong>
-        {showUpdateStatus && (
-          <StatusBadge tone={updateTone} dot={false} title={copy.updateStatus}>
-            {skill.updateStatus}
-          </StatusBadge>
-        )}
+        <div className="cx-skills-row-title">
+          <strong title={details ? `${name}\n${details}` : name}>{name}</strong>
+          {showUpdateStatus && (
+            <StatusBadge tone={updateTone} dot={false} title={copy.updateStatus}>
+              {skill.updateStatus}
+            </StatusBadge>
+          )}
+        </div>
+        {skill.description && <p><span>{copy.sourceDescription}:</span>{skill.description}</p>}
+        <NoteEditor itemKind="skill" itemId={skill.id} note={skill.note} copy={copy} onSave={onSaveNote} />
       </div>
       <div className="cx-skills-row-control">
         {busy && <Loader2 size={15} className="cx-skills-spin" aria-hidden="true" />}
@@ -268,6 +366,7 @@ export function SkillsMcpPage({
   onCheckUpdates,
   onToggleSkill,
   onToggleMcp,
+  onSaveNote,
 }: SkillsMcpPageProps) {
   const copy = getCopy(lang);
   const tabId = useId();
@@ -395,6 +494,7 @@ export function SkillsMcpPage({
                       disabled={anyBusy}
                       copy={copy}
                       onToggle={onToggleMcp}
+                      onSaveNote={onSaveNote}
                     />
                   ))
                 ) : state.skills.length === 0 ? (
@@ -407,6 +507,7 @@ export function SkillsMcpPage({
                     disabled={anyBusy}
                     copy={copy}
                     onToggle={onToggleSkill}
+                    onSaveNote={onSaveNote}
                   />
                 ))}
               </div>

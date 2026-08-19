@@ -3,6 +3,7 @@ mod backup;
 mod catalog;
 mod delete;
 mod global_state;
+mod maintenance;
 mod storage;
 mod sync;
 mod transaction;

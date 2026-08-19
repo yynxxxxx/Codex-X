@@ -11,44 +11,10 @@ import {
   Zap,
 } from "lucide-react";
 import { Button, Checkbox, ModalShell, cx } from "../components/ui";
+import type { SessionPreview, SessionSyncStatus } from "../features/sessions/types";
 import "../styles/session-management.css";
 
 export type Lang = "zh" | "en";
-
-export type SessionPreview = {
-  id: string;
-  title: string;
-  modelProvider?: string | null;
-  model?: string | null;
-  cwd?: string | null;
-  rolloutPath?: string | null;
-  updatedAtMs?: number | null;
-  archived: boolean;
-  hasUserEvent: boolean;
-  isSubagent: boolean;
-  needsSync: boolean;
-};
-
-export type SessionSyncStatus = {
-  codexDir: string;
-  targetProvider: string;
-  rolloutFiles: number;
-  sessionMetaCount: number;
-  mismatchedRollouts: number;
-  mismatchedSessionMeta: number;
-  sqliteDbs: number;
-  sqliteThreads: number;
-  topLevelThreads: number;
-  subagentThreads: number;
-  mismatchedThreads: number;
-  mismatchedSessions: number;
-  needsSync: boolean;
-  scanComplete: boolean;
-  scanFailures: string[];
-  backupDir?: string | null;
-  warnings: string[];
-  sessions: SessionPreview[];
-};
 
 type SessionManagementPageProps = {
   active: boolean;
@@ -162,6 +128,7 @@ export function SessionManagementPage({
         checking: "检查中...",
         sync: "同步会话",
         syncing: "同步中...",
+        syncLifecycle: "同步期间会自动关闭 Codex Desktop，完成后自动恢复。",
         clickToCheck: "点击检查会话",
         scanIncomplete: "无法确认同步状态，请查看下方原因",
         needsSync: (count: number) => `有 ${count} 条会话需要同步`,
@@ -194,10 +161,10 @@ export function SessionManagementPage({
         irreversible: "此操作不可恢复",
         deleteDescription: "所选会话将从 Codex 的本地数据中永久删除，不会移入回收站，也不会创建新的备份。",
         deleteChildren: "由这些会话派生的子会话也会一并删除。",
-        closeClients: "请先关闭正在使用这些会话的 Codex 窗口或 CLI。",
+        closeClients: "删除期间会自动关闭 Codex Desktop，完成后自动恢复；正在使用这些会话的 CLI 仍需先停止。",
         pendingDelete: "待删除会话",
         moreSessions: (count: number) => `另有 ${count} 条会话未在此处展开`,
-        safetyCheck: "我已关闭其他正在使用这些会话的 Codex 窗口或 CLI",
+        safetyCheck: "我了解永久删除风险，并已停止正在使用这些会话的 Codex CLI",
         cancel: "取消",
         deleting: "正在永久删除...",
         confirmDelete: (count: number) => `确认永久删除 ${count} 条`,
@@ -211,6 +178,7 @@ export function SessionManagementPage({
         checking: "Checking...",
         sync: "Sync sessions",
         syncing: "Syncing...",
+        syncLifecycle: "Codex Desktop will close automatically during synchronization and reopen afterward.",
         clickToCheck: "Check sessions to get started",
         scanIncomplete: "Unable to verify sync status. See the reason below.",
         needsSync: (count: number) => `${count} session(s) need syncing`,
@@ -243,10 +211,10 @@ export function SessionManagementPage({
         irreversible: "This cannot be undone",
         deleteDescription: "Selected sessions will be permanently deleted from Codex local data. There is no recycle bin or new backup.",
         deleteChildren: "Child sessions spawned from these sessions will also be deleted.",
-        closeClients: "Close other Codex windows or CLIs using these sessions first.",
+        closeClients: "Codex Desktop will close automatically during deletion and reopen afterward. Stop any CLI using these sessions first.",
         pendingDelete: "Sessions to delete",
         moreSessions: (count: number) => `${count} more session(s) not shown`,
-        safetyCheck: "I closed other Codex windows or CLIs using these sessions",
+        safetyCheck: "I understand permanent deletion and stopped any Codex CLI using these sessions",
         cancel: "Cancel",
         deleting: "Deleting permanently...",
         confirmDelete: (count: number) => `Delete ${count} permanently`,
@@ -331,7 +299,8 @@ export function SessionManagementPage({
             <h2>{copy.title}</h2>
             <p className="cx-session-description">{copy.description}</p>
           </div>
-          <div className="cx-session-header-actions">
+          <div className="cx-session-header-side">
+            <div className="cx-session-header-actions">
             <span className="cx-session-target"><span>{copy.syncTo}</span><strong>{sessionTargetLabel}</strong></span>
             <button type="button" className="cx-session-button cx-session-button--secondary" onClick={onCheckSessions} disabled={loading} aria-busy={actionBusy === "checkSessions"}>
               {actionBusy === "checkSessions" ? <Loader2 size={16} className="cx-session-spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
@@ -341,6 +310,8 @@ export function SessionManagementPage({
               {actionBusy === "syncSessions" ? <Loader2 size={16} className="cx-session-spin" aria-hidden="true" /> : <Zap size={16} aria-hidden="true" />}
               {actionBusy === "syncSessions" ? copy.syncing : copy.sync}
             </button>
+            </div>
+            <p className="cx-session-lifecycle-note">{copy.syncLifecycle}</p>
           </div>
         </header>
 

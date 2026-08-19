@@ -680,6 +680,7 @@
 :root[data-theme="dark"] .cx-prompts-heading h2,
 :root[data-theme="dark"] .cx-skills-list-head h3,
 :root[data-theme="dark"] .cx-skills-row-copy > strong,
+:root[data-theme="dark"] .cx-skills-row-title > strong,
 :root[data-theme="dark"] .cx-prompts-row-title strong,
 :root[data-theme="dark"] .cx-prompts-active-title strong,
 :root[data-theme="dark"] .cx-prompts-form-panel-head h3 {
@@ -768,6 +769,38 @@
   background: var(--cx-dark-surface-hover);
   border-color: var(--cx-dark-border-strong);
   box-shadow: 0 7px 18px rgba(0, 0, 0, 0.18);
+}
+
+:root[data-theme="dark"] .cx-skills-row-copy > p,
+:root[data-theme="dark"] .cx-skills-note p {
+  color: var(--cx-dark-muted);
+}
+
+:root[data-theme="dark"] .cx-skills-row-copy > p span,
+:root[data-theme="dark"] .cx-skills-note p span {
+  color: #c4c7ce;
+}
+
+:root[data-theme="dark"] .cx-skills-note > button {
+  color: #9cb8e8;
+}
+
+:root[data-theme="dark"] .cx-skills-note-editor textarea {
+  color: var(--cx-dark-text);
+  background: var(--cx-dark-surface-recessed);
+  border-color: var(--cx-dark-border-strong);
+}
+
+:root[data-theme="dark"] .cx-skills-note-editor button {
+  color: #c4c7ce;
+  background: var(--cx-dark-surface-raised);
+  border-color: var(--cx-dark-border-strong);
+}
+
+:root[data-theme="dark"] .cx-skills-note-editor button:last-child {
+  color: #ffffff;
+  background: #2563eb;
+  border-color: #3b72e6;
 }
 
 :root[data-theme="dark"] .cx-prompts-row:hover {

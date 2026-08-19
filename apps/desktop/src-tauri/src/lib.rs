@@ -112,7 +112,8 @@ use sessions::{
 use skills_mcp::{
     build_skills_mcp_state_inner, check_skill_updates_inner, import_existing_skills_mcp_inner,
     install_skill_zip_inner, preview_existing_skills_mcp_inner, toggle_codex_mcp_inner,
-    toggle_codex_skill_inner, SkillsMcpActionResult, SkillsMcpImportPreview, SkillsMcpState,
+    toggle_codex_skill_inner, update_skills_mcp_note_inner, SkillMcpNoteUpdate,
+    SkillsMcpActionResult, SkillsMcpImportPreview, SkillsMcpState,
 };
 #[cfg(test)]
 use skills_mcp::{
@@ -477,6 +478,20 @@ async fn toggle_codex_mcp(
     tauri::async_runtime::spawn_blocking(move || toggle_codex_mcp_inner(config_dir, id, enabled))
         .await
         .map_err(|e| CodexxError::Config(format!("切换 MCP 失败: {e}")))?
+}
+
+#[tauri::command]
+async fn update_skills_mcp_note(
+    config_dir: Option<String>,
+    item_kind: String,
+    item_id: String,
+    note: String,
+) -> Result<SkillMcpNoteUpdate> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update_skills_mcp_note_inner(config_dir, item_kind, item_id, note)
+    })
+    .await
+    .map_err(|e| CodexxError::Config(format!("保存 Skills/MCP 备注失败: {e}")))?
 }
 
 #[tauri::command]
@@ -1428,6 +1443,7 @@ pub fn run() {
             import_existing_skills_mcp,
             toggle_codex_skill,
             toggle_codex_mcp,
+            update_skills_mcp_note,
             install_skill_zip,
             check_skill_updates,
             get_startup_diagnostics,

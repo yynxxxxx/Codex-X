@@ -1,5 +1,6 @@
 use super::backup::{create_provider_sync_backup, prune_provider_sync_backups};
 use super::catalog::{scan_catalog_sync, CatalogSyncScan};
+use super::maintenance::run_with_stopped_desktop;
 use super::storage::{
     current_model_provider, discover_sqlite_databases, ensure_sqlite_discovery_writable,
     list_session_previews_with_paths, scan_provider_rollouts, scan_rollouts_for_thread_ids,
@@ -12,6 +13,7 @@ use super::transaction::{
 use super::types::{RolloutScan, SessionSyncResult, SessionSyncStatus, SqliteScan};
 use crate::error::{CodexxError, Result};
 use crate::file_io::{ensure_directory, io_err};
+use crate::platform;
 use crate::resolve_codex_dir;
 use std::collections::HashSet;
 use std::fs;
@@ -310,16 +312,48 @@ pub(crate) fn sync_sessions_provider_inner(
     config_dir: Option<String>,
     target_provider: Option<String>,
 ) -> Result<SessionSyncResult> {
-    sync_sessions_provider_with_hook(config_dir, target_provider, |_| Ok(()))
+    sync_sessions_provider_with_lifecycle(
+        config_dir,
+        target_provider,
+        |_| Ok(()),
+        platform::stop_codex_desktop,
+        |state| state.was_running(),
+        |state| platform::start_codex_desktop(state, false),
+    )
 }
 
+#[cfg(test)]
 pub(super) fn sync_sessions_provider_with_hook<F>(
     config_dir: Option<String>,
     target_provider: Option<String>,
-    mut hook: F,
+    hook: F,
 ) -> Result<SessionSyncResult>
 where
     F: FnMut(MutationPoint) -> Result<()>,
+{
+    sync_sessions_provider_with_lifecycle(
+        config_dir,
+        target_provider,
+        hook,
+        platform::stop_codex_desktop,
+        |state| state.was_running(),
+        |state| platform::start_codex_desktop(state, false),
+    )
+}
+
+fn sync_sessions_provider_with_lifecycle<F, S, Stop, WasRunning, Restore>(
+    config_dir: Option<String>,
+    target_provider: Option<String>,
+    mut hook: F,
+    stop: Stop,
+    was_running: WasRunning,
+    restore: Restore,
+) -> Result<SessionSyncResult>
+where
+    F: FnMut(MutationPoint) -> Result<()>,
+    Stop: FnOnce() -> std::result::Result<S, String>,
+    WasRunning: FnOnce(&S) -> bool,
+    Restore: FnOnce(S) -> std::result::Result<(), String>,
 {
     let codex_dir = resolve_codex_dir(config_dir)?;
     ensure_directory(&codex_dir)?;
@@ -345,106 +379,140 @@ where
             updated_rollouts: 0,
             updated_threads: 0,
             backup_dir: String::new(),
+            desktop_was_running: false,
+            desktop_restarted: false,
+            desktop_lifecycle_warning: None,
         });
     }
 
-    hook(MutationPoint::BeforeSqliteLock)?;
-    let mut pending_sqlite = prepare_sqlite_updates(&discovery.related_paths)?;
-    let scan = match scan_provider_sync_data(&codex_dir, &target_provider, &discovery) {
-        Ok(scan) => scan,
-        Err(error) => {
-            rollback_open_transactions(&mut pending_sqlite);
-            return Err(error);
-        }
-    };
-    if !scan.scan_failures.is_empty() {
-        rollback_open_transactions(&mut pending_sqlite);
-        return Err(scan_failure_error(&scan.scan_failures));
-    }
-    if scan.rollouts.changes.is_empty()
-        && scan.sqlite.mismatched_threads == 0
-        && scan.catalog.total_updates() == 0
-    {
-        rollback_open_transactions(&mut pending_sqlite);
-        let status = session_sync_status_with_discovery(&codex_dir, target_provider, &discovery)?;
-        return Ok(SessionSyncResult {
-            status,
-            updated_rollouts: 0,
-            updated_threads: 0,
-            backup_dir: String::new(),
-        });
-    }
-    let changed_rollouts = scan
-        .rollouts
-        .changes
-        .iter()
-        .map(|change| change.path.clone())
-        .collect::<Vec<_>>();
-    let sqlite_snapshot_paths = pending_sqlite
-        .iter()
-        .map(|update| update.path().to_path_buf())
-        .collect::<Vec<_>>();
-    let backup = match create_provider_sync_backup(
-        &codex_dir,
-        &target_provider,
-        &changed_rollouts,
-        &sqlite_snapshot_paths,
-    ) {
-        Ok(backup) => backup,
-        Err(error) => {
-            rollback_open_transactions(&mut pending_sqlite);
-            return Err(error);
-        }
-    };
-    let mut journal = MutationJournal::default();
-    let mutation = execute_provider_sync_mutation(
-        &scan.rollouts,
-        &mut pending_sqlite,
-        &target_provider,
-        &scan.catalog.sources,
-        &scan.syncable_thread_ids,
-        &mut journal,
-        &mut hook,
-    );
-    let mutation = match mutation {
-        Ok(result) => result,
-        Err(error) => {
-            let recovery_errors = rollback_mutation(&journal, &mut pending_sqlite);
-            return Err(mutation_error(error, recovery_errors));
-        }
-    };
+    let (mut result, lifecycle) = run_with_stopped_desktop(
+        stop,
+        was_running,
+        || {
+            // Desktop may flush SQLite, WAL, rollout, and catalog data while closing.
+            // Discover and scan again only after the verified stop completes.
+            let discovery = discover_sqlite_databases(&codex_dir);
+            ensure_sqlite_discovery_writable(&discovery)?;
+            hook(MutationPoint::BeforeSqliteLock)?;
+            let mut pending_sqlite = prepare_sqlite_updates(&discovery.related_paths)?;
+            let scan = match scan_provider_sync_data(&codex_dir, &target_provider, &discovery) {
+                Ok(scan) => scan,
+                Err(error) => {
+                    rollback_open_transactions(&mut pending_sqlite);
+                    return Err(error);
+                }
+            };
+            if !scan.scan_failures.is_empty() {
+                rollback_open_transactions(&mut pending_sqlite);
+                return Err(scan_failure_error(&scan.scan_failures));
+            }
+            if scan.rollouts.changes.is_empty()
+                && scan.sqlite.mismatched_threads == 0
+                && scan.catalog.total_updates() == 0
+            {
+                rollback_open_transactions(&mut pending_sqlite);
+                let status = session_sync_status_with_discovery(
+                    &codex_dir,
+                    target_provider.clone(),
+                    &discovery,
+                )?;
+                return Ok(SessionSyncResult {
+                    status,
+                    updated_rollouts: 0,
+                    updated_threads: 0,
+                    backup_dir: String::new(),
+                    desktop_was_running: false,
+                    desktop_restarted: false,
+                    desktop_lifecycle_warning: None,
+                });
+            }
 
-    let prune_warning = prune_provider_sync_backups(&codex_dir).err();
-    let mut status = session_sync_status_with_discovery(&codex_dir, target_provider, &discovery)
-        .map_err(|error| {
-            CodexxError::Config(format!(
-                "同步已完成，但刷新会话列表失败，请重新进入页面：{error}"
-            ))
-        })?;
-    status.backup_dir = Some(backup.dir.display().to_string());
-    if prune_warning.is_some() {
-        status
-            .warnings
-            .push("同步已完成，但旧备份暂未清理。".to_string());
+            let changed_rollouts = scan
+                .rollouts
+                .changes
+                .iter()
+                .map(|change| change.path.clone())
+                .collect::<Vec<_>>();
+            let sqlite_snapshot_paths = pending_sqlite
+                .iter()
+                .map(|update| update.path().to_path_buf())
+                .collect::<Vec<_>>();
+            let backup = match create_provider_sync_backup(
+                &codex_dir,
+                &target_provider,
+                &changed_rollouts,
+                &sqlite_snapshot_paths,
+            ) {
+                Ok(backup) => backup,
+                Err(error) => {
+                    rollback_open_transactions(&mut pending_sqlite);
+                    return Err(error);
+                }
+            };
+            let mut journal = MutationJournal::default();
+            let mutation = execute_provider_sync_mutation(
+                &scan.rollouts,
+                &mut pending_sqlite,
+                &target_provider,
+                &scan.catalog.sources,
+                &scan.syncable_thread_ids,
+                &mut journal,
+                &mut hook,
+            );
+            let mutation = match mutation {
+                Ok(result) => result,
+                Err(error) => {
+                    let recovery_errors = rollback_mutation(&journal, &mut pending_sqlite);
+                    return Err(mutation_error(error, recovery_errors));
+                }
+            };
+
+            let prune_warning = prune_provider_sync_backups(&codex_dir).err();
+            let mut status =
+                session_sync_status_with_discovery(&codex_dir, target_provider.clone(), &discovery)
+                    .map_err(|error| {
+                        CodexxError::Config(format!(
+                            "同步已完成，但刷新会话列表失败，请重新进入页面：{error}"
+                        ))
+                    })?;
+            status.backup_dir = Some(backup.dir.display().to_string());
+            if prune_warning.is_some() {
+                status
+                    .warnings
+                    .push("同步已完成，但旧备份暂未清理。".to_string());
+            }
+            if !mutation.skipped_rollouts.is_empty() {
+                status.warnings.push(format!(
+                    "有 {} 个会话正在使用，已跳过；退出 Codex 后再同步即可。",
+                    mutation.skipped_rollouts.len()
+                ));
+            }
+            Ok(SessionSyncResult {
+                status,
+                updated_rollouts: mutation.applied_rollouts,
+                updated_threads: mutation.sqlite_updates.total(),
+                backup_dir: backup.dir.display().to_string(),
+                desktop_was_running: false,
+                desktop_restarted: false,
+                desktop_lifecycle_warning: None,
+            })
+        },
+        restore,
+    )?;
+    result.desktop_was_running = lifecycle.was_running;
+    result.desktop_restarted = lifecycle.restarted;
+    result.desktop_lifecycle_warning = lifecycle.warning;
+    if let Some(warning) = &result.desktop_lifecycle_warning {
+        result.status.warnings.push(warning.clone());
     }
-    if !mutation.skipped_rollouts.is_empty() {
-        status.warnings.push(format!(
-            "有 {} 个会话正在使用，已跳过；退出 Codex 后再同步即可。",
-            mutation.skipped_rollouts.len()
-        ));
-    }
-    Ok(SessionSyncResult {
-        status,
-        updated_rollouts: mutation.applied_rollouts,
-        updated_threads: mutation.sqlite_updates.total(),
-        backup_dir: backup.dir.display().to_string(),
-    })
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const SHARED_SESSION_PROVIDER: &str = "custom";
@@ -1677,6 +1745,116 @@ mod tests {
         );
 
         drop(catalog_conn);
+        fs::remove_dir_all(codex_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn session_maintenance_lock_blocks_a_second_mutation() {
+        let codex_dir = temp_codex_dir("maintenance-lock");
+        let first = acquire_session_maintenance_lock(&codex_dir).expect("acquire first lock");
+        let second = match acquire_session_maintenance_lock(&codex_dir) {
+            Ok(_) => panic!("second maintenance operation must be blocked"),
+            Err(error) => error,
+        };
+        assert!(second.to_string().contains("会话维护正在进行"));
+        drop(first);
+        drop(
+            acquire_session_maintenance_lock(&codex_dir)
+                .expect("lock becomes available after first operation"),
+        );
+        fs::remove_dir_all(codex_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn no_op_sync_does_not_stop_desktop() {
+        let codex_dir = temp_codex_dir("no-op-does-not-stop");
+        write_config(&codex_dir, SHARED_SESSION_PROVIDER);
+        let id = "019f6000-0000-7000-8000-000000000601";
+        create_thread_database(
+            &codex_dir.join("state_5.sqlite"),
+            id,
+            SHARED_SESSION_PROVIDER,
+        );
+        let stop_called = Cell::new(false);
+
+        let result = sync_sessions_provider_with_lifecycle(
+            Some(codex_dir.display().to_string()),
+            None,
+            |_| Ok(()),
+            || {
+                stop_called.set(true);
+                Ok(false)
+            },
+            |running| *running,
+            |_| Ok(()),
+        )
+        .expect("no-op synchronization");
+        assert!(!stop_called.get());
+        assert_eq!(result.updated_threads, 0);
+        assert!(!result.desktop_was_running);
+        fs::remove_dir_all(codex_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn sync_rescans_data_after_desktop_stop() {
+        let codex_dir = temp_codex_dir("rescan-after-stop");
+        write_config(&codex_dir, SHARED_SESSION_PROVIDER);
+        let id = "019f6000-0000-7000-8000-000000000602";
+        let database = codex_dir.join("state_5.sqlite");
+        create_thread_database(&database, id, "openai");
+        let restored = Cell::new(false);
+
+        let result = sync_sessions_provider_with_lifecycle(
+            Some(codex_dir.display().to_string()),
+            None,
+            |_| Ok(()),
+            || {
+                Connection::open(&database)
+                    .expect("open database during stop")
+                    .execute(
+                        "UPDATE threads SET model_provider = ?1 WHERE id = ?2",
+                        (SHARED_SESSION_PROVIDER, id),
+                    )
+                    .expect("simulate Desktop final flush");
+                Ok(true)
+            },
+            |running| *running,
+            |running| {
+                restored.set(running);
+                Ok(())
+            },
+        )
+        .expect("rescan after stop");
+        assert_eq!(
+            result.updated_threads, 0,
+            "stale preflight data must not mutate"
+        );
+        assert!(!result.status.needs_sync);
+        assert!(result.desktop_was_running);
+        assert!(result.desktop_restarted);
+        assert!(restored.get());
+        fs::remove_dir_all(codex_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn stop_failure_leaves_sync_storage_unchanged() {
+        let codex_dir = temp_codex_dir("stop-failure");
+        write_config(&codex_dir, SHARED_SESSION_PROVIDER);
+        let id = "019f6000-0000-7000-8000-000000000603";
+        let database = codex_dir.join("state_5.sqlite");
+        create_thread_database(&database, id, "openai");
+
+        let error = sync_sessions_provider_with_lifecycle(
+            Some(codex_dir.display().to_string()),
+            None,
+            |_| Ok(()),
+            || Err::<bool, _>("close timeout".to_string()),
+            |running| *running,
+            |_| Ok(()),
+        )
+        .expect_err("stop failure must cancel sync");
+        assert!(error.to_string().contains("会话操作已取消"));
+        assert_eq!(thread_provider(&database, id), "openai");
         fs::remove_dir_all(codex_dir).expect("remove test directory");
     }
 

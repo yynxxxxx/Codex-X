@@ -617,6 +617,7 @@ fn skills_and_mcp_order_does_not_depend_on_enabled_state() {
         path: String::new(),
         content_hash: None,
         update_status: String::new(),
+        note: None,
     };
     let server = |id: &str, name: &str, enabled: bool| ManagedMcpServer {
         id: id.to_string(),
@@ -628,6 +629,7 @@ fn skills_and_mcp_order_does_not_depend_on_enabled_state() {
         command: None,
         url: None,
         config_json: json!({}),
+        note: None,
     };
     let mut skills = vec![
         skill("beta", "Beta", true),

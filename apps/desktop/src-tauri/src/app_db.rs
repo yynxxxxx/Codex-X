@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-const APP_DB_SCHEMA_VERSION: i64 = 1;
+const APP_DB_SCHEMA_VERSION: i64 = 2;
 
 struct DatabaseInitializer {
     migration_lock: Mutex<()>,
@@ -193,6 +193,14 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
             content_hash TEXT,
             enabled INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS skills_mcp_notes (
+            codex_dir TEXT NOT NULL,
+            item_kind TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (codex_dir, item_kind, item_id)
         );",
     )
     .map_err(|e| CodexxError::Database(e.to_string()))?;
@@ -319,7 +327,7 @@ mod tests {
         let path = test_db_path("replace-database");
         let initializer = DatabaseInitializer::new();
         let conn = initializer.open_at(&path).expect("initialize database");
-        assert_eq!(schema_version(&conn).expect("read schema version"), 1);
+        assert_eq!(schema_version(&conn).expect("read schema version"), 2);
         drop(conn);
 
         fs::remove_file(&path).expect("replace initialized database");
@@ -330,7 +338,63 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
             .expect("query replacement database schema");
         assert_eq!(provider_count, 0);
-        assert_eq!(schema_version(&conn).expect("read replacement version"), 1);
+        assert_eq!(schema_version(&conn).expect("read replacement version"), 2);
+        drop(conn);
+        remove_test_db(&path);
+    }
+
+    #[test]
+    fn version_one_database_migrates_without_losing_existing_data() {
+        let path = test_db_path("v1-to-v2");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create legacy database directory");
+        }
+        let legacy = Connection::open(&path).expect("create legacy database");
+        initialize_schema(&legacy).expect("create legacy tables");
+        legacy
+            .execute_batch(
+                "INSERT INTO providers (
+                    id, provider_name, base_url, model, wire_api, requires_openai_auth,
+                    source, created_at, updated_at
+                 ) VALUES ('provider', 'Provider', 'https://example.test', 'model',
+                    'responses', 0, 'manual', '1', '1');
+                 INSERT INTO prompts (id, title, filename, content, created_at, updated_at)
+                 VALUES ('prompt', 'Prompt', 'prompt.md', 'content', '1', '1');
+                 INSERT INTO managed_skills (
+                    id, name, directory, enabled, updated_at
+                 ) VALUES ('skill', 'Skill', 'skill', 1, '1');
+                 INSERT INTO managed_mcp_servers (
+                    id, name, server_config, enabled, updated_at
+                 ) VALUES ('mcp', 'MCP', '{}', 1, '1');
+                 DROP TABLE skills_mcp_notes;
+                 PRAGMA user_version = 1;",
+            )
+            .expect("seed version one database");
+        drop(legacy);
+
+        let conn = DatabaseInitializer::new()
+            .open_at(&path)
+            .expect("migrate version one database");
+        assert_eq!(schema_version(&conn).expect("read migrated version"), 2);
+        for table in [
+            "providers",
+            "prompts",
+            "managed_skills",
+            "managed_mcp_servers",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count preserved rows");
+            assert_eq!(count, 1, "{table} row must survive migration");
+        }
+        conn.execute(
+            "INSERT INTO skills_mcp_notes (codex_dir, item_kind, item_id, note, updated_at)
+             VALUES ('home', 'skill', 'skill', 'note', '1')",
+            [],
+        )
+        .expect("write note after migration");
         drop(conn);
         remove_test_db(&path);
     }

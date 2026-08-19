@@ -1,4 +1,4 @@
-import type { SessionSyncStatus } from "./pages/SessionManagementPage";
+import type { SessionSyncStatus } from "./features/sessions/types";
 
 export type Lang = "zh" | "en";
 export type ProviderMode = "list" | "form" | "official";
@@ -203,6 +203,9 @@ export type SessionSyncResult = {
   updatedRollouts: number;
   updatedThreads: number;
   backupDir: string;
+  desktopWasRunning: boolean;
+  desktopRestarted: boolean;
+  desktopLifecycleWarning?: string | null;
 };
 
 export type SessionDeleteResult = {
@@ -214,6 +217,9 @@ export type SessionDeleteResult = {
   deletedThreadRows: number;
   deletedRolloutFiles: number;
   deletedRelatedRows: number;
+  desktopWasRunning: boolean;
+  desktopRestarted: boolean;
+  desktopLifecycleWarning?: string | null;
 };
 
 export type ManagedSkill = {
@@ -226,6 +232,7 @@ export type ManagedSkill = {
   path: string;
   contentHash?: string | null;
   updateStatus: string;
+  note?: string | null;
 };
 
 export type ManagedMcpServer = {
@@ -238,6 +245,13 @@ export type ManagedMcpServer = {
   command?: string | null;
   url?: string | null;
   configJson: unknown;
+  note?: string | null;
+};
+
+export type SkillMcpNoteUpdate = {
+  itemKind: "skill" | "mcp";
+  itemId: string;
+  note?: string | null;
 };
 
 export type SkillsMcpState = {

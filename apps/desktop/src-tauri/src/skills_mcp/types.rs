@@ -13,6 +13,7 @@ pub(crate) struct ManagedMcpServer {
     pub(crate) command: Option<String>,
     pub(crate) url: Option<String>,
     pub(crate) config_json: Value,
+    pub(crate) note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -27,6 +28,15 @@ pub(crate) struct ManagedSkill {
     pub(crate) path: String,
     pub(crate) content_hash: Option<String>,
     pub(crate) update_status: String,
+    pub(crate) note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SkillMcpNoteUpdate {
+    pub(crate) item_kind: String,
+    pub(crate) item_id: String,
+    pub(crate) note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
