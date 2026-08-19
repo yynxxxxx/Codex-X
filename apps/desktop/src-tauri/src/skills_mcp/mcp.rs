@@ -300,6 +300,7 @@ pub(super) fn list_mcp_from_config(codex_dir: &Path) -> Result<Vec<ManagedMcpSer
             command,
             url,
             config_json: config,
+            note: None,
         });
     }
     Ok(out)
@@ -489,6 +490,7 @@ pub(super) fn preview_ccswitch_mcp_servers_for_codex(
             command,
             url,
             config_json: config,
+            note: None,
         });
     }
     Ok(out)

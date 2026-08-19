@@ -73,6 +73,13 @@
   line-height: 1.45;
 }
 
+.cx-session-header-side {
+  min-width: 0;
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+
 .cx-session-header-actions {
   min-width: 0;
   display: flex;
@@ -80,6 +87,15 @@
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.cx-session-lifecycle-note {
+  max-width: 520px;
+  margin: 0;
+  color: var(--cx-session-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: right;
 }
 
 .cx-session-target {
@@ -900,6 +916,14 @@
 
   .cx-session-header-actions {
     justify-content: flex-start;
+  }
+
+  .cx-session-header-side {
+    justify-items: start;
+  }
+
+  .cx-session-lifecycle-note {
+    text-align: left;
   }
 
   .cx-session-search {

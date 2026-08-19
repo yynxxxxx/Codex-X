@@ -9,6 +9,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { Toggle } from "../components/ui";
 import "../styles/utility-pages.css";
 
 export type UtilityLanguage = "zh" | "en";
@@ -84,6 +85,8 @@ export type SettingsCopy = {
   recheckTitle: ReactNode;
   recheckDescription: ReactNode;
   recheckLabel: ReactNode;
+  autoRestartTitle: ReactNode;
+  autoRestartDescription: ReactNode;
 };
 
 export type SettingsPageProps = {
@@ -92,6 +95,8 @@ export type SettingsPageProps = {
   onLanguageChange: (lang: UtilityLanguage) => void;
   onRecheck: () => void;
   recheckBusy?: boolean;
+  autoRestartChecked: boolean;
+  onAutoRestartChange: (checked: boolean) => void;
 };
 
 type SettingRowProps = {
@@ -122,6 +127,8 @@ export function SettingsPage({
   onLanguageChange,
   onRecheck,
   recheckBusy = false,
+  autoRestartChecked,
+  onAutoRestartChange,
 }: SettingsPageProps) {
   return (
     <section className="cx-utility cx-page cx-page--settings">
@@ -158,6 +165,19 @@ export function SettingsPage({
           title={copy.productTitle}
           description={copy.productDescription}
           action={<span className="cx-page-value-pill">{copy.productValue}</span>}
+        />
+
+        <SettingRow
+          icon={RefreshCw}
+          title={copy.autoRestartTitle}
+          description={copy.autoRestartDescription}
+          action={(
+            <Toggle
+              checked={autoRestartChecked}
+              onCheckedChange={onAutoRestartChange}
+              aria-label={String(copy.autoRestartTitle)}
+            />
+          )}
         />
 
         <SettingRow

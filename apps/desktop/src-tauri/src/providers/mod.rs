@@ -1,6 +1,7 @@
 mod ccswitch;
 mod connection;
 mod live;
+mod official_accounts;
 mod official_auth;
 mod store;
 
@@ -24,15 +25,21 @@ pub(crate) use connection::{
 };
 pub(crate) use live::detected_live_custom_provider;
 pub(crate) use live::{
-    build_provider_toml_draft_inner, delete_saved_provider_inner, reset_official_provider_inner,
-    restore_official_provider_inner, save_active_provider_inner, save_official_config_inner,
-    save_provider_toml_config_inner, switch_official_provider_inner, switch_provider_inner,
+    build_provider_toml_draft_inner, capture_current_official_account_inner,
+    delete_official_account_inner, delete_saved_provider_inner, get_official_account_inner,
+    list_official_accounts_inner, prepare_new_official_account_inner,
+    reset_official_provider_inner, restore_official_provider_inner, save_active_provider_inner,
+    save_official_config_inner, save_provider_toml_config_inner, switch_official_account_inner,
+    switch_official_provider_inner, switch_provider_inner, update_official_account_inner,
     OfficialConfigInput, ProviderInput, ProviderTomlInput,
 };
 #[cfg(test)]
 pub(crate) use live::{
     save_provider_toml_config_with_pre_persist, switch_official_provider_with_pre_persist,
     switch_provider_with_pre_persist,
+};
+pub(crate) use official_accounts::{
+    OfficialAccountDraft, OfficialAccountSummary, OfficialAccountUpdateInput,
 };
 #[cfg(test)]
 pub(crate) use official_auth::{capture_live_chatgpt_config, official_snapshot_path_for_test};

@@ -1,4 +1,4 @@
-import type { SessionSyncStatus } from "./pages/SessionManagementPage";
+import type { SessionSyncStatus } from "./features/sessions/types";
 
 export type Lang = "zh" | "en";
 export type ProviderMode = "list" | "form" | "official";
@@ -97,6 +97,14 @@ export type CodexState = {
   lastBackup?: BackupEntry;
 };
 
+export type CodexRestartResult = {
+  success: boolean;
+  wasRunning: boolean;
+  restarted: boolean;
+  platform: string;
+  message: string;
+};
+
 export type ActionResult = {
   ok: boolean;
   message: string;
@@ -109,6 +117,27 @@ export type OfficialConfigDraft = {
   configText: string;
   model?: string;
   source: string;
+};
+
+export type OfficialAccountSummary = {
+  id: string;
+  name: string;
+  model?: string;
+  selected: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt?: string;
+};
+
+export type OfficialAccountDraft = {
+  id: string;
+  name: string;
+  model?: string;
+  configText: string;
+  authJson: string;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt?: string;
 };
 
 export type OfficialAuthCandidate = {
@@ -174,6 +203,9 @@ export type SessionSyncResult = {
   updatedRollouts: number;
   updatedThreads: number;
   backupDir: string;
+  desktopWasRunning: boolean;
+  desktopRestarted: boolean;
+  desktopLifecycleWarning?: string | null;
 };
 
 export type SessionDeleteResult = {
@@ -185,6 +217,9 @@ export type SessionDeleteResult = {
   deletedThreadRows: number;
   deletedRolloutFiles: number;
   deletedRelatedRows: number;
+  desktopWasRunning: boolean;
+  desktopRestarted: boolean;
+  desktopLifecycleWarning?: string | null;
 };
 
 export type ManagedSkill = {
@@ -197,6 +232,7 @@ export type ManagedSkill = {
   path: string;
   contentHash?: string | null;
   updateStatus: string;
+  note?: string | null;
 };
 
 export type ManagedMcpServer = {
@@ -209,6 +245,13 @@ export type ManagedMcpServer = {
   command?: string | null;
   url?: string | null;
   configJson: unknown;
+  note?: string | null;
+};
+
+export type SkillMcpNoteUpdate = {
+  itemKind: "skill" | "mcp";
+  itemId: string;
+  note?: string | null;
 };
 
 export type SkillsMcpState = {

@@ -264,6 +264,7 @@ pub(super) fn scan_skill_dir(
             path: path.display().to_string(),
             content_hash: hash,
             update_status: "未检查".to_string(),
+            note: None,
         });
         seen.insert(id);
     }

@@ -1,9 +1,16 @@
 use super::ccswitch::codex_section_from_table;
+use super::official_accounts::{
+    account_by_id, account_by_id_mut, create_official_account, load_official_account_store,
+    official_account_draft, official_account_summaries, official_accounts_path,
+    save_official_account_store, OfficialAccountDraft, OfficialAccountStore,
+    OfficialAccountSummary, OfficialAccountUpdateInput,
+};
 use super::official_auth::{
     auth_value_has_material, build_official_config_text,
-    capture_live_official_config_before_provider_switch, document_is_official,
-    live_config_is_official, mark_official_config_reset, official_config_candidate,
-    official_snapshot_path, save_official_config_snapshot, validate_official_config_text,
+    capture_live_official_config_before_provider_switch, document_is_official, is_chatgpt_auth,
+    live_config_is_official, mark_official_config_deleted_reset, mark_official_config_reset,
+    official_config_candidate, official_history_restore_blocked, official_snapshot_path,
+    save_official_config_snapshot, validate_official_config_text,
 };
 use super::{
     custom_provider_id, delete_provider_inner, experimental_bearer_token_from_doc,
@@ -25,6 +32,7 @@ use crate::live_config::{
 use crate::state::{build_state_after_migration, ActionResult};
 use crate::toml_utils::ensure_table;
 use crate::{auth_path, config_path, resolve_codex_dir, string_value};
+use chrono::Local;
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -268,6 +276,34 @@ impl AppliedSnapshot {
     }
 }
 
+#[derive(Default)]
+struct AppliedOfficialState {
+    changes: Vec<AppliedSnapshot>,
+}
+
+impl AppliedOfficialState {
+    fn push(&mut self, change: AppliedSnapshot) {
+        self.changes.push(change);
+    }
+
+    fn rollback(&self) -> Result<()> {
+        for change in &self.changes {
+            ensure_file_snapshot_unchanged(&change.path, change.after.as_deref())?;
+        }
+        let mut failures = Vec::new();
+        for change in self.changes.iter().rev() {
+            if let Err(error) = change.rollback() {
+                failures.push(error.to_string());
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(CodexxError::Config(failures.join("；")))
+        }
+    }
+}
+
 fn update_official_snapshot<F>(codex_dir: &Path, update: F) -> Result<AppliedSnapshot>
 where
     F: FnOnce() -> Result<()>,
@@ -283,18 +319,108 @@ where
     })
 }
 
-fn capture_live_official_snapshot(codex_dir: &Path) -> Result<Option<AppliedSnapshot>> {
-    let path = official_snapshot_path(codex_dir)?;
-    let before = read_file_snapshot(&path)?;
-    if !capture_live_official_config_before_provider_switch(codex_dir)? {
-        return Ok(None);
-    }
+fn apply_official_account_store(
+    codex_dir: &Path,
+    before: Option<Vec<u8>>,
+    store: &OfficialAccountStore,
+) -> Result<AppliedSnapshot> {
+    let path = official_accounts_path(codex_dir)?;
+    ensure_file_snapshot_unchanged(&path, before.as_deref())?;
+    save_official_account_store(codex_dir, store)?;
     let after = read_file_snapshot(&path)?;
-    Ok(Some(AppliedSnapshot {
+    Ok(AppliedSnapshot {
         path,
         before,
         after,
-    }))
+    })
+}
+
+fn live_official_account_values(
+    codex_dir: &Path,
+    config_snapshot: Option<&[u8]>,
+    auth_snapshot: Option<&[u8]>,
+) -> Result<Option<(String, Option<String>, Value)>> {
+    if config_snapshot_is_official(config_snapshot) != Some(true) {
+        return Ok(None);
+    }
+    let Some(auth_bytes) = auth_snapshot else {
+        return Ok(None);
+    };
+    let auth: Value = match serde_json::from_slice::<Value>(auth_bytes) {
+        Ok(value) if value.is_object() && is_chatgpt_auth(&value) => value,
+        _ => return Ok(None),
+    };
+    let config = match config_snapshot {
+        Some(bytes) => String::from_utf8(bytes.to_vec())
+            .map_err(|_| CodexxError::Config("config.toml 不是有效的 UTF-8 文本".to_string()))?,
+        None => build_official_config_text(codex_dir, None, false)?,
+    };
+    let (config, model) = validate_official_config_text(codex_dir, &config, None)?;
+    Ok(Some((config, model, auth)))
+}
+
+fn capture_selected_account_in_store(
+    codex_dir: &Path,
+    store: &mut OfficialAccountStore,
+    config_snapshot: Option<&[u8]>,
+    auth_snapshot: Option<&[u8]>,
+) -> Result<bool> {
+    let Some(selected_id) = store.selected_account_id.clone() else {
+        return Ok(false);
+    };
+    let Some((config, model, auth)) =
+        live_official_account_values(codex_dir, config_snapshot, auth_snapshot)?
+    else {
+        return Ok(false);
+    };
+    let account = account_by_id_mut(store, &selected_id)?;
+    let now = Local::now().to_rfc3339();
+    account.config = config;
+    account.model = model;
+    account.auth = auth;
+    account.updated_at = now.clone();
+    account.last_used_at = Some(now);
+    Ok(true)
+}
+
+fn capture_live_official_state(codex_dir: &Path) -> Result<Option<AppliedOfficialState>> {
+    let accounts_path = official_accounts_path(codex_dir)?;
+    let accounts_before = read_file_snapshot(&accounts_path)?;
+    let mut store = load_official_account_store(codex_dir)?;
+    let config_snapshot = read_file_snapshot(&config_path(codex_dir))?;
+    let auth_snapshot = read_file_snapshot(&auth_path(codex_dir))?;
+    let account_changed = capture_selected_account_in_store(
+        codex_dir,
+        &mut store,
+        config_snapshot.as_deref(),
+        auth_snapshot.as_deref(),
+    )?;
+
+    let snapshot_path = official_snapshot_path(codex_dir)?;
+    let snapshot_before = read_file_snapshot(&snapshot_path)?;
+    let snapshot_changed = capture_live_official_config_before_provider_switch(codex_dir)?;
+    let mut applied = AppliedOfficialState::default();
+    if snapshot_changed {
+        applied.push(AppliedSnapshot {
+            path: snapshot_path,
+            before: snapshot_before,
+            after: read_file_snapshot(&official_snapshot_path(codex_dir)?)?,
+        });
+    }
+    if account_changed {
+        match apply_official_account_store(codex_dir, accounts_before, &store) {
+            Ok(change) => applied.push(change),
+            Err(error) => {
+                return match applied.rollback() {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(CodexxError::Config(format!(
+                        "{error}；官方认证捕获回滚失败：{rollback_error}"
+                    ))),
+                };
+            }
+        }
+    }
+    Ok((!applied.changes.is_empty()).then_some(applied))
 }
 
 fn rollback_after_failure<T>(
@@ -316,6 +442,36 @@ fn rollback_after_failure<T>(
         if let Some(snapshot) = snapshot {
             if let Err(rollback_error) = snapshot.rollback() {
                 failures.push(format!("官方快照: {rollback_error}"));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Err(error)
+    } else {
+        Err(CodexxError::Config(format!(
+            "{error}；回滚失败：{}",
+            failures.join("；")
+        )))
+    }
+}
+
+fn rollback_after_official_state_failure<T>(
+    error: CodexxError,
+    live: Option<&AppliedLiveFiles>,
+    state: Option<&AppliedOfficialState>,
+) -> Result<T> {
+    let mut failures = Vec::new();
+    let mut live_rollback_succeeded = true;
+    if let Some(live) = live {
+        if let Err(rollback_error) = live.rollback() {
+            live_rollback_succeeded = false;
+            failures.push(format!("live 配置: {rollback_error}"));
+        }
+    }
+    if live_rollback_succeeded {
+        if let Some(state) = state {
+            if let Err(rollback_error) = state.rollback() {
+                failures.push(format!("官方账号状态: {rollback_error}"));
             }
         }
     }
@@ -664,6 +820,24 @@ fn finish_live_action(
     }
 }
 
+fn finish_live_action_with_official_state(
+    codex_dir: &Path,
+    message: String,
+    backup_id: Option<String>,
+    live: &AppliedLiveFiles,
+    state: Option<&AppliedOfficialState>,
+) -> Result<ActionResult> {
+    match build_state_after_migration(codex_dir.to_path_buf()) {
+        Ok(state) => Ok(ActionResult {
+            ok: true,
+            message,
+            backup_id,
+            state,
+        }),
+        Err(error) => rollback_after_official_state_failure(error, Some(live), state),
+    }
+}
+
 pub(crate) fn switch_official_provider_with_pre_persist<F>(
     config_dir: Option<String>,
     pre_persist: F,
@@ -676,6 +850,7 @@ where
     let _live_lock = acquire_live_config_lock(&codex_dir)?;
     migrate_legacy_prompt_config_locked(&codex_dir)?;
     let was_official = live_config_is_official(&codex_dir)?;
+    let history_restore_blocked = official_history_restore_blocked(&codex_dir)?;
     pre_persist(&codex_dir)?;
     let candidate = official_config_candidate(&codex_dir, false)?;
     let model = candidate
@@ -718,6 +893,8 @@ where
         match update_official_snapshot(&codex_dir, || {
             if let Some(auth) = candidate.auth.as_ref() {
                 save_official_config_snapshot(&codex_dir, Some(applied_config), model, auth)
+            } else if history_restore_blocked {
+                mark_official_config_deleted_reset(&codex_dir, Some(applied_config), model)
             } else {
                 mark_official_config_reset(&codex_dir, Some(applied_config), model)
             }
@@ -842,11 +1019,461 @@ pub(crate) fn save_official_config_inner(
     }
 }
 
+fn finish_official_state_action(
+    codex_dir: &Path,
+    message: String,
+    backup_id: Option<String>,
+    state_change: &AppliedOfficialState,
+) -> Result<ActionResult> {
+    match build_state_after_migration(codex_dir.to_path_buf()) {
+        Ok(state) => Ok(ActionResult {
+            ok: true,
+            message,
+            backup_id,
+            state,
+        }),
+        Err(error) => rollback_after_official_state_failure(error, None, Some(state_change)),
+    }
+}
+
+fn parse_trusted_official_auth(path: &Path, auth_json: &str) -> Result<Value> {
+    let auth: Value = serde_json::from_str(auth_json).map_err(|error| json_err(path, error))?;
+    if !auth.is_object() || !is_chatgpt_auth(&auth) {
+        return Err(CodexxError::Config(
+            "官方账号 auth.json 不是可信的 OpenAI Official 认证".to_string(),
+        ));
+    }
+    Ok(auth)
+}
+
+fn apply_legacy_account_snapshot(
+    codex_dir: &Path,
+    config: String,
+    model: Option<String>,
+    auth: &Value,
+) -> Result<AppliedSnapshot> {
+    update_official_snapshot(codex_dir, || {
+        save_official_config_snapshot(codex_dir, Some(config), model, auth)
+    })
+}
+
+pub(crate) fn list_official_accounts_inner(
+    config_dir: Option<String>,
+) -> Result<Vec<OfficialAccountSummary>> {
+    let codex_dir = resolve_codex_dir(config_dir)?;
+    let store = load_official_account_store(&codex_dir)?;
+    Ok(official_account_summaries(&store))
+}
+
+pub(crate) fn get_official_account_inner(
+    config_dir: Option<String>,
+    account_id: String,
+) -> Result<OfficialAccountDraft> {
+    let codex_dir = resolve_codex_dir(config_dir)?;
+    let store = load_official_account_store(&codex_dir)?;
+    official_account_draft(account_by_id(&store, account_id.trim())?)
+}
+
+pub(crate) fn capture_current_official_account_inner(
+    config_dir: Option<String>,
+    name: String,
+) -> Result<ActionResult> {
+    let codex_dir = resolve_codex_dir(config_dir)?;
+    ensure_directory(&codex_dir)?;
+    let _live_lock = acquire_live_config_lock(&codex_dir)?;
+    migrate_legacy_prompt_config_locked(&codex_dir)?;
+    let config_before = read_file_snapshot(&config_path(&codex_dir))?;
+    let auth_before = read_file_snapshot(&auth_path(&codex_dir))?;
+    let Some((config, model, auth)) =
+        live_official_account_values(&codex_dir, config_before.as_deref(), auth_before.as_deref())?
+    else {
+        return Err(CodexxError::Config(
+            "未检测到有效 OpenAI Official 登录，请先在 Codex 中完成登录".to_string(),
+        ));
+    };
+
+    let accounts_path = official_accounts_path(&codex_dir)?;
+    let accounts_before = read_file_snapshot(&accounts_path)?;
+    let mut store = load_official_account_store(&codex_dir)?;
+    if store.selected_account_id.is_some() {
+        return Err(CodexxError::Config(
+            "当前 OpenAI Official 登录已经保存，请先新增官方账号".to_string(),
+        ));
+    }
+    let account =
+        create_official_account(&store, &name, model.clone(), config.clone(), auth.clone())?;
+    let account_id = account.id.clone();
+    store.accounts.push(account);
+    store.selected_account_id = Some(account_id);
+    let backup_id = create_backup(&codex_dir, "capture-official-account")?;
+
+    let mut applied = AppliedOfficialState::default();
+    applied.push(apply_official_account_store(
+        &codex_dir,
+        accounts_before,
+        &store,
+    )?);
+    match apply_legacy_account_snapshot(&codex_dir, config, model, &auth) {
+        Ok(change) => applied.push(change),
+        Err(error) => return rollback_after_official_state_failure(error, None, Some(&applied)),
+    }
+    finish_official_state_action(
+        &codex_dir,
+        "已保存当前 OpenAI Official 登录".to_string(),
+        backup_id,
+        &applied,
+    )
+}
+
+pub(crate) fn update_official_account_inner(
+    input: OfficialAccountUpdateInput,
+) -> Result<ActionResult> {
+    let codex_dir = resolve_codex_dir(input.config_dir)?;
+    ensure_directory(&codex_dir)?;
+    let _live_lock = acquire_live_config_lock(&codex_dir)?;
+    migrate_legacy_prompt_config_locked(&codex_dir)?;
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err(CodexxError::Config("官方账号名称不能为空".to_string()));
+    }
+    let requested_model = input
+        .model
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty());
+    let (config, model) = validate_official_config_text(
+        &codex_dir,
+        input.config_text.trim(),
+        requested_model.as_deref(),
+    )?;
+    let auth = parse_trusted_official_auth(&auth_path(&codex_dir), &input.auth_json)?;
+    let account_id = input.account_id.trim();
+
+    let accounts_path = official_accounts_path(&codex_dir)?;
+    let accounts_before = read_file_snapshot(&accounts_path)?;
+    let mut store = load_official_account_store(&codex_dir)?;
+    let selected = store.selected_account_id.as_deref() == Some(account_id);
+    let now = Local::now().to_rfc3339();
+    let account = account_by_id_mut(&mut store, account_id)?;
+    account.name = name.to_string();
+    account.model = model.clone();
+    account.config = config.clone();
+    account.auth = auth.clone();
+    account.updated_at = now;
+
+    let applies_live = selected && live_config_is_official(&codex_dir)?;
+    let (backup_id, live) = if applies_live {
+        let (backup_id, live) = apply_official_config_locked(
+            &codex_dir,
+            Some(&config),
+            model.as_deref(),
+            false,
+            LiveAuthAction::Replace(auth.clone()),
+            "update-official-account",
+        )?;
+        (backup_id, Some(live))
+    } else {
+        (None, None)
+    };
+
+    let mut applied = AppliedOfficialState::default();
+    match apply_official_account_store(&codex_dir, accounts_before, &store) {
+        Ok(change) => applied.push(change),
+        Err(error) => {
+            return rollback_after_official_state_failure(error, live.as_ref(), None);
+        }
+    }
+    if selected {
+        match apply_legacy_account_snapshot(&codex_dir, config, model, &auth) {
+            Ok(change) => applied.push(change),
+            Err(error) => {
+                return rollback_after_official_state_failure(error, live.as_ref(), Some(&applied));
+            }
+        }
+    }
+
+    match live.as_ref() {
+        Some(live) => finish_live_action_with_official_state(
+            &codex_dir,
+            "官方账号已保存并更新当前登录".to_string(),
+            backup_id,
+            live,
+            Some(&applied),
+        ),
+        None => finish_official_state_action(
+            &codex_dir,
+            "官方账号已保存".to_string(),
+            backup_id,
+            &applied,
+        ),
+    }
+}
+
+fn switch_official_account_with_pre_persist<F>(
+    config_dir: Option<String>,
+    account_id: String,
+    pre_persist: F,
+) -> Result<ActionResult>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    let codex_dir = resolve_codex_dir(config_dir)?;
+    ensure_directory(&codex_dir)?;
+    let _live_lock = acquire_live_config_lock(&codex_dir)?;
+    migrate_legacy_prompt_config_locked(&codex_dir)?;
+    let account_id = account_id.trim();
+    let accounts_path = official_accounts_path(&codex_dir)?;
+    let accounts_before = read_file_snapshot(&accounts_path)?;
+    let mut store = load_official_account_store(&codex_dir)?;
+    account_by_id(&store, account_id)?;
+
+    let old_config = read_file_snapshot(&config_path(&codex_dir))?;
+    let old_auth = read_file_snapshot(&auth_path(&codex_dir))?;
+    let was_official = config_snapshot_is_official(old_config.as_deref()) == Some(true);
+    if was_official {
+        capture_selected_account_in_store(
+            &codex_dir,
+            &mut store,
+            old_config.as_deref(),
+            old_auth.as_deref(),
+        )?;
+    } else {
+        pre_persist(&codex_dir)?;
+    }
+
+    let target = account_by_id(&store, account_id)?.clone();
+    let (config, model) =
+        validate_official_config_text(&codex_dir, &target.config, target.model.as_deref())?;
+    let (backup_id, live) = apply_official_config_locked(
+        &codex_dir,
+        Some(&config),
+        model.as_deref(),
+        false,
+        LiveAuthAction::Replace(target.auth.clone()),
+        "switch-official-account",
+    )?;
+
+    let now = Local::now().to_rfc3339();
+    store.selected_account_id = Some(account_id.to_string());
+    account_by_id_mut(&mut store, account_id)?.last_used_at = Some(now);
+    let mut applied = AppliedOfficialState::default();
+    match apply_official_account_store(&codex_dir, accounts_before, &store) {
+        Ok(change) => applied.push(change),
+        Err(error) => return rollback_after_official_state_failure(error, Some(&live), None),
+    }
+    match apply_legacy_account_snapshot(&codex_dir, config, model, &target.auth) {
+        Ok(change) => applied.push(change),
+        Err(error) => {
+            return rollback_after_official_state_failure(error, Some(&live), Some(&applied));
+        }
+    }
+    finish_live_action_with_official_state(
+        &codex_dir,
+        format!("已切换到 OpenAI Official · {}", target.name),
+        backup_id,
+        &live,
+        Some(&applied),
+    )
+}
+
+pub(crate) fn switch_official_account_inner(
+    config_dir: Option<String>,
+    account_id: String,
+) -> Result<ActionResult> {
+    let mut provider_rollback = None;
+    let result = switch_official_account_with_pre_persist(config_dir, account_id, |codex_dir| {
+        provider_rollback = persist_detected_live_custom_provider(codex_dir)?;
+        Ok(())
+    });
+    rollback_persisted_provider(result, provider_rollback)
+}
+
+fn prepare_new_official_account_with_pre_persist<F>(
+    config_dir: Option<String>,
+    pre_persist: F,
+) -> Result<ActionResult>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    let codex_dir = resolve_codex_dir(config_dir)?;
+    ensure_directory(&codex_dir)?;
+    let _live_lock = acquire_live_config_lock(&codex_dir)?;
+    migrate_legacy_prompt_config_locked(&codex_dir)?;
+    let accounts_path = official_accounts_path(&codex_dir)?;
+    let accounts_before = read_file_snapshot(&accounts_path)?;
+    let mut store = load_official_account_store(&codex_dir)?;
+    let old_config = read_file_snapshot(&config_path(&codex_dir))?;
+    let old_auth = read_file_snapshot(&auth_path(&codex_dir))?;
+    let was_official = config_snapshot_is_official(old_config.as_deref()) == Some(true);
+    if was_official {
+        capture_selected_account_in_store(
+            &codex_dir,
+            &mut store,
+            old_config.as_deref(),
+            old_auth.as_deref(),
+        )?;
+    } else {
+        pre_persist(&codex_dir)?;
+    }
+
+    let requested_config = if was_official {
+        old_config
+            .as_deref()
+            .map(|bytes| text_from_snapshot(&config_path(&codex_dir), Some(bytes)))
+            .transpose()?
+    } else {
+        store
+            .selected_account_id
+            .as_deref()
+            .and_then(|id| account_by_id(&store, id).ok())
+            .map(|account| account.config.clone())
+            .or_else(|| {
+                official_config_candidate(&codex_dir, false)
+                    .ok()
+                    .flatten()
+                    .and_then(|candidate| candidate.config_text)
+            })
+    };
+    let (backup_id, live) = apply_official_config_locked(
+        &codex_dir,
+        requested_config.as_deref(),
+        None,
+        false,
+        LiveAuthAction::Remove,
+        "prepare-new-official-account",
+    )?;
+    let applied_config = applied_config_text(&live)?;
+    let applied_model = validate_official_config_text(&codex_dir, &applied_config, None)?.1;
+    store.selected_account_id = None;
+
+    let mut applied = AppliedOfficialState::default();
+    match apply_official_account_store(&codex_dir, accounts_before, &store) {
+        Ok(change) => applied.push(change),
+        Err(error) => return rollback_after_official_state_failure(error, Some(&live), None),
+    }
+    match update_official_snapshot(&codex_dir, || {
+        mark_official_config_reset(
+            &codex_dir,
+            Some(applied_config.clone()),
+            applied_model.clone(),
+        )
+    }) {
+        Ok(change) => applied.push(change),
+        Err(error) => {
+            return rollback_after_official_state_failure(error, Some(&live), Some(&applied));
+        }
+    }
+    finish_live_action_with_official_state(
+        &codex_dir,
+        "已准备新的 OpenAI Official 登录，请在 Codex 中完成登录".to_string(),
+        backup_id,
+        &live,
+        Some(&applied),
+    )
+}
+
+pub(crate) fn prepare_new_official_account_inner(
+    config_dir: Option<String>,
+) -> Result<ActionResult> {
+    let mut provider_rollback = None;
+    let result = prepare_new_official_account_with_pre_persist(config_dir, |codex_dir| {
+        provider_rollback = persist_detected_live_custom_provider(codex_dir)?;
+        Ok(())
+    });
+    rollback_persisted_provider(result, provider_rollback)
+}
+
+pub(crate) fn delete_official_account_inner(
+    config_dir: Option<String>,
+    account_id: String,
+) -> Result<ActionResult> {
+    let codex_dir = resolve_codex_dir(config_dir)?;
+    ensure_directory(&codex_dir)?;
+    let _live_lock = acquire_live_config_lock(&codex_dir)?;
+    migrate_legacy_prompt_config_locked(&codex_dir)?;
+    let account_id = account_id.trim();
+    let accounts_path = official_accounts_path(&codex_dir)?;
+    let accounts_before = read_file_snapshot(&accounts_path)?;
+    let mut store = load_official_account_store(&codex_dir)?;
+    let deleted = account_by_id(&store, account_id)?.clone();
+    let selected = store.selected_account_id.as_deref() == Some(account_id);
+    let current_official = selected && live_config_is_official(&codex_dir)?;
+
+    let (backup_id, live, reset_config, reset_model) = if current_official {
+        let current_config = read_file_snapshot(&config_path(&codex_dir))?;
+        let current_config = current_config
+            .as_deref()
+            .map(|bytes| text_from_snapshot(&config_path(&codex_dir), Some(bytes)))
+            .transpose()?
+            .unwrap_or_else(|| deleted.config.clone());
+        let (config, model) = validate_official_config_text(&codex_dir, &current_config, None)?;
+        let (backup_id, live) = apply_official_config_locked(
+            &codex_dir,
+            Some(&config),
+            model.as_deref(),
+            false,
+            LiveAuthAction::Remove,
+            "delete-current-official-account",
+        )?;
+        (backup_id, Some(live), config, model)
+    } else {
+        let (config, model) =
+            validate_official_config_text(&codex_dir, &deleted.config, deleted.model.as_deref())?;
+        (None, None, config, model)
+    };
+
+    store.accounts.retain(|account| account.id != account_id);
+    if selected {
+        store.selected_account_id = None;
+    }
+    let mut applied = AppliedOfficialState::default();
+    match apply_official_account_store(&codex_dir, accounts_before, &store) {
+        Ok(change) => applied.push(change),
+        Err(error) => {
+            return rollback_after_official_state_failure(error, live.as_ref(), None);
+        }
+    }
+    if selected {
+        match update_official_snapshot(&codex_dir, || {
+            mark_official_config_deleted_reset(
+                &codex_dir,
+                Some(reset_config.clone()),
+                reset_model.clone(),
+            )
+        }) {
+            Ok(change) => applied.push(change),
+            Err(error) => {
+                return rollback_after_official_state_failure(error, live.as_ref(), Some(&applied));
+            }
+        }
+    }
+
+    match live.as_ref() {
+        Some(live) => finish_live_action_with_official_state(
+            &codex_dir,
+            "当前官方账号已删除，OpenAI 登录状态已清除".to_string(),
+            backup_id,
+            live,
+            Some(&applied),
+        ),
+        None => finish_official_state_action(
+            &codex_dir,
+            "官方账号已删除".to_string(),
+            backup_id,
+            &applied,
+        ),
+    }
+}
+
 pub(crate) fn restore_official_provider_inner(config_dir: Option<String>) -> Result<ActionResult> {
     let codex_dir = resolve_codex_dir(config_dir)?;
     ensure_directory(&codex_dir)?;
     let _live_lock = acquire_live_config_lock(&codex_dir)?;
     migrate_legacy_prompt_config_locked(&codex_dir)?;
+    if official_history_restore_blocked(&codex_dir)? {
+        return Err(CodexxError::Config(
+            "已删除的官方账号不能从旧快照或历史备份恢复".to_string(),
+        ));
+    }
     let candidate = official_config_candidate(&codex_dir, true)?.ok_or_else(|| {
         CodexxError::Config(
             "未找到可信的官方认证快照或官方模式历史备份，请新建官方配置后重新登录".to_string(),
@@ -1043,7 +1670,7 @@ where
 {
     let cfg = config_path(codex_dir);
     let old_auth = read_file_snapshot(&auth_path(codex_dir))?;
-    let snapshot = capture_live_official_snapshot(codex_dir)?;
+    let official_state = capture_live_official_state(codex_dir)?;
     let prepared = (|| -> Result<(Option<String>, String, String, LiveAuthAction)> {
         pre_persist(codex_dir)?;
         let backup_id = create_backup(codex_dir, "save-provider-toml")?;
@@ -1071,13 +1698,23 @@ where
     })();
     let (backup_id, replacement, message, auth_action) = match prepared {
         Ok(prepared) => prepared,
-        Err(error) => return rollback_after_failure(error, None, snapshot.as_ref()),
+        Err(error) => {
+            return rollback_after_official_state_failure(error, None, official_state.as_ref())
+        }
     };
     let live = match write_live_files(codex_dir, old_config, old_auth, &replacement, &auth_action) {
         Ok(live) => live,
-        Err(error) => return rollback_after_failure(error, None, snapshot.as_ref()),
+        Err(error) => {
+            return rollback_after_official_state_failure(error, None, official_state.as_ref())
+        }
     };
-    finish_live_action(codex_dir, message, backup_id, &live, snapshot.as_ref())
+    finish_live_action_with_official_state(
+        codex_dir,
+        message,
+        backup_id,
+        &live,
+        official_state.as_ref(),
+    )
 }
 
 pub(crate) fn save_provider_toml_config_with_pre_persist<F>(
@@ -1143,7 +1780,7 @@ where
 
     let cfg = config_path(codex_dir);
     let old_auth = read_file_snapshot(&auth_path(codex_dir))?;
-    let snapshot = capture_live_official_snapshot(codex_dir)?;
+    let official_state = capture_live_official_state(codex_dir)?;
     let prepared = (|| -> Result<(Option<String>, String, LiveAuthAction)> {
         pre_persist(codex_dir)?;
         let backup_id = create_backup(codex_dir, "switch-provider")?;
@@ -1177,18 +1814,22 @@ where
     })();
     let (backup_id, replacement, auth_action) = match prepared {
         Ok(prepared) => prepared,
-        Err(error) => return rollback_after_failure(error, None, snapshot.as_ref()),
+        Err(error) => {
+            return rollback_after_official_state_failure(error, None, official_state.as_ref())
+        }
     };
     let live = match write_live_files(codex_dir, old_config, old_auth, &replacement, &auth_action) {
         Ok(live) => live,
-        Err(error) => return rollback_after_failure(error, None, snapshot.as_ref()),
+        Err(error) => {
+            return rollback_after_official_state_failure(error, None, official_state.as_ref())
+        }
     };
-    finish_live_action(
+    finish_live_action_with_official_state(
         codex_dir,
         format!("已切换到 {provider_name}"),
         backup_id,
         &live,
-        snapshot.as_ref(),
+        official_state.as_ref(),
     )
 }
 
@@ -2212,5 +2853,385 @@ experimental_bearer_token = "sk-external"
 
         delete_provider_inner(&id).expect("delete adopted provider");
         fs::remove_dir_all(codex_dir).expect("remove detected provider test directory");
+    }
+
+    fn official_account_test_dir(label: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let tag = COUNTER.fetch_add(1, Ordering::Relaxed);
+        active_provider_test_dir(label, 70_000 + tag)
+    }
+
+    fn official_account_config(model: &str) -> String {
+        format!("model_provider = \"openai\"\nmodel = \"{model}\"\n")
+    }
+
+    fn official_account_auth(access_token: &str, refresh_token: &str) -> Value {
+        json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "id_token": format!("test-id-{access_token}")
+            }
+        })
+    }
+
+    fn write_official_account_live(codex_dir: &Path, model: &str, access_token: &str) {
+        write_text(&config_path(codex_dir), &official_account_config(model))
+            .expect("write official account config");
+        write_json(
+            &auth_path(codex_dir),
+            &official_account_auth(access_token, &format!("test-refresh-{access_token}")),
+        )
+        .expect("write official account auth");
+    }
+
+    fn capture_test_account(codex_dir: &Path, name: &str) -> String {
+        capture_current_official_account_inner(
+            Some(codex_dir.display().to_string()),
+            name.to_string(),
+        )
+        .expect("capture official account");
+        list_official_accounts_inner(Some(codex_dir.display().to_string()))
+            .expect("list official accounts")
+            .into_iter()
+            .find(|account| account.name == name)
+            .expect("captured account")
+            .id
+    }
+
+    fn prepare_and_capture_test_account(
+        codex_dir: &Path,
+        name: &str,
+        model: &str,
+        access_token: &str,
+    ) -> String {
+        prepare_new_official_account_inner(Some(codex_dir.display().to_string()))
+            .expect("prepare another official account");
+        write_official_account_live(codex_dir, model, access_token);
+        capture_test_account(codex_dir, name)
+    }
+
+    fn read_live_auth(codex_dir: &Path) -> Value {
+        serde_json::from_slice(&fs::read(auth_path(codex_dir)).expect("read live auth"))
+            .expect("parse live auth")
+    }
+
+    fn remove_official_account_test_files(codex_dir: &Path) {
+        if let Ok(path) = official_accounts_path(codex_dir) {
+            let _ = fs::remove_file(path);
+        }
+        if let Ok(path) = official_snapshot_path(codex_dir) {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn official_accounts_are_isolated_by_codex_home() {
+        let first = official_account_test_dir("official-isolation-a");
+        let second = official_account_test_dir("official-isolation-b");
+        write_official_account_live(&first, "model-a", "test-access-a1");
+        write_official_account_live(&second, "model-b", "test-access-b1");
+        capture_test_account(&first, "Account A");
+        capture_test_account(&second, "Account B");
+
+        let first_list = list_official_accounts_inner(Some(first.display().to_string())).unwrap();
+        let second_list = list_official_accounts_inner(Some(second.display().to_string())).unwrap();
+        assert_eq!(first_list.len(), 1);
+        assert_eq!(first_list[0].name, "Account A");
+        assert_eq!(second_list.len(), 1);
+        assert_eq!(second_list[0].name, "Account B");
+        assert_ne!(
+            official_accounts_path(&first).unwrap(),
+            official_accounts_path(&second).unwrap()
+        );
+        remove_official_account_test_files(&first);
+        remove_official_account_test_files(&second);
+    }
+
+    #[test]
+    fn creating_two_official_accounts_lists_both_without_auth() {
+        let dir = official_account_test_dir("official-list-two");
+        write_official_account_live(&dir, "model-a", "test-access-a1");
+        capture_test_account(&dir, "Account A");
+        prepare_and_capture_test_account(&dir, "Account B", "model-b", "test-access-b1");
+
+        let summaries = list_official_accounts_inner(Some(dir.display().to_string())).unwrap();
+        assert_eq!(summaries.len(), 2);
+        let serialized = serde_json::to_string(&summaries).unwrap();
+        assert!(!serialized.contains("test-access"));
+        assert!(!serialized.contains("refresh_token"));
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn renaming_official_account_preserves_stable_id() {
+        let dir = official_account_test_dir("official-rename");
+        write_official_account_live(&dir, "model-a", "test-access-a1");
+        let id = capture_test_account(&dir, "Before");
+        let draft =
+            get_official_account_inner(Some(dir.display().to_string()), id.clone()).unwrap();
+        update_official_account_inner(OfficialAccountUpdateInput {
+            config_dir: Some(dir.display().to_string()),
+            account_id: id.clone(),
+            name: "After".to_string(),
+            model: draft.model,
+            config_text: draft.config_text,
+            auth_json: draft.auth_json,
+        })
+        .expect("rename account");
+        let summaries = list_official_accounts_inner(Some(dir.display().to_string())).unwrap();
+        assert_eq!(summaries[0].id, id);
+        assert_eq!(summaries[0].name, "After");
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn deleting_account_b_does_not_change_account_a() {
+        let dir = official_account_test_dir("official-delete-b");
+        write_official_account_live(&dir, "model-a", "test-access-a1");
+        let account_a = capture_test_account(&dir, "Account A");
+        let account_b =
+            prepare_and_capture_test_account(&dir, "Account B", "model-b", "test-access-b1");
+        let before_a =
+            get_official_account_inner(Some(dir.display().to_string()), account_a.clone()).unwrap();
+        delete_official_account_inner(Some(dir.display().to_string()), account_b)
+            .expect("delete account B");
+        let after_a =
+            get_official_account_inner(Some(dir.display().to_string()), account_a).unwrap();
+        assert_eq!(after_a.auth_json, before_a.auth_json);
+        assert_eq!(after_a.config_text, before_a.config_text);
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn switching_a_to_b_replaces_live_auth_and_config() {
+        let dir = official_account_test_dir("official-switch-a-b");
+        write_official_account_live(&dir, "model-a", "test-access-a1");
+        let account_a = capture_test_account(&dir, "Account A");
+        let account_b =
+            prepare_and_capture_test_account(&dir, "Account B", "model-b", "test-access-b1");
+        switch_official_account_inner(Some(dir.display().to_string()), account_a)
+            .expect("switch to A first");
+        switch_official_account_inner(Some(dir.display().to_string()), account_b)
+            .expect("switch A to B");
+        assert_eq!(
+            read_live_auth(&dir)["tokens"]["access_token"].as_str(),
+            Some("test-access-b1")
+        );
+        assert!(fs::read_to_string(config_path(&dir))
+            .unwrap()
+            .contains("model-b"));
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn refreshed_oauth_token_is_captured_before_account_switch() {
+        let dir = official_account_test_dir("official-refresh-round-trip");
+        write_official_account_live(&dir, "model-a", "test-access-a1");
+        let account_a = capture_test_account(&dir, "Account A");
+        let account_b =
+            prepare_and_capture_test_account(&dir, "Account B", "model-b", "test-access-b1");
+        switch_official_account_inner(Some(dir.display().to_string()), account_a.clone())
+            .expect("switch to A");
+        write_json(
+            &auth_path(&dir),
+            &official_account_auth("test-access-a2", "test-refresh-a2"),
+        )
+        .expect("simulate Codex token refresh");
+        switch_official_account_inner(Some(dir.display().to_string()), account_b)
+            .expect("switch refreshed A to B");
+        switch_official_account_inner(Some(dir.display().to_string()), account_a)
+            .expect("switch back to A");
+        assert_eq!(
+            read_live_auth(&dir)["tokens"]["access_token"].as_str(),
+            Some("test-access-a2")
+        );
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn third_party_to_account_publishes_official_route_before_auth() {
+        let dir = official_account_test_dir("official-route-before-auth");
+        let proxy_config = r#"model_provider = "custom"
+model = "proxy-model"
+
+[model_providers.custom]
+name = "Proxy"
+base_url = "https://proxy.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let old_auth = json!({"OPENAI_API_KEY": "test-proxy-key"});
+        let target_auth = official_account_auth("test-access-a1", "test-refresh-a");
+        write_text(&config_path(&dir), proxy_config).unwrap();
+        write_json(&auth_path(&dir), &old_auth).unwrap();
+        let old_config = read_file_snapshot(&config_path(&dir)).unwrap();
+        let old_auth_bytes = read_file_snapshot(&auth_path(&dir)).unwrap();
+        let target_config = official_account_config("model-a");
+        write_live_files_with_between_writes(
+            &dir,
+            old_config,
+            old_auth_bytes,
+            &target_config,
+            &LiveAuthAction::Replace(target_auth),
+            || {
+                assert!(live_config_is_official(&dir)?);
+                assert_eq!(read_live_auth(&dir), old_auth);
+                Ok(())
+            },
+        )
+        .expect("publish official account safely");
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn deleting_noncurrent_a_keeps_current_b_live_auth() {
+        let dir = official_account_test_dir("official-delete-noncurrent");
+        write_official_account_live(&dir, "model-a", "test-access-a1");
+        let account_a = capture_test_account(&dir, "Account A");
+        prepare_and_capture_test_account(&dir, "Account B", "model-b", "test-access-b1");
+        let auth_before = fs::read(auth_path(&dir)).unwrap();
+        delete_official_account_inner(Some(dir.display().to_string()), account_a)
+            .expect("delete noncurrent A");
+        assert_eq!(fs::read(auth_path(&dir)).unwrap(), auth_before);
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn deleting_current_account_clears_auth_and_blocks_legacy_restore() {
+        let dir = official_account_test_dir("official-delete-current");
+        write_official_account_live(&dir, "model-a", "test-access-a1");
+        let account_a = capture_test_account(&dir, "Account A");
+        delete_official_account_inner(Some(dir.display().to_string()), account_a)
+            .expect("delete current A");
+        assert!(!auth_path(&dir).exists());
+        assert!(load_official_account_store(&dir)
+            .unwrap()
+            .selected_account_id
+            .is_none());
+        switch_official_provider_inner(Some(dir.display().to_string()))
+            .expect("legacy switch after deletion");
+        assert!(!auth_path(&dir).exists());
+        let restore_error = restore_official_provider_inner(Some(dir.display().to_string()))
+            .expect_err("explicit restore must keep deleted account blocked");
+        assert!(restore_error.to_string().contains("已删除的官方账号"));
+        switch_official_provider_inner(Some(dir.display().to_string()))
+            .expect("switch after blocked explicit restore");
+        assert!(!auth_path(&dir).exists());
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn deleting_selected_account_while_third_party_keeps_live_files() {
+        let dir = official_account_test_dir("official-delete-selected-proxy");
+        write_official_account_live(&dir, "model-a", "test-access-a1");
+        let account_a = capture_test_account(&dir, "Account A");
+        let proxy_config = r#"model_provider = "custom"
+model = "proxy-model"
+
+[model_providers.custom]
+name = "Proxy"
+base_url = "https://proxy.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        write_text(&config_path(&dir), proxy_config).unwrap();
+        write_json(
+            &auth_path(&dir),
+            &json!({"OPENAI_API_KEY": "test-proxy-key"}),
+        )
+        .unwrap();
+        let config_before = fs::read(config_path(&dir)).unwrap();
+        let auth_before = fs::read(auth_path(&dir)).unwrap();
+        delete_official_account_inner(Some(dir.display().to_string()), account_a)
+            .expect("delete selected account under proxy");
+        assert_eq!(fs::read(config_path(&dir)).unwrap(), config_before);
+        assert_eq!(fs::read(auth_path(&dir)).unwrap(), auth_before);
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn prepare_new_account_keeps_old_account_and_clears_selection_and_live_auth() {
+        let dir = official_account_test_dir("official-prepare-new");
+        write_official_account_live(&dir, "model-a", "test-access-a1");
+        let account_a = capture_test_account(&dir, "Account A");
+        prepare_new_official_account_inner(Some(dir.display().to_string()))
+            .expect("prepare new official login");
+        let store = load_official_account_store(&dir).unwrap();
+        assert!(store.accounts.iter().any(|account| account.id == account_a));
+        assert!(store.selected_account_id.is_none());
+        assert!(!auth_path(&dir).exists());
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn capture_without_valid_login_does_not_create_account() {
+        let dir = official_account_test_dir("official-capture-invalid");
+        write_text(&config_path(&dir), &official_account_config("model-a")).unwrap();
+        let error = capture_current_official_account_inner(
+            Some(dir.display().to_string()),
+            "Empty".to_string(),
+        )
+        .expect_err("missing auth must fail");
+        assert!(error
+            .to_string()
+            .contains("未检测到有效 OpenAI Official 登录"));
+        assert!(
+            list_official_accounts_inner(Some(dir.display().to_string()))
+                .unwrap()
+                .is_empty()
+        );
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn legacy_snapshot_still_switches_without_multi_account_store() {
+        let dir = official_account_test_dir("official-legacy-compatible");
+        write_official_account_live(&dir, "legacy-model", "test-access-legacy");
+        assert!(capture_live_official_config_before_provider_switch(&dir).unwrap());
+        let account_path = official_accounts_path(&dir).unwrap();
+        assert!(!account_path.exists());
+        switch_provider_with_pre_persist(
+            ProviderInput {
+                config_dir: Some(dir.display().to_string()),
+                provider_id: Some("proxy".to_string()),
+                provider_name: "Proxy".to_string(),
+                base_url: "https://proxy.example.com/v1".to_string(),
+                model: "proxy-model".to_string(),
+                api_key: Some("test-proxy-key".to_string()),
+                wire_api: Some("responses".to_string()),
+                requires_openai_auth: Some(true),
+            },
+            |_| Ok(()),
+        )
+        .expect("switch legacy official to proxy");
+        switch_official_provider_with_pre_persist(Some(dir.display().to_string()), |_| Ok(()))
+            .expect("switch legacy snapshot back to official");
+        assert_eq!(
+            read_live_auth(&dir)["tokens"]["access_token"].as_str(),
+            Some("test-access-legacy")
+        );
+        assert!(!account_path.exists());
+        remove_official_account_test_files(&dir);
+    }
+
+    #[test]
+    fn corrupt_official_account_store_is_never_overwritten() {
+        let dir = official_account_test_dir("official-corrupt-store");
+        write_official_account_live(&dir, "model-a", "test-access-a1");
+        let path = official_accounts_path(&dir).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let corrupt = b"{corrupt-official-account-store";
+        fs::write(&path, corrupt).unwrap();
+        let error = capture_current_official_account_inner(
+            Some(dir.display().to_string()),
+            "Account A".to_string(),
+        )
+        .expect_err("corrupt store must block capture");
+        assert!(error.to_string().contains("拒绝覆盖"));
+        assert_eq!(fs::read(&path).unwrap(), corrupt);
+        remove_official_account_test_files(&dir);
     }
 }

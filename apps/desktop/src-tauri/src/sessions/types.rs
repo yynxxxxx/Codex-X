@@ -49,6 +49,9 @@ pub(crate) struct SessionSyncResult {
     pub(crate) updated_rollouts: usize,
     pub(crate) updated_threads: usize,
     pub(crate) backup_dir: String,
+    pub(crate) desktop_was_running: bool,
+    pub(crate) desktop_restarted: bool,
+    pub(crate) desktop_lifecycle_warning: Option<String>,
 }
 
 #[derive(Debug, Default)]

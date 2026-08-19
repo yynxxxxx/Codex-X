@@ -1,4 +1,5 @@
 use super::app_server::delete_sessions_via_codex_app_server;
+use super::maintenance::run_with_stopped_desktop;
 use super::storage::{
     current_model_provider, discover_sqlite_databases, ensure_sqlite_discovery_writable,
     is_canonical_rollout_storage_path, rollout_filename_matches_id, scan_rollouts,
@@ -9,6 +10,7 @@ use super::sync::{acquire_session_maintenance_lock, session_sync_status_with_dis
 use super::types::SessionSyncStatus;
 use crate::error::{CodexxError, Result};
 use crate::file_io::{io_err, write_text};
+use crate::platform;
 use crate::resolve_codex_dir;
 use crate::sqlite_utils::{sql_select_column, sqlite_has_table, table_column_set};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
@@ -38,6 +40,9 @@ pub(crate) struct SessionDeleteResult {
     pub(crate) deleted_thread_rows: usize,
     pub(crate) deleted_rollout_files: usize,
     pub(crate) deleted_related_rows: usize,
+    pub(crate) desktop_was_running: bool,
+    pub(crate) desktop_restarted: bool,
+    pub(crate) desktop_lifecycle_warning: Option<String>,
 }
 
 fn normalized_session_ids(values: Vec<String>) -> Result<Vec<String>> {
@@ -806,14 +811,92 @@ fn merge_delete_counts(target: &mut LocalSessionDeleteCounts, source: LocalSessi
 pub(crate) fn delete_codex_sessions_inner(
     input: SessionDeleteInput,
 ) -> Result<SessionDeleteResult> {
+    delete_codex_sessions_with_lifecycle(
+        input,
+        platform::stop_codex_desktop,
+        |state| state.was_running(),
+        |state| platform::start_codex_desktop(state, false),
+    )
+}
+
+fn delete_codex_sessions_with_lifecycle<S, Stop, WasRunning, Restore>(
+    input: SessionDeleteInput,
+    stop: Stop,
+    was_running: WasRunning,
+    restore: Restore,
+) -> Result<SessionDeleteResult>
+where
+    Stop: FnOnce() -> std::result::Result<S, String>,
+    WasRunning: FnOnce(&S) -> bool,
+    Restore: FnOnce(S) -> std::result::Result<(), String>,
+{
     let selected = normalized_session_ids(input.session_ids)?;
-    let requested_sessions = selected.len();
     let codex_dir = resolve_codex_dir(input.config_dir)?;
     let _maintenance_lock = acquire_session_maintenance_lock(&codex_dir)?;
-    let discovery = discover_sqlite_databases(&codex_dir);
+    preflight_delete_targets(&codex_dir, &selected)?;
+
+    let (mut result, lifecycle) = run_with_stopped_desktop(
+        stop,
+        was_running,
+        || delete_codex_sessions_stopped(&codex_dir, &selected),
+        restore,
+    )?;
+    result.desktop_was_running = lifecycle.was_running;
+    result.desktop_restarted = lifecycle.restarted;
+    result.desktop_lifecycle_warning = lifecycle.warning;
+    if let Some(warning) = &result.desktop_lifecycle_warning {
+        result.status.warnings.push(warning.clone());
+    }
+    Ok(result)
+}
+
+fn preflight_delete_targets(codex_dir: &Path, selected: &[String]) -> Result<()> {
+    let discovery = discover_sqlite_databases(codex_dir);
     ensure_sqlite_discovery_writable(&discovery)?;
-    let relationship_sources = relationship_database_sources(&discovery, &selected)?;
-    let roots = selected_session_roots(&relationship_sources, &selected)?;
+    if discovery.thread_paths.is_empty() {
+        return Err(CodexxError::Database(
+            "无法确认当前活动会话库，已取消永久删除".to_string(),
+        ));
+    }
+    let relationship_sources = relationship_database_sources(&discovery, selected)?;
+    let roots = selected_session_roots(&relationship_sources, selected)?;
+    let expected_by_root = session_descendants_by_root(&relationship_sources, &roots)?;
+    let expected_ids = expected_by_root
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<HashSet<_>>();
+    selected_rollout_paths(codex_dir, &discovery.thread_paths, &expected_ids)?;
+    Ok(())
+}
+
+fn delete_codex_sessions_stopped(
+    codex_dir: &Path,
+    selected: &[String],
+) -> Result<SessionDeleteResult> {
+    delete_codex_sessions_stopped_with_app_server(
+        codex_dir,
+        selected,
+        delete_sessions_via_codex_app_server,
+    )
+}
+
+fn delete_codex_sessions_stopped_with_app_server<AppServerDelete>(
+    codex_dir: &Path,
+    selected: &[String],
+    app_server_delete: AppServerDelete,
+) -> Result<SessionDeleteResult>
+where
+    AppServerDelete:
+        FnOnce(&Path, &[String]) -> Result<Option<super::app_server::OfficialSessionDeleteOutcome>>,
+{
+    let requested_sessions = selected.len();
+    // Desktop shutdown can flush final relationships and rollout metadata, so
+    // every discovery and validation below intentionally runs after stop.
+    let discovery = discover_sqlite_databases(codex_dir);
+    ensure_sqlite_discovery_writable(&discovery)?;
+    let relationship_sources = relationship_database_sources(&discovery, selected)?;
+    let roots = selected_session_roots(&relationship_sources, selected)?;
     let expected_by_root = session_descendants_by_root(&relationship_sources, &roots)?;
     let expected_ids = expected_by_root
         .values()
@@ -826,18 +909,18 @@ pub(crate) fn delete_codex_sessions_inner(
         ));
     }
     let verification_ids = expected_ids.clone();
-    let target_provider = current_model_provider(&codex_dir, None)?;
+    let target_provider = current_model_provider(codex_dir, None)?;
     let status_before =
-        session_sync_status_with_discovery(&codex_dir, target_provider.clone(), &discovery)?;
-    let storage_before = active_session_storage_snapshot(&codex_dir, &discovery.thread_paths)?;
+        session_sync_status_with_discovery(codex_dir, target_provider.clone(), &discovery)?;
+    let storage_before = active_session_storage_snapshot(codex_dir, &discovery.thread_paths)?;
     // Validate and collect every filesystem target before the official API can
     // make the deletion irreversible.
     let expected_rollout_paths =
-        selected_rollout_paths(&codex_dir, &discovery.thread_paths, &expected_ids)?;
+        selected_rollout_paths(codex_dir, &discovery.thread_paths, &expected_ids)?;
     let mut counts = LocalSessionDeleteCounts::default();
     let mut failed_roots = Vec::new();
 
-    match delete_sessions_via_codex_app_server(&codex_dir, &roots)? {
+    match app_server_delete(codex_dir, &roots)? {
         Some(outcome) => {
             let mut cleanup_ids = outcome.deleted_ids;
             for root in outcome.completed_roots {
@@ -858,7 +941,7 @@ pub(crate) fn delete_codex_sessions_inner(
                 merge_delete_counts(
                     &mut counts,
                     delete_exact_session_ids_locally(
-                        &codex_dir,
+                        codex_dir,
                         &discovery.related_paths,
                         cleanup_ids,
                         cleanup_rollout_paths,
@@ -870,7 +953,7 @@ pub(crate) fn delete_codex_sessions_inner(
             merge_delete_counts(
                 &mut counts,
                 delete_exact_session_ids_locally(
-                    &codex_dir,
+                    codex_dir,
                     &discovery.related_paths,
                     expected_ids,
                     expected_rollout_paths,
@@ -895,7 +978,7 @@ pub(crate) fn delete_codex_sessions_inner(
         .iter()
         .filter(|id| remaining_ids.contains(*id))
         .count();
-    let status = match session_sync_status_with_discovery(&codex_dir, target_provider, &discovery) {
+    let status = match session_sync_status_with_discovery(codex_dir, target_provider, &discovery) {
         Ok(status) => status,
         Err(error) => {
             let message = format!("删除后刷新会话状态失败: {error}");
@@ -967,12 +1050,16 @@ pub(crate) fn delete_codex_sessions_inner(
         deleted_thread_rows: counts.deleted_thread_rows,
         deleted_rollout_files: counts.deleted_rollout_files,
         deleted_related_rows: counts.deleted_related_rows,
+        desktop_was_running: false,
+        desktop_restarted: false,
+        desktop_lifecycle_warning: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn temp_codex_dir() -> PathBuf {
@@ -1002,6 +1089,98 @@ mod tests {
             [id],
         )
         .expect("insert thread");
+    }
+
+    #[test]
+    fn app_server_delete_path_is_preserved_before_exact_local_cleanup() {
+        let codex_dir = temp_codex_dir();
+        let database = codex_dir.join("state_10.sqlite");
+        let id = "019f6000-0000-7000-8000-000000000373";
+        create_thread_database(&database, id);
+        let called = Cell::new(false);
+
+        let result = delete_codex_sessions_stopped_with_app_server(
+            &codex_dir,
+            &[id.to_string()],
+            |requested_home, roots| {
+                assert_eq!(requested_home, codex_dir.as_path());
+                assert_eq!(roots, &[id.to_string()]);
+                called.set(true);
+                let mut outcome = super::super::app_server::OfficialSessionDeleteOutcome::default();
+                outcome.completed_roots.insert(id.to_string());
+                Ok(Some(outcome))
+            },
+        )
+        .expect("official delete followed by local cleanup");
+        assert!(called.get());
+        assert_eq!(result.deleted_sessions, 1);
+        assert_eq!(result.failed_sessions, 0);
+        let remaining: i64 = Connection::open(&database)
+            .expect("open cleaned database")
+            .query_row("SELECT COUNT(*) FROM threads WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .expect("count cleaned session");
+        assert_eq!(remaining, 0);
+        fs::remove_dir_all(codex_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn delete_stop_failure_does_not_mutate_session_storage() {
+        let codex_dir = temp_codex_dir();
+        let database = codex_dir.join("state_10.sqlite");
+        let id = "019f6000-0000-7000-8000-000000000371";
+        create_thread_database(&database, id);
+        let input = SessionDeleteInput {
+            config_dir: Some(codex_dir.display().to_string()),
+            session_ids: vec![id.to_string()],
+        };
+
+        let error = delete_codex_sessions_with_lifecycle(
+            input,
+            || Err::<bool, _>("close timeout".to_string()),
+            |running| *running,
+            |_| Ok(()),
+        )
+        .expect_err("stop failure must cancel deletion");
+        assert!(error.to_string().contains("会话操作已取消"));
+        let remaining: i64 = Connection::open(&database)
+            .expect("open unchanged database")
+            .query_row("SELECT COUNT(*) FROM threads WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .expect("count unchanged session");
+        assert_eq!(remaining, 1);
+        fs::remove_dir_all(codex_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn delete_failure_after_stop_still_restores_desktop() {
+        let codex_dir = temp_codex_dir();
+        let database = codex_dir.join("state_10.sqlite");
+        let id = "019f6000-0000-7000-8000-000000000372";
+        create_thread_database(&database, id);
+        let restored = Cell::new(false);
+        let input = SessionDeleteInput {
+            config_dir: Some(codex_dir.display().to_string()),
+            session_ids: vec![id.to_string()],
+        };
+
+        delete_codex_sessions_with_lifecycle(
+            input,
+            || {
+                fs::remove_file(&database).expect("simulate storage disappearing after stop");
+                Ok(true)
+            },
+            |running| *running,
+            |running| {
+                restored.set(running);
+                Ok(())
+            },
+        )
+        .expect_err("fresh post-stop validation must fail");
+        assert!(restored.get());
+        fs::remove_dir_all(codex_dir).expect("remove test directory");
     }
 
     #[test]
