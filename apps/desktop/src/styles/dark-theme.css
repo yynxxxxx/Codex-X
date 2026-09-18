@@ -603,8 +603,54 @@
   background-clip: padding-box;
 }
 
+:root[data-theme="dark"] .cx-session-folder-tree,
+:root[data-theme="dark"] .cx-session-tree-heading {
+  color: var(--cx-dark-muted);
+  background: var(--cx-dark-surface-raised);
+  border-color: var(--cx-dark-border);
+}
+
+:root[data-theme="dark"] .cx-session-results {
+  background: var(--cx-dark-surface);
+}
+
+:root[data-theme="dark"] .cx-session-tree-all,
+:root[data-theme="dark"] .cx-session-tree-item {
+  color: var(--cx-dark-muted);
+}
+
+:root[data-theme="dark"] .cx-session-tree-all:hover,
+:root[data-theme="dark"] .cx-session-tree-item:hover {
+  color: var(--cx-dark-text);
+  background: var(--cx-dark-surface-hover);
+}
+
+:root[data-theme="dark"] .cx-session-tree-item--active {
+  color: var(--cx-dark-blue);
+  background: var(--cx-dark-blue-surface);
+  border-color: #5879aa;
+}
+
+:root[data-theme="dark"] .cx-session-tree-item--active .cx-session-folder-copy strong {
+  color: var(--cx-dark-blue);
+}
+
 :root[data-theme="dark"] .cx-session-group + .cx-session-group {
   border-top-color: var(--cx-dark-surface-recessed);
+}
+
+:root[data-theme="dark"] .cx-session-group-heading--selected,
+:root[data-theme="dark"] .cx-session-group-heading--partial {
+  color: var(--cx-dark-blue);
+  background: var(--cx-dark-blue-surface);
+}
+
+:root[data-theme="dark"] .cx-session-folder-copy strong {
+  color: var(--cx-dark-text);
+}
+
+:root[data-theme="dark"] .cx-session-folder-copy small {
+  color: var(--cx-dark-muted);
 }
 
 :root[data-theme="dark"] .cx-session-row {
