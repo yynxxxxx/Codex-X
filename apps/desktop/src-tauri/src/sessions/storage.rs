@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use toml_edit::DocumentMut;
 
+const MAX_ROLLOUT_IN_MEMORY_BYTES: u64 = 32 * 1024 * 1024;
+
 pub(super) fn current_model_provider(codex_dir: &Path, explicit: Option<String>) -> Result<String> {
     if let Some(provider) = explicit
         .map(|s| s.trim().to_string())
@@ -328,6 +330,43 @@ fn scan_rollouts_with_thread_filter(
             if exclude_source_marked_subagents {
                 continue;
             }
+        }
+        let rollout_size = match fs::metadata(&path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                scan.scan_failures.push(format!(
+                    "无法读取会话文件大小: {} ({error})",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if rollout_size > MAX_ROLLOUT_IN_MEMORY_BYTES {
+            if excluded_thread_ids.is_some_and(|excluded| excluded.contains(identity_id))
+                || allowed_thread_ids.is_some_and(|allowed| !allowed.contains(identity_id))
+            {
+                continue;
+            }
+            scan.session_meta_count += 1;
+            scan.thread_ids.insert(identity_id.to_string());
+            if let Some(cwd) = identity
+                .payload
+                .cwd
+                .as_deref()
+                .and_then(normalize_workspace_path)
+            {
+                scan.cwd_by_thread_id.insert(identity_id.to_string(), cwd);
+            }
+            if identity.payload.model_provider.as_deref() == Some(target_provider) {
+                scan.provider_candidate_paths.insert(path);
+            } else {
+                scan.warnings.push(format!(
+                    "会话文件过大（{} MiB），为避免内存耗尽已跳过 Provider 改写: {}",
+                    rollout_size / (1024 * 1024),
+                    path.display()
+                ));
+            }
+            continue;
         }
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
@@ -1266,6 +1305,8 @@ impl<'de> Deserialize<'de> for InternalSource {
 #[derive(Default, Deserialize)]
 struct RolloutIdentityPayload {
     id: Option<String>,
+    cwd: Option<String>,
+    model_provider: Option<String>,
     #[serde(default)]
     source: InternalSource,
     thread_source: Option<String>,
@@ -2074,6 +2115,61 @@ mod tests {
         assert!(scan.thread_ids.contains("fork"));
         assert!(!scan.thread_ids.contains("internal"));
         assert_eq!(scan.changes.len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_rollouts_are_classified_without_loading_the_body() {
+        let dir = temp_codex_dir("oversized-rollout-scan");
+        let sessions = dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let matching = sessions.join("rollout-large-matching.jsonl");
+        fs::write(
+            &matching,
+            r#"{"type":"session_meta","payload":{"id":"large-matching","cwd":"C:/workspace","model_provider":"openai","source":"vscode"}}
+"#,
+        )
+        .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&matching)
+            .unwrap()
+            .set_len(MAX_ROLLOUT_IN_MEMORY_BYTES + 1)
+            .unwrap();
+
+        let mismatched = sessions.join("rollout-large-mismatched.jsonl");
+        fs::write(
+            &mismatched,
+            r#"{"type":"session_meta","payload":{"id":"large-mismatched","model_provider":"custom","source":"vscode"}}
+"#,
+        )
+        .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&mismatched)
+            .unwrap()
+            .set_len(MAX_ROLLOUT_IN_MEMORY_BYTES + 1)
+            .unwrap();
+
+        let scan = scan_provider_rollouts(&dir, "openai", &HashSet::new(), &HashMap::new())
+            .expect("scan oversized rollouts");
+
+        assert!(scan.scan_failures.is_empty(), "{:?}", scan.scan_failures);
+        assert_eq!(scan.session_meta_count, 2);
+        assert!(scan.thread_ids.contains("large-matching"));
+        assert!(scan.thread_ids.contains("large-mismatched"));
+        assert_eq!(
+            scan.cwd_by_thread_id
+                .get("large-matching")
+                .map(String::as_str),
+            Some("C:/workspace")
+        );
+        assert!(scan.provider_candidate_paths.contains(&matching));
+        assert!(!scan.provider_candidate_paths.contains(&mismatched));
+        assert!(scan.changes.is_empty());
+        assert_eq!(scan.warnings.len(), 1);
+        assert!(scan.warnings[0].contains("避免内存耗尽"));
         fs::remove_dir_all(dir).unwrap();
     }
 
