@@ -13,12 +13,30 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use toml_edit::DocumentMut;
 
 const MAX_ROLLOUT_IN_MEMORY_BYTES: u64 = 32 * 1024 * 1024;
+
+enum BoundedTextRead {
+    Text(String),
+    Oversized,
+}
+
+fn read_text_bounded<R: Read>(reader: R, limit: u64) -> std::io::Result<BoundedTextRead> {
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024) as usize + 1);
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Ok(BoundedTextRead::Oversized);
+    }
+    String::from_utf8(bytes)
+        .map(BoundedTextRead::Text)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
 
 pub(super) fn current_model_provider(codex_dir: &Path, explicit: Option<String>) -> Result<String> {
     if let Some(provider) = explicit
@@ -303,7 +321,17 @@ fn scan_rollouts_with_thread_filter(
             .canonicalize()
             .ok()
             .and_then(|canonical| referenced.get(&canonical));
-        let identity = match read_rollout_identity(&path) {
+        let mut rollout_file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                scan.scan_failures.push(format!(
+                    "无法读取会话文件来源信息: {} ({error})",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        let identity = match read_rollout_identity_from_reader(&mut rollout_file, &path) {
             Ok(identity) => identity,
             Err(failure) => {
                 scan.scan_failures.push(failure);
@@ -331,7 +359,7 @@ fn scan_rollouts_with_thread_filter(
                 continue;
             }
         }
-        let rollout_size = match fs::metadata(&path) {
+        let rollout_size = match rollout_file.metadata() {
             Ok(metadata) => metadata.len(),
             Err(error) => {
                 scan.scan_failures.push(format!(
@@ -341,7 +369,35 @@ fn scan_rollouts_with_thread_filter(
                 continue;
             }
         };
-        if rollout_size > MAX_ROLLOUT_IN_MEMORY_BYTES {
+        let mut bounded_text = None;
+        let oversized = if rollout_size > MAX_ROLLOUT_IN_MEMORY_BYTES {
+            true
+        } else if let Err(error) = rollout_file.seek(SeekFrom::Start(0)) {
+            scan.scan_failures.push(format!(
+                "无法重置会话文件读取位置: {} ({error})",
+                path.display()
+            ));
+            continue;
+        } else {
+            match read_text_bounded(&mut rollout_file, MAX_ROLLOUT_IN_MEMORY_BYTES) {
+                Ok(BoundedTextRead::Text(text)) => {
+                    bounded_text = Some(text);
+                    false
+                }
+                Ok(BoundedTextRead::Oversized) => true,
+                Err(error) => {
+                    let reason = if is_locked_io_error(&error) {
+                        "会话文件被占用或无权限读取"
+                    } else {
+                        "无法读取会话文件"
+                    };
+                    scan.scan_failures
+                        .push(format!("{reason}: {} ({error})", path.display()));
+                    continue;
+                }
+            }
+        };
+        if oversized {
             if excluded_thread_ids.is_some_and(|excluded| excluded.contains(identity_id))
                 || allowed_thread_ids.is_some_and(|allowed| !allowed.contains(identity_id))
             {
@@ -362,25 +418,13 @@ fn scan_rollouts_with_thread_filter(
             } else {
                 scan.warnings.push(format!(
                     "会话文件过大（{} MiB），为避免内存耗尽已跳过 Provider 改写: {}",
-                    rollout_size / (1024 * 1024),
+                    rollout_size.max(MAX_ROLLOUT_IN_MEMORY_BYTES + 1) / (1024 * 1024),
                     path.display()
                 ));
             }
             continue;
         }
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) => {
-                let reason = if is_locked_io_error(&error) {
-                    "会话文件被占用或无权限读取"
-                } else {
-                    "无法读取会话文件"
-                };
-                scan.scan_failures
-                    .push(format!("{reason}: {} ({error})", path.display()));
-                continue;
-            }
-        };
+        let text = bounded_text.unwrap_or_default();
         let mut next_text = String::with_capacity(text.len());
         let mut rewrite_needed = false;
         let mut file_session_meta_count = 0usize;
@@ -1379,11 +1423,12 @@ fn rollout_filename_thread_id(path: &Path) -> Option<&str> {
     (is_filename_uuid(thread_id) && delimiter == "-").then_some(thread_id)
 }
 
-fn read_rollout_identity(path: &Path) -> std::result::Result<RolloutIdentityRecord, String> {
-    let file = fs::File::open(path)
-        .map_err(|_| format!("无法读取会话文件来源信息: {}", path.display()))?;
+fn read_rollout_identity_from_reader<R: Read>(
+    reader: R,
+    path: &Path,
+) -> std::result::Result<RolloutIdentityRecord, String> {
     let record = RolloutIdentityRecord::deserialize(&mut serde_json::Deserializer::from_reader(
-        BufReader::new(file),
+        BufReader::new(reader),
     ))
     .map_err(|_| {
         format!(
@@ -1410,6 +1455,12 @@ fn read_rollout_identity(path: &Path) -> std::result::Result<RolloutIdentityReco
         ));
     }
     Ok(record)
+}
+
+fn read_rollout_identity(path: &Path) -> std::result::Result<RolloutIdentityRecord, String> {
+    let file = fs::File::open(path)
+        .map_err(|_| format!("无法读取会话文件来源信息: {}", path.display()))?;
+    read_rollout_identity_from_reader(file, path)
 }
 
 fn is_authoritative_rollout(
@@ -2116,6 +2167,18 @@ mod tests {
         assert!(!scan.thread_ids.contains("internal"));
         assert_eq!(scan.changes.len(), 1);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bounded_text_read_rejects_content_that_crosses_the_limit() {
+        let oversized = read_text_bounded(std::io::Cursor::new(b"0123456789"), 9).unwrap();
+        assert!(matches!(oversized, BoundedTextRead::Oversized));
+
+        let exact = read_text_bounded(std::io::Cursor::new(b"012345678"), 9).unwrap();
+        let BoundedTextRead::Text(text) = exact else {
+            panic!("content at the limit should remain readable");
+        };
+        assert_eq!(text, "012345678");
     }
 
     #[test]
