@@ -1,18 +1,85 @@
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
   Download,
+  Folder,
   FolderTree,
   History,
   Info,
   Loader2,
+  Pin,
   RefreshCw,
   Search,
   Trash2,
   Zap,
 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Checkbox, ModalShell, cx } from "../components/ui";
 import "../styles/session-management.css";
+
+const SESSION_ROW_HEIGHT = 58;
+const SESSION_COLUMN_HEADER_HEIGHT = 34;
+const SESSION_VIRTUAL_OVERSCAN_ROWS = 8;
+const DEFAULT_SESSION_VIEWPORT_HEIGHT = 640;
+const SESSION_PINS_STORAGE_PREFIX = "codexx.sessionPins.v1";
+const SESSION_FOLDER_UNKNOWN_KEY = "__codexx_no_workspace__";
+const SESSION_ALL_FOLDERS_KEY = "__codexx_all_folders__";
+
+type SessionPinPreferences = {
+  folders: string[];
+  sessions: string[];
+};
+
+type ScopedSessionPinPreferences = SessionPinPreferences & {
+  storageKey: string;
+};
+
+function normalizeFolderPinKey(value?: string | null) {
+  const normalized = (value || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized ? normalized.toLocaleLowerCase() : SESSION_FOLDER_UNKNOWN_KEY;
+}
+
+function sessionPinStorageKey(codexDir: string) {
+  return `${SESSION_PINS_STORAGE_PREFIX}:${encodeURIComponent(normalizeFolderPinKey(codexDir))}`;
+}
+
+function readSessionPinPreferences(storageKey: string): SessionPinPreferences {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(storageKey) || "{}") as Partial<SessionPinPreferences>;
+    return {
+      folders: Array.isArray(parsed.folders) ? parsed.folders.filter((value): value is string => typeof value === "string") : [],
+      sessions: Array.isArray(parsed.sessions) ? parsed.sessions.filter((value): value is string => typeof value === "string") : [],
+    };
+  } catch {
+    return { folders: [], sessions: [] };
+  }
+}
+
+function folderDisplayName(value: string, missing: string) {
+  if (!value) return missing;
+  const parts = value.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts[parts.length - 1] || missing;
+}
+
+type SessionVirtualRow = {
+  kind: "session";
+  key: string;
+  top: number;
+  height: number;
+  item: SessionPreview;
+};
+
+function findVirtualRowIndex(rows: SessionVirtualRow[], offset: number) {
+  let low = 0;
+  let high = rows.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (rows[middle].top + rows[middle].height <= offset) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
 
 export type Lang = "zh" | "en";
 
@@ -157,6 +224,7 @@ export function SessionManagementPage({
   onDeleteSafetyConfirmedChange,
 }: SessionManagementPageProps) {
   const isChinese = lang === "zh";
+  const codexDir = sessionStatus?.codexDir || "default";
   const copy = isChinese
     ? {
         syncEyebrow: "会话同步",
@@ -170,14 +238,14 @@ export function SessionManagementPage({
         clickToCheck: "点击检查会话",
         scanIncomplete: "无法确认同步状态，请查看下方原因",
         needsSync: (count: number) => `有 ${count} 条会话需要同步`,
-        allSynced: "普通会话已同步",
+        allSynced: "全部会话已同步",
         sessionCount: (count: number) => `${count} 条会话`,
         local: "本地会话",
-        list: "会话列表",
+        list: "文件夹与会话",
         shown: (shown: number, total: number) => `展示 ${shown} / ${total} 条`,
         loaded: (count: number) => `当前加载 ${count} 条`,
         search: "搜索标题 / 项目 / 供应商 / ID",
-        groupByProject: "按项目路径分组",
+        groupByProject: "文件夹视图",
         showInternal: (count: number) => `显示内部会话 (${count})`,
         deleteSelected: "删除选中",
         exportSelected: "导出选中",
@@ -189,6 +257,12 @@ export function SessionManagementPage({
         selectProject: (path: string, count: number) => `选择项目 ${path} 的 ${count} 条会话`,
         projectCount: (count: number, truncated: boolean) => `${truncated ? "已加载 " : ""}${count} 条`,
         projectShown: (shown: number, total: number) => `显示 ${shown} / 共 ${total} 条`,
+        pinFolder: "置顶文件夹",
+        unpinFolder: "取消置顶文件夹",
+        pinSession: "置顶会话",
+        unpinSession: "取消置顶会话",
+        allSessions: "全部会话",
+        folders: "工作文件夹",
         selectSession: "选择会话",
         archived: "已归档",
         internal: "内部",
@@ -198,6 +272,7 @@ export function SessionManagementPage({
         noModel: "未记录",
         noMatch: "没有匹配的会话。",
         noSessions: "还没有读取到会话。点击右上角“检查会话”刷新。",
+        loadingMore: "正在加载更多会话…",
         diagnostics: "诊断信息",
         diagnosticsCount: (count: number) => `${count} 条 · 点击查看`,
         deleteTitle: (count: number) => `永久删除 ${count} 条会话`,
@@ -224,14 +299,14 @@ export function SessionManagementPage({
         clickToCheck: "Check sessions to get started",
         scanIncomplete: "Unable to verify sync status. See the reason below.",
         needsSync: (count: number) => `${count} session(s) need syncing`,
-        allSynced: "User conversations are synced",
+        allSynced: "All sessions are synced",
         sessionCount: (count: number) => `${count} sessions`,
         local: "LOCAL SESSIONS",
-        list: "Sessions",
+        list: "Folders & sessions",
         shown: (shown: number, total: number) => `${shown} / ${total} shown`,
         loaded: (count: number) => `${count} loaded`,
         search: "Search title / project / provider / ID",
-        groupByProject: "Group by project path",
+        groupByProject: "Folder view",
         showInternal: (count: number) => `Show internal sessions (${count})`,
         deleteSelected: "Delete selected",
         exportSelected: "Export selected",
@@ -243,6 +318,12 @@ export function SessionManagementPage({
         selectProject: (path: string, count: number) => `Select ${count} sessions in ${path}`,
         projectCount: (count: number, truncated: boolean) => `${count}${truncated ? " loaded" : ""}`,
         projectShown: (shown: number, total: number) => `${shown} / ${total} shown`,
+        pinFolder: "Pin folder",
+        unpinFolder: "Unpin folder",
+        pinSession: "Pin session",
+        unpinSession: "Unpin session",
+        allSessions: "All sessions",
+        folders: "Workspace folders",
         selectSession: "Select session",
         archived: "Archived",
         internal: "Internal",
@@ -252,6 +333,7 @@ export function SessionManagementPage({
         noModel: "Not recorded",
         noMatch: "No matching sessions.",
         noSessions: "No sessions loaded. Click Check sessions to refresh.",
+        loadingMore: "Loading more sessions…",
         diagnostics: "Diagnostics",
         diagnosticsCount: (count: number) => `${count} · click to view`,
         deleteTitle: (count: number) => `Permanently delete ${count} session(s)`,
@@ -273,9 +355,167 @@ export function SessionManagementPage({
     ...(sessionStatus?.warnings || []).map((message) => ({ message, blocking: false })),
   ];
   const dialogOpen = sessionDeleteConfirmOpen && selectedSessions.length > 0;
-  const selectedVisibleCount = filteredSessions.filter((item) => selectedSessionSet.has(item.id)).length;
-  const allVisibleSelected = filteredSessions.length > 0 && selectedVisibleCount === filteredSessions.length;
+  const sessionScrollRef = useRef<HTMLDivElement | null>(null);
+  const pinStorageKey = useMemo(() => sessionPinStorageKey(codexDir), [codexDir]);
+  const [pinPreferences, setPinPreferences] = useState<ScopedSessionPinPreferences>({
+    storageKey: "",
+    folders: [],
+    sessions: [],
+  });
+  const [selectedFolderKey, setSelectedFolderKey] = useState(SESSION_ALL_FOLDERS_KEY);
+  const [sessionScrollMetrics, setSessionScrollMetrics] = useState({
+    scrollTop: 0,
+    viewportHeight: DEFAULT_SESSION_VIEWPORT_HEIGHT,
+  });
+
+  useEffect(() => {
+    setPinPreferences({ storageKey: pinStorageKey, ...readSessionPinPreferences(pinStorageKey) });
+    setSelectedFolderKey(SESSION_ALL_FOLDERS_KEY);
+  }, [pinStorageKey]);
+
+  const activePinPreferences = pinPreferences.storageKey === pinStorageKey
+    ? pinPreferences
+    : { storageKey: pinStorageKey, folders: [], sessions: [] };
+  const pinnedFolderSet = useMemo(() => new Set(activePinPreferences.folders), [activePinPreferences.folders]);
+  const pinnedSessionSet = useMemo(() => new Set(activePinPreferences.sessions), [activePinPreferences.sessions]);
+
+  const updatePins = useCallback((kind: "folders" | "sessions", key: string) => {
+    setPinPreferences((current) => {
+      const base = current.storageKey === pinStorageKey
+        ? current
+        : { storageKey: pinStorageKey, ...readSessionPinPreferences(pinStorageKey) };
+      const values = new Set(base[kind]);
+      if (values.has(key)) values.delete(key);
+      else values.add(key);
+      const next = { ...base, [kind]: Array.from(values) };
+      try {
+        localStorage.setItem(pinStorageKey, JSON.stringify({ folders: next.folders, sessions: next.sessions }));
+      } catch {
+        // Pinning remains available for this run even when localStorage is unavailable.
+      }
+      return next;
+    });
+  }, [pinStorageKey]);
+
+  const orderedSessionGroups = useMemo(() => groupedSessions.map(([group, items]) => {
+    const folderKey = normalizeFolderPinKey(items.find((item) => item.cwd)?.cwd);
+    const orderedItems = [...items].sort((left, right) => {
+      const pinnedOrder = Number(pinnedSessionSet.has(right.id)) - Number(pinnedSessionSet.has(left.id));
+      if (pinnedOrder) return pinnedOrder;
+      const recencyOrder = (right.updatedAtMs || 0) - (left.updatedAtMs || 0);
+      return recencyOrder || left.id.localeCompare(right.id);
+    });
+    return {
+      group,
+      folderKey,
+      items: orderedItems,
+      newestAt: orderedItems.reduce((latest, item) => Math.max(latest, item.updatedAtMs || 0), 0),
+      pinned: pinnedFolderSet.has(folderKey),
+    };
+  }).sort((left, right) => {
+    if (!sessionGroupByCwd) return 0;
+    const pinnedOrder = Number(right.pinned) - Number(left.pinned);
+    return pinnedOrder || right.newestAt - left.newestAt || left.group.localeCompare(right.group);
+  }), [groupedSessions, pinnedFolderSet, pinnedSessionSet, sessionGroupByCwd]);
+
+  const orderedAllSessions = useMemo(() => [...filteredSessions].sort((left, right) => {
+    const pinnedOrder = Number(pinnedSessionSet.has(right.id)) - Number(pinnedSessionSet.has(left.id));
+    if (pinnedOrder) return pinnedOrder;
+    const recencyOrder = (right.updatedAtMs || 0) - (left.updatedAtMs || 0);
+    return recencyOrder || left.id.localeCompare(right.id);
+  }), [filteredSessions, pinnedSessionSet]);
+
+  useEffect(() => {
+    if (!sessionGroupByCwd || selectedFolderKey === SESSION_ALL_FOLDERS_KEY) return;
+    if (!orderedSessionGroups.some((group) => group.folderKey === selectedFolderKey)) {
+      setSelectedFolderKey(SESSION_ALL_FOLDERS_KEY);
+    }
+  }, [orderedSessionGroups, selectedFolderKey, sessionGroupByCwd]);
+
+  const displayedSessions = useMemo(() => {
+    if (!sessionGroupByCwd || selectedFolderKey === SESSION_ALL_FOLDERS_KEY) return orderedAllSessions;
+    return orderedSessionGroups.find((group) => group.folderKey === selectedFolderKey)?.items || [];
+  }, [orderedAllSessions, orderedSessionGroups, selectedFolderKey, sessionGroupByCwd]);
+  const selectedVisibleCount = displayedSessions.filter((item) => selectedSessionSet.has(item.id)).length;
+  const allVisibleSelected = displayedSessions.length > 0 && selectedVisibleCount === displayedSessions.length;
   const visibleSelectionIsPartial = selectedVisibleCount > 0 && !allVisibleSelected;
+
+  const virtualSessionModel = useMemo(() => {
+    const rows: SessionVirtualRow[] = [];
+    let top = 0;
+    displayedSessions.forEach((item) => {
+      rows.push({
+        kind: "session",
+        key: `session:${item.id}`,
+        top,
+        height: SESSION_ROW_HEIGHT,
+        item,
+      });
+      top += SESSION_ROW_HEIGHT;
+    });
+    return { rows, totalHeight: top };
+  }, [displayedSessions]);
+
+  const visibleSessionRows = useMemo(() => {
+    const viewportHeight = sessionScrollMetrics.viewportHeight || DEFAULT_SESSION_VIEWPORT_HEIGHT;
+    const bodyScrollTop = Math.max(0, sessionScrollMetrics.scrollTop - SESSION_COLUMN_HEADER_HEIGHT);
+    const firstVisibleIndex = findVirtualRowIndex(virtualSessionModel.rows, bodyScrollTop);
+    const lastVisibleIndex = findVirtualRowIndex(virtualSessionModel.rows, bodyScrollTop + viewportHeight);
+    const firstIndex = Math.max(0, firstVisibleIndex - SESSION_VIRTUAL_OVERSCAN_ROWS);
+    const lastIndex = Math.min(
+      virtualSessionModel.rows.length,
+      lastVisibleIndex + SESSION_VIRTUAL_OVERSCAN_ROWS + 1,
+    );
+    return virtualSessionModel.rows.slice(firstIndex, lastIndex);
+  }, [sessionScrollMetrics, virtualSessionModel]);
+
+  const syncSessionScrollMetrics = useCallback(() => {
+    const element = sessionScrollRef.current;
+    if (!element) return;
+    setSessionScrollMetrics((current) => {
+      const next = {
+        scrollTop: element.scrollTop,
+        viewportHeight: element.clientHeight,
+      };
+      return current.scrollTop === next.scrollTop && current.viewportHeight === next.viewportHeight
+        ? current
+        : next;
+    });
+  }, []);
+
+  const handleSessionScroll = useCallback(() => {
+    syncSessionScrollMetrics();
+  }, [syncSessionScrollMetrics]);
+
+  useEffect(() => {
+    syncSessionScrollMetrics();
+    const element = sessionScrollRef.current;
+    if (!element) return undefined;
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", syncSessionScrollMetrics);
+      return () => window.removeEventListener("resize", syncSessionScrollMetrics);
+    }
+    const observer = new ResizeObserver(syncSessionScrollMetrics);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [active, syncSessionScrollMetrics]);
+
+  useEffect(() => {
+    const element = sessionScrollRef.current;
+    if (!element) return;
+    const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+    if (element.scrollTop > maxScrollTop) {
+      element.scrollTop = maxScrollTop;
+      syncSessionScrollMetrics();
+    }
+  }, [syncSessionScrollMetrics, virtualSessionModel.totalHeight]);
+
+  useEffect(() => {
+    const element = sessionScrollRef.current;
+    if (!element) return;
+    element.scrollTop = 0;
+    syncSessionScrollMetrics();
+  }, [selectedFolderKey, sessionGroupByCwd, syncSessionScrollMetrics]);
 
   return (
     <>
@@ -429,56 +669,102 @@ export function SessionManagementPage({
             </button>
           </div>
 
-          {filteredSessions.length > 0 ? (
-            <div className="cx-session-scroll" role="table" aria-label={copy.list}>
-              <div className="cx-session-column-head" role="row">
-                <Checkbox
-                  className="cx-session-select-all"
-                  checked={allVisibleSelected}
-                  indeterminate={visibleSelectionIsPartial}
-                  onCheckedChange={(checked) => onSetSessionGroupSelected(filteredSessions, checked)}
-                  aria-label={copy.selectAll}
-                  disabled={loading || sessionDeleteBusy}
-                />
-                <span>{isChinese ? "会话" : "Session"}</span>
-                <span>{isChinese ? "更新时间" : "Updated"}</span>
-                <span>{isChinese ? "供应商" : "Provider"}</span>
-                <span>{isChinese ? "模型" : "Model"}</span>
-                <span className="cx-session-id-heading">ID</span>
-                <span className="cx-session-actions-heading">{isChinese ? "导出" : "Export"}</span>
-              </div>
-              <div className="cx-session-table-body">
-                {groupedSessions.map(([group, items]) => {
-                  const projectSessions = allSessionsByCwd.get(group) || items;
-                  const selectedProjectCount = projectSessions.filter((item) => selectedSessionSet.has(item.id)).length;
-                  const projectSelected = projectSessions.length > 0 && selectedProjectCount === projectSessions.length;
-                  const projectPartiallySelected = selectedProjectCount > 0 && !projectSelected;
-                  const groupCountLabel = items.length === projectSessions.length
-                    ? copy.projectCount(projectSessions.length, sessionPreviewTruncated)
-                    : copy.projectShown(items.length, projectSessions.length);
-                  return (
-                    <div className="cx-session-group" key={group}>
-                      {sessionGroupByCwd && (
-                        <label className={cx("cx-session-group-heading", projectSelected && "cx-session-group-heading--selected", projectPartiallySelected && "cx-session-group-heading--partial")}>
-                          <input
-                            className="cx-session-checkbox"
-                            type="checkbox"
-                            ref={(input) => {
-                              if (input) input.indeterminate = projectPartiallySelected;
-                            }}
-                            checked={projectSelected}
-                            onChange={(event) => onSetSessionGroupSelected(projectSessions, event.target.checked)}
-                            aria-label={copy.selectProject(group, projectSessions.length)}
-                          />
-                          <span title={group}>{compactPath(group, 96, isChinese ? "未记录路径" : "No path recorded")}</span>
-                          <em>{groupCountLabel}</em>
-                        </label>
-                      )}
-                      {items.map((item) => (
+          <div className={cx("cx-session-browser", !sessionGroupByCwd && "cx-session-browser--flat")}>
+            {sessionGroupByCwd && (
+              <aside className="cx-session-folder-tree" aria-label={copy.folders}>
+                <div className="cx-session-tree-heading">
+                  <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
+                  <FolderTree size={15} strokeWidth={1.9} aria-hidden="true" />
+                  <span>{copy.folders}</span>
+                </div>
+                <div className="cx-session-tree-items" role="tree">
+                  <button
+                    type="button"
+                    role="treeitem"
+                    aria-selected={selectedFolderKey === SESSION_ALL_FOLDERS_KEY}
+                    className={cx("cx-session-tree-all", selectedFolderKey === SESSION_ALL_FOLDERS_KEY && "cx-session-tree-item--active")}
+                    onClick={() => setSelectedFolderKey(SESSION_ALL_FOLDERS_KEY)}
+                  >
+                    <History size={15} strokeWidth={1.9} aria-hidden="true" />
+                    <span>{copy.allSessions}</span>
+                    <em>{filteredSessions.length}</em>
+                  </button>
+                  {orderedSessionGroups.map((folder) => (
+                    <div
+                      className={cx("cx-session-tree-item", selectedFolderKey === folder.folderKey && "cx-session-tree-item--active")}
+                      role="treeitem"
+                      aria-selected={selectedFolderKey === folder.folderKey}
+                      key={folder.folderKey}
+                    >
+                      <button
+                        type="button"
+                        className="cx-session-tree-select"
+                        onClick={() => setSelectedFolderKey(folder.folderKey)}
+                        title={folder.group}
+                      >
+                        <Folder size={15} strokeWidth={1.8} aria-hidden="true" />
+                        <span className="cx-session-folder-copy">
+                          <strong>{folderDisplayName(folder.group, isChinese ? "未记录路径" : "No path recorded")}</strong>
+                          <small>{compactPath(folder.group, 34, isChinese ? "未记录路径" : "No path recorded")}</small>
+                        </span>
+                        <em>{folder.items.length}</em>
+                      </button>
+                      <button
+                        type="button"
+                        className={cx("cx-session-pin-action", folder.pinned && "cx-session-pin-action--active")}
+                        onClick={() => updatePins("folders", folder.folderKey)}
+                        aria-label={folder.pinned ? copy.unpinFolder : copy.pinFolder}
+                        title={folder.pinned ? copy.unpinFolder : copy.pinFolder}
+                      >
+                        <Pin size={13} strokeWidth={1.9} fill={folder.pinned ? "currentColor" : "none"} aria-hidden="true" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </aside>
+            )}
+
+            <div className="cx-session-results">
+              {displayedSessions.length > 0 ? (
+                <div
+                  ref={sessionScrollRef}
+                  className="cx-session-scroll"
+                  role="table"
+                  aria-label={copy.list}
+                  onScroll={handleSessionScroll}
+                >
+                  <div className="cx-session-column-head" role="row">
+                    <Checkbox
+                      className="cx-session-select-all"
+                      checked={allVisibleSelected}
+                      indeterminate={visibleSelectionIsPartial}
+                      onCheckedChange={(checked) => onSetSessionGroupSelected(displayedSessions, checked)}
+                      aria-label={copy.selectAll}
+                      disabled={loading || sessionDeleteBusy}
+                    />
+                    <span>{isChinese ? "会话" : "Session"}</span>
+                    <span>{isChinese ? "更新时间" : "Updated"}</span>
+                    <span>{isChinese ? "供应商" : "Provider"}</span>
+                    <span>{isChinese ? "模型" : "Model"}</span>
+                    <span className="cx-session-id-heading">ID</span>
+                    <span className="cx-session-actions-heading">{isChinese ? "操作" : "Actions"}</span>
+                  </div>
+                  <div className="cx-session-table-body" style={{ height: virtualSessionModel.totalHeight }}>
+                    {visibleSessionRows.map((row) => {
+                      const { item } = row;
+                      const sessionPinned = pinnedSessionSet.has(item.id);
+                      return (
                         <div
-                          className={cx("cx-session-row", item.needsSync && !item.isSubagent && "cx-session-row--needs-sync", selectedSessionSet.has(item.id) && "cx-session-row--selected")}
-                          key={item.id}
+                          className={cx(
+                            "cx-session-row",
+                            "cx-session-virtual-item",
+                            item.needsSync && !item.isSubagent && "cx-session-row--needs-sync",
+                            selectedSessionSet.has(item.id) && "cx-session-row--selected",
+                            sessionPinned && "cx-session-row--pinned",
+                          )}
+                          key={row.key}
                           role="row"
+                          style={{ top: row.top, height: row.height }}
                           onClick={(event) => {
                             if (!(event.target as HTMLElement).closest("button, input") && !loading && !sessionDeleteBusy) onToggleSessionSelected(item.id);
                           }}
@@ -500,35 +786,46 @@ export function SessionManagementPage({
                               {item.isSubagent && <span className="cx-session-state" title={copy.internalHint}>{copy.internal}</span>}
                               {item.needsSync && !item.isSubagent && <span className="cx-session-state cx-session-state--warn">{copy.pending}</span>}
                             </div>
-                            {!sessionGroupByCwd && <p title={item.cwd || item.rolloutPath || undefined}>{compactPath(item.cwd || item.rolloutPath, 72, isChinese ? "未记录路径" : "No path recorded")}</p>}
+                            {(!sessionGroupByCwd || selectedFolderKey === SESSION_ALL_FOLDERS_KEY) && <p title={item.cwd || item.rolloutPath || undefined}>{compactPath(item.cwd || item.rolloutPath, 72, isChinese ? "未记录路径" : "No path recorded")}</p>}
                           </div>
                           <span className="cx-session-meta cx-session-meta--time" title={item.updatedAtMs ? new Date(item.updatedAtMs).toLocaleString() : undefined}>{formatSessionTime(item.updatedAtMs, lang)}</span>
                           <code className="cx-session-meta cx-session-meta--provider" title={item.modelProvider || undefined}>{item.modelProvider || copy.unknownProvider}</code>
                           <span className="cx-session-meta cx-session-meta--model" title={item.model || undefined}>{item.model || copy.noModel}</span>
                           <small className="cx-session-meta cx-session-meta--id" title={item.id}>#{shortId(item.id)}</small>
-                          <button
-                            type="button"
-                            className="cx-session-row-export"
-                            onClick={() => onExportSessions([item.id])}
-                            disabled={loading || sessionDeleteBusy || sessionExportBusy}
-                            aria-label={`${copy.exportOne}: ${item.title || (isChinese ? "未命名会话" : "Untitled session")}`}
-                            title={copy.exportOne}
-                          >
-                            <Download size={15} strokeWidth={1.9} aria-hidden="true" />
-                          </button>
+                          <div className="cx-session-row-actions">
+                            <button
+                              type="button"
+                              className={cx("cx-session-pin-action", sessionPinned && "cx-session-pin-action--active")}
+                              onClick={() => updatePins("sessions", item.id)}
+                              aria-label={sessionPinned ? copy.unpinSession : copy.pinSession}
+                              title={sessionPinned ? copy.unpinSession : copy.pinSession}
+                            >
+                              <Pin size={14} strokeWidth={1.9} fill={sessionPinned ? "currentColor" : "none"} aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              className="cx-session-row-export"
+                              onClick={() => onExportSessions([item.id])}
+                              disabled={loading || sessionDeleteBusy || sessionExportBusy}
+                              aria-label={`${copy.exportOne}: ${item.title || (isChinese ? "未命名会话" : "Untitled session")}`}
+                              title={copy.exportOne}
+                            >
+                              <Download size={15} strokeWidth={1.9} aria-hidden="true" />
+                            </button>
+                          </div>
                         </div>
-                      ))}
-                    </div>
-                  );
-                })}
-              </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div className="cx-session-empty">
+                  <History size={22} strokeWidth={1.7} aria-hidden="true" />
+                  <span>{sessionQuery ? copy.noMatch : copy.noSessions}</span>
+                </div>
+              )}
             </div>
-          ) : (
-            <div className="cx-session-empty">
-              <History size={22} strokeWidth={1.7} aria-hidden="true" />
-              <span>{sessionQuery ? copy.noMatch : copy.noSessions}</span>
-            </div>
-          )}
+          </div>
         </div>
 
         {diagnostics.length ? (
