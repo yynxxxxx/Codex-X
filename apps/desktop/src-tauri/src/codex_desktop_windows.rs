@@ -38,7 +38,7 @@ fn powershell(script: &str, data: Value, timeout: Duration) -> Result<Value, Str
         "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; \
          [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); \
          $data=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')) | ConvertFrom-Json);\n\
-         {COMMON}\n{script}"
+         {COMMON}\ntry {{ & {{ {script} }} }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"
     );
     let output = crate::platform::desktop_command_output(
         &executable,
@@ -52,19 +52,27 @@ fn powershell(script: &str, data: Value, timeout: Duration) -> Result<Value, Str
         timeout,
     )?;
     if !output.status.success() {
-        if String::from_utf8_lossy(&output.stderr).contains("CODEXX_STORE_ELEVATION_REQUIRED") {
-            return Err("Codex-X 正以管理员身份运行，无法启动 Microsoft Store 版 Codex。请退出 Codex-X，取消“以管理员身份运行”后重新打开。本次尚未关闭 Codex。".into());
-        }
-        if String::from_utf8_lossy(&output.stderr).contains("CODEXX_STORE_BROKER_UNAVAILABLE") {
-            return Err("Windows 未找到同一用户的普通权限桌面，无法代为启动 Microsoft Store 版 Codex。请退出 Codex-X，取消“以管理员身份运行”后重新打开。本次尚未关闭 Codex。".into());
-        }
-        let details = String::from_utf8_lossy(&output.stderr)
-            .chars()
-            .take(1800)
-            .collect::<String>();
-        return Err(format!("Windows Codex 操作未完成：{}", details.trim()));
+        return Err(operation_error(&String::from_utf8_lossy(&output.stderr)));
     }
     serde_json::from_slice(&output.stdout).map_err(|_| "Windows 未返回有效的客户端操作结果".into())
+}
+
+fn operation_error(message: &str) -> String {
+    if message.contains("CODEXX_STORE_ELEVATION_REQUIRED") {
+        return "Codex-X 正以管理员身份运行，无法直接启动 Microsoft Store 版 Codex。请使用普通权限重新打开 Codex-X。".into();
+    }
+    if message.contains("CODEXX_STORE_BROKER_UNAVAILABLE") {
+        return "Windows 未找到同一用户的普通权限桌面，无法代为启动 Microsoft Store 版 Codex。"
+            .into();
+    }
+    if message.contains("CODEXX_PROCESS_ACCESS_REQUIRED") {
+        return "无法读取 Codex/ChatGPT 进程身份，请确认它与 Codex-X 使用相同用户和权限运行。"
+            .into();
+    }
+    format!(
+        "Windows Codex 操作未完成：{}",
+        message.trim().chars().take(1800).collect::<String>()
+    )
 }
 
 const COMMON: &str = r#"
@@ -76,34 +84,128 @@ function ProcessStamp($process) {
   if ($null -eq $process.CreationDate) { throw 'Cannot verify the process creation time.' }
   $process.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
 }
-function AppProcesses($exe) {
-  $processes=@(Get-CimInstance Win32_Process -Filter "Name='Codex.exe' OR Name='ChatGPT.exe'")
-  if (@($processes | Where-Object { -not $_.ExecutablePath }).Count -gt 0) {
-    throw 'A Codex/ChatGPT process path is inaccessible. Use matching non-elevated permissions before restarting.'
+function EnsureProcessApi {
+  if ('CodexDesktopProcess' -as [type]) { return }
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Text;
+public sealed class CodexDesktopProcess : IDisposable {
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr handle, uint flags, StringBuilder path, ref uint length);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(IntPtr handle, out long created, out long exit, out long kernel, out long user);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr handle, out uint code);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool ProcessIdToSessionId(uint pid, out uint session);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr handle, uint code);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr handle, uint access, out IntPtr token);
+  IntPtr handle;
+  public uint ProcessId { get; private set; }
+  public string ExecutablePath { get; private set; }
+  public DateTime CreationDate { get; private set; }
+  public uint SessionId { get; private set; }
+  public bool HasExited {
+    get { uint result=WaitForSingleObject(handle,0); if(result==0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error()); return result==0; }
   }
-  @($processes | Where-Object { SamePath $_.ExecutablePath $exe })
+  static bool Exited(IntPtr h) { uint code; return GetExitCodeProcess(h,out code) && code!=259; }
+  static CodexDesktopProcess Read(uint pid, uint access) {
+    IntPtr h=OpenProcess(access,false,pid);
+    if(h==IntPtr.Zero) { int error=Marshal.GetLastWin32Error(); if(error==87 || error==1168) return null; throw new Win32Exception(error); }
+    try {
+      if(Exited(h)) return null;
+      uint length=32768; var path=new StringBuilder((int)length);
+      long created,exit,kernel,user; uint session;
+      if(!QueryFullProcessImageName(h,0,path,ref length) || !GetProcessTimes(h,out created,out exit,out kernel,out user) || !ProcessIdToSessionId(pid,out session)) {
+        int error=Marshal.GetLastWin32Error(); if(Exited(h)) return null; throw new Win32Exception(error);
+      }
+      var result=new CodexDesktopProcess { handle=h,ProcessId=pid,ExecutablePath=path.ToString(),CreationDate=DateTime.FromFileTimeUtc(created),SessionId=session };
+      h=IntPtr.Zero; return result;
+    } finally { if(h!=IntPtr.Zero) CloseHandle(h); }
+  }
+  public static CodexDesktopProcess Inspect(uint pid) { return Read(pid,0x1000); }
+  public static CodexDesktopProcess Bind(uint pid, string path, long created, bool forStop) {
+    // Request only query/terminate/synchronize, not PROCESS_ALL_ACCESS. The
+    // retained handle pins identity even if a PID is recycled after exit.
+    var process=Read(pid,forStop ? 0x101001u : 0x101000u); if(process==null) return null;
+    try {
+      if(!String.Equals(process.ExecutablePath,path,StringComparison.OrdinalIgnoreCase) || Math.Abs(process.CreationDate.Ticks-created)>=10) return null;
+      if(process.SessionId!=Process.GetCurrentProcess().SessionId) throw new InvalidOperationException("The desktop belongs to another Windows session.");
+      IntPtr token;
+      if(!OpenProcessToken(process.handle,8,out token)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      try {
+        using(var owner=new WindowsIdentity(token)) using(var current=WindowsIdentity.GetCurrent()) {
+          if(!owner.User.Equals(current.User)) throw new InvalidOperationException("The desktop belongs to another Windows user.");
+        }
+      } finally { CloseHandle(token); }
+      var result=process; process=null; return result;
+    } finally { if(process!=null) process.Dispose(); }
+  }
+  public void CloseMainWindow() { if(!HasExited) using(var process=Process.GetProcessById((int)ProcessId)) process.CloseMainWindow(); }
+  public void Kill() { if(!HasExited && !TerminateProcess(handle,1) && !HasExited) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+  public void Dispose() { if(handle!=IntPtr.Zero) { CloseHandle(handle); handle=IntPtr.Zero; } }
 }
-function MainProcesses($exe) {
-  @(AppProcesses $exe | Where-Object {
-    if ($null -eq $_.CommandLine) { throw 'Cannot verify the desktop process command line.' }
-    $_.CommandLine -notmatch '(?i)(?:^|\s)--type(?:=|\s)' -and
-      $_.CommandLine -notmatch '(?i)(?:^|\s)--crashpad-handler(?:\s|$)'
-  })
+'@ | Out-Null
 }
-function BoundProcess($entry, $exe) {
-  $process=Get-Process -Id $entry.ProcessId -ErrorAction SilentlyContinue
+function InspectDesktopProcess($processId) {
+  EnsureProcessApi
+  [CodexDesktopProcess]::Inspect([uint32]$processId)
+}
+function AppProcesses($exe, [bool]$ignoreInaccessible=$false) {
+  $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+  $processes=@(Get-CimInstance Win32_Process -Filter "Name='Codex.exe' OR Name='ChatGPT.exe'")
+  foreach ($entry in $processes) {
+    if ($entry.SessionId -ne $session) { continue }
+    if ($entry.ExecutablePath -and -not (SamePath $entry.ExecutablePath $exe)) { continue }
+    # CIM can retain an exiting process with a null path. Query the live PID
+    # with limited rights; never interpret missing CIM metadata as a new app.
+    $live=$null
+    try { $live=InspectDesktopProcess $entry.ProcessId }
+    catch {
+      if ($ignoreInaccessible) { continue }
+      throw ('CODEXX_PROCESS_ACCESS_REQUIRED: PID '+[string]$entry.ProcessId)
+    }
+    if ($null -eq $live) { continue }
+    try {
+      if ($live.SessionId -ne $session -or -not (SamePath $live.ExecutablePath $exe)) { continue }
+      if ($null -ne $entry.CreationDate -and [Math]::Abs($live.CreationDate.Ticks-[long](ProcessStamp $entry)) -ge 10) { continue }
+      [pscustomobject]@{ProcessId=$entry.ProcessId;ExecutablePath=$live.ExecutablePath;
+        CreationDate=$live.CreationDate;SessionId=$live.SessionId;
+        CommandLine=$entry.CommandLine;ParentProcessId=$entry.ParentProcessId}
+    } finally { $live.Dispose() }
+  }
+}
+function SelectMainProcesses($entries, [bool]$ignoreInaccessible=$false) {
+  foreach ($entry in @($entries)) {
+    if ($null -eq $entry.CommandLine) {
+      # A sandboxed Electron helper can hide its command line. An observed
+      # parent in the same verified installation identifies it as a child.
+      if (@($entries | Where-Object { $_.ProcessId -eq $entry.ParentProcessId -and $_.CreationDate -le $entry.CreationDate }).Count -gt 0) { continue }
+      if ($ignoreInaccessible) { continue }
+      throw 'Cannot verify the desktop main process command line.'
+    }
+    if ($entry.CommandLine -notmatch '(?i)(?:^|\s)--type(?:=|\s)' -and
+        $entry.CommandLine -notmatch '(?i)(?:^|\s)--crashpad-handler(?:\s|$)') { $entry }
+  }
+}
+function MainProcesses($exe, [bool]$ignoreInaccessible=$false) {
+  SelectMainProcesses @(AppProcesses $exe $ignoreInaccessible) $ignoreInaccessible
+}
+function BoundProcess($entry, $exe, [bool]$forStop=$false) {
+  EnsureProcessApi
+  [CodexDesktopProcess]::Bind([uint32]$entry.ProcessId,(FullPath $exe),[long](ProcessStamp $entry),$forStop)
+}
+function MainIdentity($app) {
+  $entries=@(MainProcesses $app.executable $true)
+  if ($entries.Count -gt 1) { throw 'Multiple verified desktop main processes are running.' }
+  if ($entries.Count -eq 0) { return $null }
+  $process=BoundProcess $entries[0] $app.executable
   if ($null -eq $process) { return $null }
-  try {
-    # Holding this handle pins the process object/PID through the subsequent
-    # identity checks and CloseMainWindow/Kill call.
-    $null=$process.Handle
-    $created=$process.StartTime.ToUniversalTime().Ticks
-    $expected=[long](ProcessStamp $entry)
-    if (-not (SamePath $process.MainModule.FileName $exe) -or
-        [Math]::Abs($created-$expected) -ge 10) { $process.Dispose(); return $null }
-    # CIM timestamps have microsecond precision, while StartTime has 100ns.
-    return $process
-  } catch { $process.Dispose(); return $null }
+  try { @{pid=[uint32]$entries[0].ProcessId;created=(ProcessStamp $entries[0])} }
+  finally { $process.Dispose() }
 }
 function IsDesktopExe($exe) {
   $leaf=[IO.Path]::GetFileName([string]$exe)
@@ -236,71 +338,75 @@ public static class CodexDesktopShellIdentity {
 "#;
 
 const STOP_DESKTOP: &str = r#"
-function RequireRestartOwner($entry) {
-  $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
-  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  $owner=Invoke-CimMethod -InputObject $entry -MethodName GetOwnerSid
-  if ($entry.SessionId -ne $session -or $owner.ReturnValue -ne 0 -or $owner.Sid -cne $sid) {
-    throw 'The selected desktop belongs to another Windows user or session; restart was cancelled.'
-  }
-}
 function StopDesktop($app, [bool]$requireCurrentUser=$false) {
-  $main=@(MainProcesses $app.executable)
+  $script:CodexCloseStarted=$false
+  $entries=@(AppProcesses $app.executable)
+  $main=@(SelectMainProcesses $entries)
   if ($main.Count -gt 1) { throw 'Multiple desktop instances are running; none was stopped.' }
-  if ($requireCurrentUser) {
-    foreach ($entry in @(AppProcesses $app.executable)) { RequireRestartOwner $entry }
-  }
-  foreach ($entry in $main) {
-    $process=BoundProcess $entry $app.executable
-    if ($null -ne $process) {
-      try { $null=$process.CloseMainWindow() } finally { $process.Dispose() }
+  $bound=New-Object 'System.Collections.Generic.List[object]'
+  try {
+    # Validate every process and acquire identity-pinned handles before the
+    # first close. Bind always checks current user/session, including non-admin
+    # restarts; inaccessible selected processes cannot cause a partial stop.
+    foreach ($entry in $entries) {
+      $process=BoundProcess $entry $app.executable $true
+      if ($null -ne $process) { $bound.Add($process) }
     }
-  }
-  $grace=[DateTime]::UtcNow.AddSeconds(2)
-  while ([DateTime]::UtcNow -lt $grace -and @(AppProcesses $app.executable).Count -gt 0) { Start-Sleep -Milliseconds 100 }
-  # The user requested a restart. Stop only live processes belonging to the
-  # selected, verified desktop installation, with their creation time pinned.
-  foreach ($entry in @(AppProcesses $app.executable)) {
-    if ($requireCurrentUser) { RequireRestartOwner $entry }
-    $process=BoundProcess $entry $app.executable
-    if ($null -ne $process) {
-      try { $process.Kill() } catch { } finally { $process.Dispose() }
+    foreach ($process in $bound) {
+      if ($process.ProcessId -in @($main | ForEach-Object { $_.ProcessId })) {
+        try { $script:CodexCloseStarted=$true; $process.CloseMainWindow() } catch { if (-not $process.HasExited) { throw } }
+      }
     }
-  }
-  $deadline=[DateTime]::UtcNow.AddSeconds(8); $emptySince=$null
+    $grace=[DateTime]::UtcNow.AddSeconds(2)
+    while ([DateTime]::UtcNow -lt $grace -and @($bound | Where-Object { -not $_.HasExited }).Count -gt 0) { Start-Sleep -Milliseconds 100 }
+    foreach ($process in $bound) { if (-not $process.HasExited) { $script:CodexCloseStarted=$true; $process.Kill() } }
+    $deadline=[DateTime]::UtcNow.AddSeconds(8)
+    do {
+      # Once closing starts, wait on pinned handles. Re-enumerating global CIM
+      # rows here used to throw on stale, pathless rows after Codex had exited.
+      if (@($bound | Where-Object { -not $_.HasExited }).Count -eq 0) { return }
+      Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'The selected desktop processes did not stop; relaunch was cancelled.'
+  } finally { foreach ($process in $bound) { $process.Dispose() } }
+}
+
+"#;
+
+const START_WITH_DESKTOP_SHELL: &str = r#"
+function StartWithDesktopShell($app,$shell) {
+  $shell.ShellExecute(('shell:AppsFolder\'+[string]$app.bundleId),'','','open',1) | Out-Null
+  $deadline=[DateTime]::UtcNow.AddSeconds(8)
   do {
-    if (@(AppProcesses $app.executable).Count -eq 0) {
-      if ($null -eq $emptySince) { $emptySince=[DateTime]::UtcNow }
-      if (([DateTime]::UtcNow-$emptySince).TotalMilliseconds -ge 500) { return }
-    } else { $emptySince=$null }
+    $main=@(MainProcesses $app.executable $true)
+    if ($main.Count -gt 1) { throw 'Multiple desktop instances started; no debugging connection was made.' }
+    if ($main.Count -eq 1) {
+      $process=BoundProcess $main[0] $app.executable
+      if ($null -ne $process) {
+        try { return @{pid=[uint32]$main[0].ProcessId} }
+        finally { $process.Dispose() }
+      }
+    }
     Start-Sleep -Milliseconds 100
   } while ([DateTime]::UtcNow -lt $deadline)
-  throw 'The selected desktop processes did not stop; relaunch was cancelled.'
+  throw 'The desktop shell accepted activation, but the verified Codex application did not start.'
 }
 "#;
 
 const ELEVATED_STORE_RESTART: &str = r#"
 if (-not (IsElevated)) { Emit @{handled=$false}; return }
-ValidateApp $data.app $true
-# Acquire and validate the unelevated broker before stopping anything.
-try { $shell=DesktopShell } catch { throw ('CODEXX_STORE_BROKER_UNAVAILABLE: '+$_.Exception.Message) }
-$wasRunning=@(AppProcesses $data.app.executable).Count -gt 0
-StopDesktop $data.app $true
-$shell.ShellExecute(('shell:AppsFolder\'+[string]$data.app.bundleId),'','','open',1) | Out-Null
-$deadline=[DateTime]::UtcNow.AddSeconds(8)
-do {
-  $main=@(MainProcesses $data.app.executable)
-  if ($main.Count -gt 1) { throw 'Multiple desktop instances started; no debugging connection was made.' }
-  if ($main.Count -eq 1) {
-    $process=BoundProcess $main[0] $data.app.executable
-    if ($null -ne $process) {
-      try { Emit @{handled=$true;wasRunning=$wasRunning;pid=[uint32]$main[0].ProcessId}; return }
-      finally { $process.Dispose() }
-    }
-  }
-  Start-Sleep -Milliseconds 100
-} while ([DateTime]::UtcNow -lt $deadline)
-throw 'The desktop shell accepted activation, but the verified Codex application did not start.'
+$script:CodexCloseStarted=$false
+try {
+  ValidateApp $data.app $true
+  # Acquire and validate the unelevated broker before stopping anything.
+  try { $shell=DesktopShell } catch { throw ('CODEXX_STORE_BROKER_UNAVAILABLE: '+$_.Exception.Message) }
+  $wasRunning=@(AppProcesses $data.app.executable).Count -gt 0
+  StopDesktop $data.app $true
+  $started=StartWithDesktopShell $data.app $shell
+  Emit @{handled=$true;ok=$true;wasRunning=$wasRunning;pid=$started.pid}
+} catch {
+  Emit @{handled=$true;ok=$false;afterClose=$script:CodexCloseStarted;error=$_.Exception.Message}
+}
 "#;
 
 pub(crate) fn detect() -> Result<WindowsDesktopApp, String> {
@@ -403,13 +509,44 @@ pub(crate) fn pids(app: &WindowsDesktopApp) -> Result<Vec<u32>, String> {
     serde_json::from_value(value).map_err(|_| "无法确认 Windows 客户端进程".into())
 }
 
-pub(crate) fn quit(app: &WindowsDesktopApp) -> Result<(), String> {
-    powershell(
-        &format!("{STOP_DESKTOP}\nValidateApp $data.app; StopDesktop $data.app; Emit $true"),
+struct StopFailure {
+    after_close: Option<bool>,
+    message: String,
+}
+
+fn stop_desktop(app: &WindowsDesktopApp) -> Result<(), StopFailure> {
+    let result = powershell(
+        &format!("{STOP_DESKTOP}\nValidateApp $data.app; try {{ StopDesktop $data.app; Emit @{{ok=$true}} }} catch {{ Emit @{{ok=$false;afterClose=$script:CodexCloseStarted;error=$_.Exception.Message}} }}"),
         json!({"app":app}),
         Duration::from_secs(20),
-    )
-    .map(|_| ())
+    ).map_err(|message| StopFailure { after_close: None, message })?;
+    if result["ok"].as_bool() == Some(true) {
+        return Ok(());
+    }
+    Err(StopFailure {
+        after_close: result["afterClose"].as_bool(),
+        message: operation_error(
+            result["error"]
+                .as_str()
+                .unwrap_or("无法确认 Windows 客户端退出状态"),
+        ),
+    })
+}
+
+pub(crate) fn quit(app: &WindowsDesktopApp) -> Result<(), String> {
+    stop_desktop(app).map_err(|error| error.message)
+}
+
+fn existing_main(app: &WindowsDesktopApp) -> Result<Option<u32>, String> {
+    let value = powershell(
+        "Emit (MainIdentity $data.app)",
+        json!({"app":app}),
+        Duration::from_secs(10),
+    )?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    remember_started(value).map(Some)
 }
 
 pub(crate) fn launch(
@@ -426,7 +563,10 @@ pub(crate) fn launch(
     let result = powershell(
         r#"
 ValidateApp $data.app
-if (@(AppProcesses $data.app.executable).Count -gt 0) { throw 'The desktop application is still stopping; no duplicate instance was launched.' }
+if ($null -eq $data.port) {
+  $existing=MainIdentity $data.app
+  if ($null -ne $existing) { Emit $existing; return }
+} elseif (@(AppProcesses $data.app.executable).Count -gt 0) { throw 'The desktop application is still stopping; no duplicate instance was launched.' }
 $arguments=''
 if ($null -ne $data.port) { $arguments='--remote-debugging-port='+[string]$data.port+' --remote-debugging-address=127.0.0.1' }
   Add-Type -TypeDefinition @'
@@ -448,16 +588,22 @@ public static class CodexPackageActivation {
 '@ | Out-Null
   $started=[CodexPackageActivation]::Start([string]$data.app.bundleId,$arguments)
 if ($started -eq 0) { throw 'Windows did not return an activated process id.' }
-$created=''; $deadline=[DateTime]::UtcNow.AddSeconds(5)
+$created=''; $deadline=[DateTime]::UtcNow.AddSeconds(8)
 do {
-  $process=Get-CimInstance Win32_Process -Filter ('ProcessId='+$started)
-  if ($null -ne $process -and $process.ExecutablePath) {
-    if (-not (SamePath $process.ExecutablePath $data.app.executable)) { throw 'Windows activated a different executable; no debugging connection was made.' }
-    $created=ProcessStamp $process; break
+  $process=$null
+  try { $process=InspectDesktopProcess $started } catch { }
+  if ($null -ne $process) {
+    try {
+      if (-not (SamePath $process.ExecutablePath $data.app.executable)) { throw 'Windows activated a different executable; no debugging connection was made.' }
+      $confirmed=BoundProcess $process $data.app.executable
+      if ($null -ne $confirmed) {
+        try { $created=ProcessStamp $process; break } finally { $confirmed.Dispose() }
+      }
+    } finally { $process.Dispose() }
   }
   Start-Sleep -Milliseconds 100
 } while ([DateTime]::UtcNow -lt $deadline)
-if (-not $created) { throw 'Windows activation returned but the official desktop process did not start.' }
+if (-not $created) { throw 'Windows accepted activation, but its process identity could not be confirmed. The launched application was not terminated.' }
 Emit @{pid=$started;created=$created}
 "#,
         json!({"app":app,"home":home,"port":port}),
@@ -489,11 +635,21 @@ fn launch_standalone(
     home: Option<&Path>,
     port: Option<u16>,
 ) -> Result<u32, String> {
-    powershell(
-        "ValidateApp $data.app; if (@(AppProcesses $data.app.executable).Count -gt 0) { throw 'The desktop is still stopping; no duplicate was launched.' }; Emit $true",
-        json!({"app":app}),
+    let prepared = powershell(
+        r#"
+ValidateApp $data.app
+if ($null -eq $data.port) {
+  $existing=MainIdentity $data.app
+  if ($null -ne $existing) { Emit $existing; return }
+} elseif (@(AppProcesses $data.app.executable).Count -gt 0) { throw 'The desktop is still stopping; no duplicate was launched.' }
+Emit $null
+"#,
+        json!({"app":app,"port":port}),
         Duration::from_secs(15),
     )?;
+    if !prepared.is_null() {
+        return remember_started(prepared);
+    }
     let arguments = port
         .map(|port| {
             vec![
@@ -518,21 +674,34 @@ fn launch_standalone(
     let pid = child.id();
     let result = powershell(
         r#"
-$deadline=[DateTime]::UtcNow.AddSeconds(5)
+$deadline=[DateTime]::UtcNow.AddSeconds(8)
 do {
-  $process=Get-CimInstance Win32_Process -Filter ('ProcessId='+[uint32]$data.pid)
-  if ($null -ne $process -and $process.ExecutablePath) {
-    if (-not (SamePath $process.ExecutablePath $data.app.executable)) { throw 'The newly started process has an unexpected executable.' }
-    Emit @{pid=[uint32]$data.pid;created=(ProcessStamp $process)}; exit
+  $process=$null
+  try { $process=InspectDesktopProcess ([uint32]$data.pid) } catch { }
+  if ($null -ne $process) {
+    try {
+      if (-not (SamePath $process.ExecutablePath $data.app.executable)) { throw 'The newly started process has an unexpected executable.' }
+      $confirmed=BoundProcess $process $data.app.executable
+      if ($null -ne $confirmed) {
+        try { Emit @{pid=[uint32]$data.pid;created=(ProcessStamp $process)}; return } finally { $confirmed.Dispose() }
+      }
+    } finally { $process.Dispose() }
   }
   Start-Sleep -Milliseconds 100
 } while ([DateTime]::UtcNow -lt $deadline)
-throw 'The signed desktop executable did not remain running.'
+if ($null -eq $data.port) {
+  $existing=MainIdentity $data.app
+  if ($null -ne $existing) { Emit $existing; return }
+}
+throw 'The desktop was launched, but its process identity could not be confirmed.'
+
 "#,
-        json!({"app":app,"pid":pid}),
-        Duration::from_secs(10),
+        json!({"app":app,"pid":pid,"port":port}),
+        Duration::from_secs(15),
     ).and_then(remember_started);
-    if result.is_err() {
+    if result.is_err() && port.is_some() {
+        // Only a failed controlled debugging launch is cleaned up. An ordinary
+        // launch must not kill a healthy app because observation was delayed.
         // Child owns the original Windows process handle, so cleanup cannot
         // terminate an unrelated process after a recycled PID.
         let _ = child.kill();
@@ -597,32 +766,420 @@ Emit $true
     .map(|_| ())
 }
 
+fn restore_store(app: &WindowsDesktopApp) -> Result<u32, String> {
+    // Recovery never closes anything. Revalidate the ordinary desktop broker
+    // and activate only after confirming that the selected installation has
+    // no remaining process. Do not fall back to an elevated direct launch.
+    let result = powershell(
+        &format!(
+            r#"{DESKTOP_SHELL}
+{START_WITH_DESKTOP_SHELL}
+ValidateApp $data.app $true
+$existing=MainIdentity $data.app
+if ($null -ne $existing) {{ Emit $existing; return }}
+if (@(AppProcesses $data.app.executable).Count -gt 0) {{ throw 'Client processes remain; recovery did not create a duplicate instance.' }}
+$shell=DesktopShell
+Emit (StartWithDesktopShell $data.app $shell)
+"#
+        ),
+        json!({"app":app}),
+        Duration::from_secs(25),
+    )?;
+    result["pid"]
+        .as_u64()
+        .and_then(|id| u32::try_from(id).ok())
+        .filter(|id| *id != 0)
+        .ok_or("Windows 未确认恢复启动的客户端进程".into())
+}
+
+fn recover_restart(
+    original_pids: &[u32],
+    failure: StopFailure,
+    mut current_main: impl FnMut() -> Result<Option<u32>, String>,
+    mut no_processes: impl FnMut() -> Result<bool, String>,
+    mut start_once: impl FnMut() -> Result<u32, String>,
+) -> Result<(), String> {
+    if failure.after_close == Some(false) {
+        return Err(format!("重启准备失败，客户端未被关闭：{}", failure.message));
+    }
+    match current_main() {
+        Ok(Some(pid)) if !original_pids.contains(&pid) => return Ok(()),
+        Ok(Some(_)) => return Err(format!("重启未完成，原客户端仍在运行：{}", failure.message)),
+        Err(observation) => {
+            return Err(format!(
+                "无法确认重启后的客户端状态，未重复启动。{}；{observation}",
+                failure.message
+            ))
+        }
+        Ok(None) => {}
+    }
+    match no_processes() {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "客户端仍有后台进程，未重复启动。{}",
+                failure.message
+            ))
+        }
+        Err(observation) => {
+            return Err(format!(
+                "无法确认客户端是否已退出，未重复启动。{}；{observation}",
+                failure.message
+            ))
+        }
+    }
+    match start_once() {
+        Ok(_) => Ok(()),
+        Err(recovery) => {
+            // A timed-out observation can follow a successful activation.
+            // Check once, but never issue a second recovery launch.
+            if let Ok(Some(pid)) = current_main() {
+                if !original_pids.contains(&pid) {
+                    return Ok(());
+                }
+            }
+            Err(format!(
+                "客户端已退出，但重新打开未完成。{}；恢复启动：{recovery}",
+                failure.message
+            ))
+        }
+    }
+}
+
 pub(crate) fn restart(home: &Path) -> Result<(String, bool), String> {
     let app = detect_fresh()?;
     validate_launch(&app, home)?;
+    let original_pids = pids(&app)?;
+    let was_running = !original_pids.is_empty();
     if app.bundle_id != "OpenAI.Codex.Standalone" {
         let result = powershell(
-            &format!("{DESKTOP_SHELL}\n{STOP_DESKTOP}\n{ELEVATED_STORE_RESTART}"),
+            &format!("{DESKTOP_SHELL}\n{STOP_DESKTOP}\n{START_WITH_DESKTOP_SHELL}\n{ELEVATED_STORE_RESTART}"),
             json!({"app":app}),
             Duration::from_secs(35),
-        )?;
-        if result["handled"].as_bool() == Some(true) {
-            let was_running = result["wasRunning"]
-                .as_bool()
-                .ok_or("Windows 未确认重启前的客户端状态")?;
-            return Ok((app.name, was_running));
+        );
+        match result {
+            Ok(value) if value["handled"].as_bool() == Some(false) => {}
+            Ok(value) if value["ok"].as_bool() == Some(true) => return Ok((app.name, was_running)),
+            other => {
+                let failure = match other {
+                    Ok(value) => StopFailure {
+                        after_close: value["afterClose"].as_bool(),
+                        message: operation_error(
+                            value["error"].as_str().unwrap_or("未收到客户端重启结果"),
+                        ),
+                    },
+                    Err(message) => StopFailure {
+                        after_close: None,
+                        message,
+                    },
+                };
+                recover_restart(
+                    &original_pids,
+                    failure,
+                    || existing_main(&app),
+                    || pids(&app).map(|ids| ids.is_empty()),
+                    || restore_store(&app),
+                )?;
+                return Ok((app.name, was_running));
+            }
         }
     }
     validate(&app)?;
-    let was_running = !pids(&app)?.is_empty();
-    quit(&app)?;
-    launch(&app, Some(home), None)?;
+    let failure = match stop_desktop(&app) {
+        Ok(()) => match launch(&app, Some(home), None) {
+            Ok(_) => return Ok((app.name, was_running)),
+            Err(message) => StopFailure {
+                after_close: Some(true),
+                message,
+            },
+        },
+        Err(error) => error,
+    };
+    recover_restart(
+        &original_pids,
+        failure,
+        || existing_main(&app),
+        || pids(&app).map(|ids| ids.is_empty()),
+        || launch(&app, Some(home), None),
+    )?;
     Ok((app.name, was_running))
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn failure(after_close: Option<bool>) -> StopFailure {
+        StopFailure {
+            after_close,
+            message: "fixture failure".into(),
+        }
+    }
+
+    #[test]
+    fn preflight_failure_never_starts_or_claims_a_client_was_closed() {
+        let result = recover_restart(
+            &[10],
+            failure(Some(false)),
+            || panic!("no observation required"),
+            || panic!("no observation required"),
+            || panic!("must not launch"),
+        );
+        assert!(result.unwrap_err().contains("客户端未被关闭"));
+    }
+
+    #[test]
+    fn timed_out_runner_recovers_once_when_fresh_observation_confirms_exit() {
+        let calls = Cell::new(0);
+        let result = recover_restart(
+            &[10],
+            failure(None),
+            || Ok(None),
+            || Ok(true),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(20)
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn timed_out_runner_preserves_existing_original_main_without_relaunch() {
+        let result = recover_restart(
+            &[10],
+            failure(None),
+            || Ok(Some(10)),
+            || panic!("main already observed"),
+            || panic!("must not relaunch"),
+        );
+        assert!(result.unwrap_err().contains("原客户端仍在运行"));
+    }
+
+    #[test]
+    fn already_relaunched_verified_main_is_accepted_without_a_second_start() {
+        assert!(recover_restart(
+            &[10],
+            failure(Some(true)),
+            || Ok(Some(20)),
+            || panic!("main already observed"),
+            || panic!("must not relaunch")
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn unverified_remaining_processes_prevent_blind_recovery_launch() {
+        let result = recover_restart(
+            &[10],
+            failure(None),
+            || Ok(None),
+            || Err("identity unavailable".into()),
+            || panic!("must not relaunch"),
+        );
+        assert!(result.unwrap_err().contains("无法确认客户端是否已退出"));
+    }
+
+    #[test]
+    fn failed_recovery_is_not_retried_in_a_loop() {
+        let calls = Cell::new(0);
+        let result = recover_restart(
+            &[10],
+            failure(Some(true)),
+            || Ok(None),
+            || Ok(true),
+            || {
+                calls.set(calls.get() + 1);
+                Err("activation denied".into())
+            },
+        );
+        assert!(result.unwrap_err().contains("重新打开未完成"));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn recovery_observation_timeout_does_not_kill_a_successfully_started_main() {
+        let observations = Cell::new(0);
+        let calls = Cell::new(0);
+        let result = recover_restart(
+            &[10],
+            failure(Some(true)),
+            || {
+                observations.set(observations.get() + 1);
+                Ok(if observations.get() == 1 {
+                    None
+                } else {
+                    Some(20)
+                })
+            },
+            || Ok(true),
+            || {
+                calls.set(calls.get() + 1);
+                Err("observation timeout".into())
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn access_errors_are_normalized_for_both_structured_and_stderr_failures() {
+        let message = operation_error("CODEXX_PROCESS_ACCESS_REQUIRED: PID 123");
+        assert!(message.contains("相同用户和权限"));
+        assert!(!message.contains("CODEXX_PROCESS_ACCESS_REQUIRED"));
+        assert!(!message.contains("未被关闭"));
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
+
+    const PROCESS_FIXTURES: &str = r#"
+$global:fixtureSession=[Diagnostics.Process]::GetCurrentProcess().SessionId
+$global:fixtureCreated=[DateTime]::UtcNow
+$global:queries=0; $global:closed=$false; $global:boundDisposed=0
+function Entry($id,$path,$command='Codex.exe',$parent=0) {
+  [pscustomobject]@{ProcessId=$id;ExecutablePath=$path;CommandLine=$command;
+    ParentProcessId=$parent;CreationDate=$global:fixtureCreated;SessionId=$global:fixtureSession}
+}
+function Live($id,$path='C:\fixture\Codex.exe') {
+  $value=Entry $id $path
+  $value | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+  $value
+}
+function Get-CimInstance { $global:queries++; $global:rows }
+function InspectDesktopProcess($processId) { Live $processId }
+function BoundProcess($entry,$exe,$forStop) {
+  if (-not $forStop) { throw 'Fixture stop must request only its required control rights.' }
+  $value=[pscustomobject]@{ProcessId=$entry.ProcessId;HasExited=$false}
+  $value | Add-Member -MemberType ScriptMethod -Name CloseMainWindow -Value { $global:closed=$true; $this.HasExited=$true }
+  $value | Add-Member -MemberType ScriptMethod -Name Kill -Value { $this.HasExited=$true }
+  $value | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $global:boundDisposed++ }
+  $value
+}
+"#;
+
+    fn process_fixture(script: &str, stop: bool) -> Value {
+        powershell(
+            &format!(
+                "{}\n{PROCESS_FIXTURES}\n{script}",
+                if stop { STOP_DESKTOP } else { "" }
+            ),
+            json!({"app":{"executable":"C:\\fixture\\Codex.exe"}}),
+            Duration::from_secs(15),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cim_missing_path_uses_live_identity_and_ignores_exited_foreign_and_recycled_pids() {
+        let value = process_fixture(
+            r#"
+$foreign=Entry 103 $null; $foreign.SessionId=$global:fixtureSession+1
+$global:rows=@((Entry 101 $null),(Entry 102 $null),$foreign,(Entry 104 'C:\other\Codex.exe'),(Entry 105 $null),(Entry 106 $null))
+$global:probed=New-Object 'System.Collections.Generic.List[int]'
+function InspectDesktopProcess($processId) {
+  $global:probed.Add($processId)
+  if ($processId -eq 102) { return $null }
+  if ($processId -eq 105) { return (Live $processId 'C:\other\Codex.exe') }
+  $value=Live $processId
+  if ($processId -eq 106) { $value.CreationDate=$value.CreationDate.AddSeconds(1) }
+  $value
+}
+Emit @{ids=@(AppProcesses $data.app.executable | ForEach-Object { $_.ProcessId });probed=$global:probed.ToArray()}
+"#,
+            false,
+        );
+        assert_eq!(value["ids"], json!([101]));
+        assert_eq!(value["probed"], json!([101, 102, 105, 106]));
+    }
+
+    #[test]
+    fn inaccessible_live_process_aborts_before_any_client_is_closed() {
+        let value = process_fixture(
+            r#"
+$global:rows=@(Entry 101 $null)
+function InspectDesktopProcess { throw 'fixture: access denied' }
+try { StopDesktop $data.app; throw 'unexpected success' }
+catch { Emit @{error=$_.Exception.Message;closed=$script:CodexCloseStarted} }
+"#,
+            true,
+        );
+        assert_eq!(value["closed"], false);
+        assert!(value["error"]
+            .as_str()
+            .unwrap()
+            .contains("CODEXX_PROCESS_ACCESS_REQUIRED"));
+    }
+
+    #[test]
+    fn stop_waits_on_bound_handles_instead_of_pathless_cim_rows_after_close() {
+        let value = process_fixture(
+            r#"
+function Get-CimInstance {
+  $global:queries++
+  if ($global:closed) { return (Entry 101 $null) }
+  Entry 101 'C:\fixture\Codex.exe'
+}
+function InspectDesktopProcess($processId) {
+  if ($global:closed) { throw 'fixture: stale CIM process has lost its path' }
+  Live $processId
+}
+StopDesktop $data.app
+Emit @{closed=$global:closed;queries=$global:queries;disposed=$global:boundDisposed}
+"#,
+            true,
+        );
+        assert_eq!(value["closed"], true);
+        assert_eq!(value["queries"], 1);
+        assert_eq!(value["disposed"], 1);
+    }
+
+    #[test]
+    fn stop_binds_all_processes_before_closing_and_releases_handles_on_preflight_failure() {
+        let value = process_fixture(
+            r#"
+$global:rows=@((Entry 101 'C:\fixture\Codex.exe'),(Entry 102 'C:\fixture\Codex.exe' 'Codex.exe --type=renderer' 101))
+$originalBound=${function:BoundProcess}
+function BoundProcess($entry,$exe,$forStop) {
+  if ($entry.ProcessId -eq 102) { throw 'fixture: selected helper cannot be controlled' }
+  & $originalBound $entry $exe $forStop
+}
+try { StopDesktop $data.app; throw 'unexpected success' }
+catch { Emit @{error=$_.Exception.Message;closed=$global:closed;disposed=$global:boundDisposed} }
+"#,
+            true,
+        );
+        assert_eq!(value["closed"], false);
+        assert_eq!(value["disposed"], 1);
+        assert_eq!(
+            value["error"],
+            "fixture: selected helper cannot be controlled"
+        );
+    }
+
+    #[test]
+    fn native_process_inspection_and_read_only_binding_check_path_and_creation_time() {
+        let value = powershell(r#"
+$live=InspectDesktopProcess $PID
+try {
+  EnsureProcessApi
+  $bound=[CodexDesktopProcess]::Bind([uint32]$PID,$live.ExecutablePath,$live.CreationDate.Ticks,$false)
+  try {
+    $wrongPath=[CodexDesktopProcess]::Bind([uint32]$PID,($live.ExecutablePath+'.wrong'),$live.CreationDate.Ticks,$false)
+    $wrongTime=[CodexDesktopProcess]::Bind([uint32]$PID,$live.ExecutablePath,($live.CreationDate.Ticks+10000),$false)
+    Emit @{bound=($null -ne $bound -and -not $bound.HasExited);wrongPath=($null -eq $wrongPath);wrongTime=($null -eq $wrongTime)}
+  } finally { if ($null -ne $bound) { $bound.Dispose() } }
+} finally { $live.Dispose() }
+"#, Value::Null, Duration::from_secs(15)).unwrap();
+        assert_eq!(
+            value,
+            json!({"bound":true,"wrongPath":true,"wrongTime":true})
+        );
+    }
 
     fn restart_fixture(before: &str, catch: bool) -> Value {
         let flow = if catch {
@@ -633,7 +1190,7 @@ mod tests {
             ELEVATED_STORE_RESTART.to_owned()
         };
         powershell(
-            &format!("{before}\n{flow}"),
+            &format!("{START_WITH_DESKTOP_SHELL}\n{before}\n{flow}"),
             json!({"app":{"executable":"fixture.exe","bundleId":"OpenAI.Codex_2p2nqsd0c76g0!App"}}),
             Duration::from_secs(15),
         )
@@ -652,7 +1209,8 @@ function StopDesktop($app) { $global:stopped=$true }
 "#,
             true,
         );
-        assert_eq!(result["stopped"], false);
+        assert_eq!(result["afterClose"], false);
+        assert_eq!(result["ok"], false);
         assert_eq!(
             result["error"],
             "CODEXX_STORE_BROKER_UNAVAILABLE: fixture: no same-user unelevated shell"
@@ -695,6 +1253,25 @@ function BoundProcess($entry,$exe) {
         assert_eq!(result["handled"], true);
         assert_eq!(result["wasRunning"], true);
         assert_eq!(result["pid"], 4242);
+    }
+
+    #[test]
+    fn elevated_store_activation_failure_reports_that_close_already_started() {
+        let result = restart_fixture(
+            r#"
+function IsElevated { $true }
+function ValidateApp { }
+function DesktopShell { [pscustomobject]@{} }
+function AppProcesses { [pscustomobject]@{ProcessId=123} }
+function StopDesktop { $script:CodexCloseStarted=$true }
+function StartWithDesktopShell { throw 'fixture activation failed after stop' }
+"#,
+            false,
+        );
+        assert_eq!(result["handled"], true);
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["afterClose"], true);
+        assert_eq!(result["error"], "fixture activation failed after stop");
     }
 
     #[test]
