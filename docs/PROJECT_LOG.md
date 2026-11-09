@@ -17,6 +17,8 @@
 - 本机纯 Rust 恢复测试 9 项、macOS 针对性测试 8 项通过。使用自有临时 App 的 LaunchServices 实测 1 项通过：启动器退出后仍独立存活、父进程/进程组隔离、中文空格配置路径及环境传递、正常结束后再次启动。已清理测试进程、目录和仅该测试 bundle 的注册，没有停止真实 Codex/ChatGPT 或改动真实会话。
 - [Windows 快验 42599293141](https://github.com/yynxxxxx/Codex-X/actions/runs/42599293141) 在 Windows PowerShell 5.1 和 PowerShell 7 均通过每轮 10 项检查，直接执行同源生产 helpers/fixtures；真实原生 API 只查询测试 PowerShell 自身。包含空 CIM 路径、已退出/其他会话/复用 PID、先绑定再关闭、关闭后不全局重扫，以及 Store 预检/激活阶段。实际用户 Store 客户端未在本轮重启；不据此声称所有现场问题均已实机复现。
 - v0.3.33 沿用只发布 MSI 的 Windows 规则；正式全平台打包与 MSI 安装检查仍由 Release 流水线执行。
+- [v0.3.33 正式 Release 42599733888](https://github.com/yynxxxxx/Codex-X/actions/runs/42599733888) 首次运行全部通过并公开发布：Windows 832 项原生测试、195 项前端测试通过，1 项手动基准忽略、2 项依赖本机 SDK 的前端检查跳过；MSI 正常/重复安装、历史 MSI 升级、窗口启动、自动重开和配置保留检查通过。两架构 macOS 签名、公证票据及 DMG 检查和 Linux 构建通过。
+- 发布后匿名固定版本/latest 清单均为 0.3.33，11 个平台键完整，所有 Windows 键指向同一 MSI 与签名，公开资产无 EXE 安装包。实际 MSI 大小和 GitHub SHA256 一致，使用配置中的更新公钥通过文件签名及 trusted-comment 签名复核；发布说明为本版重启变化和具体安装步骤。
 
 ## 2026-11-09：按维护者最终要求统一 Windows MSI 发布
 
@@ -24,6 +26,7 @@
 - 本次只修正 v0.3.32 的资产、说明及更新清单，MSI 原始文件和签名保持不变，不移动已发布标签。旧 EXE 安装需一次手动卸载并保留应用数据、安装 MSI；不宣称旧版 EXE 能靠清单变更自动跨格式安装。
 - 清单校验要求三个 Windows 键使用同一 MSI/签名，并拒绝任何 EXE/EXE.sig 安装资产；11 项针对性测试通过。正式及候选工作流仅构建 MSI，Windows 平台默认配置也限定 MSI，保留实际 MSI 安装升级检查。
 - 按维护者要求重写面向用户的发布说明，列出本版功能、旧 EXE 换装步骤，以及 Windows 安全中心中关闭智能应用控制的具体路径；说明关闭的是该项系统防护。路径按微软官方支持文档核对，未操作用户电脑安全设置，不把用户自行调整设置说成发布者签名已经解决。
+- v0.3.32 的公开 EXE 已移除，三个 Windows 更新项已核对统一 MSI，原 MSI 资产 ID、摘要和签名未变；[独立发布复核 42595283360](https://github.com/yynxxxxx/Codex-X/actions/runs/42595283360) 使用当前 MSI-only 校验规则通过。v0.3.33 已按此规则从源头仅构建 MSI。
 
 ## 2026-11-09：撤回 v0.3.31，恢复 MSI 与在线更新
 
