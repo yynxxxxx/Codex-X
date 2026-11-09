@@ -734,7 +734,10 @@ async fn restart_codex_desktop(
         sessions::with_session_maintenance(&codex_dir, || {
             codex_language::restart_client(config_dir)
         })
-        .map_err(|e| e.to_string())
+        .map_err(|error| match error {
+            CodexxError::Config(message) => format!("重启 Codex/ChatGPT 未完成：{message}"),
+            other => other.to_string(),
+        })
     })
     .await
     .map_err(|error| format!("重启 Codex 桌面客户端失败: {error}"))??;
