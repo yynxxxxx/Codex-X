@@ -2905,7 +2905,7 @@ command = "docs-server"
             .unwrap();
         let mut edited = original.clone();
         edited.toml_config.as_mut().unwrap().push_str(
-            "env_key = 'CODEXX_FIXTURE_ENV_KEY'\nenv_key_instructions = 'Set the variable before launching Codex'\n",
+            "\nenv_key = 'CODEXX_FIXTURE_ENV_KEY'\nenv_key_instructions = 'Set the variable before launching Codex'\n",
         );
         let edited = crate::providers::provider_with_editor_auth(edited, true).unwrap();
         assert!(edited.api_key.is_none());
