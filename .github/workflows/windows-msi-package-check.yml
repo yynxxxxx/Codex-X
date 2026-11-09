@@ -1,0 +1,56 @@
+name: Windows MSI package verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release or draft tag whose MSI should be checked
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify existing MSI installation and upgrade
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Download and verify requested MSI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Invalid release tag.' }
+          $name = "Codex-X-$($env:RELEASE_TAG.Substring(1))-windows-x64.msi"
+          $metadata = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json assets
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read release metadata.' }
+          $assets = @((($metadata -join "`n") | ConvertFrom-Json).assets | Where-Object { $_.name -eq $name })
+          if ($assets.Count -ne 1 -or $assets[0].digest -notmatch '^sha256:[0-9a-fA-F]{64}$') { throw 'Expected one MSI with a GitHub checksum.' }
+          $directory = Join-Path $env:RUNNER_TEMP 'codexx-msi-package'
+          New-Item -ItemType Directory -Force -Path $directory | Out-Null
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $name --dir $directory
+          if ($LASTEXITCODE -ne 0) { throw 'MSI download failed.' }
+          $installer = Join-Path $directory $name
+          if ((Get-Item -LiteralPath $installer).Length -ne $assets[0].size -or
+              (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $assets[0].digest.Substring(7)) { throw 'MSI size or checksum mismatch.' }
+          "CODEXX_MSI_PACKAGE=$installer" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Verify real MSI installation and startup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/windows-msi-install-smoke.ps1 -Installer $env:CODEXX_MSI_PACKAGE
+      - name: Retain MSI installation diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-msi-package-diagnostics
+          path: ${{ runner.temp }}/codex-x-msi-smoke-*/*.log
+          if-no-files-found: ignore
+          retention-days: 7

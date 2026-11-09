@@ -23,6 +23,18 @@ public static class CodexXMsiVerification {
   public static extern uint MsiEnumRelatedProductsW(string code, uint reserved, uint index, StringBuilder product);
   [DllImport("msi.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
   public static extern uint MsiGetProductInfoExW(string code, IntPtr sid, uint context, string property, StringBuilder value, ref uint length);
+  [DllImport("msi.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+  public static extern uint MsiOpenDatabaseW(string path, IntPtr persist, out uint database);
+  [DllImport("msi.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+  public static extern uint MsiDatabaseOpenViewW(uint database, string query, out uint view);
+  [DllImport("msi.dll", ExactSpelling=true)]
+  public static extern uint MsiViewExecute(uint view, uint record);
+  [DllImport("msi.dll", ExactSpelling=true)]
+  public static extern uint MsiViewFetch(uint view, out uint record);
+  [DllImport("msi.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+  public static extern uint MsiRecordGetStringW(uint record, uint field, StringBuilder value, ref uint length);
+  [DllImport("msi.dll", ExactSpelling=true)]
+  public static extern uint MsiCloseHandle(uint handle);
   [DllImport("user32.dll")]
   public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
   [DllImport("user32.dll", SetLastError=true)]
@@ -48,17 +60,28 @@ function Product-Info([string]$Product, [string]$Property) {
   return $value.ToString()
 }
 function Read-MsiProperty([string]$Path, [string]$Name) {
-  $automation = New-Object -ComObject WindowsInstaller.Installer
-  $database = $automation.OpenDatabase($Path, 0)
-  $view = $database.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property``='$Name'")
+  if ($Name -notmatch '^[A-Za-z0-9_]+$') { throw 'Invalid MSI property name.' }
+  [uint32]$database = 0
+  [uint32]$view = 0
+  [uint32]$record = 0
   try {
-    $view.Execute()
-    $record = $view.Fetch()
-    if ($null -eq $record) { throw "MSI property $Name is missing." }
-    try { return $record.StringData(1) } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record) }
+    $result = [CodexXMsiVerification]::MsiOpenDatabaseW($Path, [IntPtr]::Zero, [ref]$database)
+    if ($result -ne 0) { throw "Cannot open MSI read-only: $result" }
+    $result = [CodexXMsiVerification]::MsiDatabaseOpenViewW($database, "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='$Name'", [ref]$view)
+    if ($result -ne 0) { throw "Cannot query MSI property $Name`: $result" }
+    $result = [CodexXMsiVerification]::MsiViewExecute($view, 0)
+    if ($result -ne 0) { throw "Cannot execute MSI property query: $result" }
+    $result = [CodexXMsiVerification]::MsiViewFetch($view, [ref]$record)
+    if ($result -ne 0) { throw "MSI property $Name is missing: $result" }
+    $value = [Text.StringBuilder]::new(4096)
+    [uint32]$length = 4096
+    $result = [CodexXMsiVerification]::MsiRecordGetStringW($record, 1, $value, [ref]$length)
+    if ($result -ne 0) { throw "Cannot read MSI property $Name`: $result" }
+    return $value.ToString()
   } finally {
-    $view.Close()
-    foreach ($item in @($view, $database, $automation)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($item) }
+    foreach ($handle in @($record, $view, $database)) {
+      if ($handle -ne 0) { [void][CodexXMsiVerification]::MsiCloseHandle($handle) }
+    }
   }
 }
 function Start-Msi([string]$Arguments) {
@@ -154,7 +177,9 @@ if (@(Related-Products).Count -ne 0) { throw 'Runner already has an MSI installa
 if (Get-Process -Name 'codex-x' -ErrorAction SilentlyContinue) { throw 'Runner already has a running Codex-X process.' }
 $ProductCode = Read-MsiProperty $Installer 'ProductCode'
 $Version = Read-MsiProperty $Installer 'ProductVersion'
-if ((Read-MsiProperty $Installer 'UpgradeCode') -ne $UpgradeCode) { throw 'MSI does not preserve the historical upgrade identity.' }
+$PackageUpgradeCode = Read-MsiProperty $Installer 'UpgradeCode'
+Write-Host "MSI identity: product=$ProductCode version=$Version upgrade=$PackageUpgradeCode"
+if ([guid]$PackageUpgradeCode -ne [guid]$UpgradeCode) { throw 'MSI does not preserve the historical upgrade identity.' }
 $Sentinels = @{}
 # Existing NSIS checks leave synthetic data in these locations. Preserve and
 # hash it, rather than replacing another check's data.
