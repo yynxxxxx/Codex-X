@@ -366,6 +366,8 @@ jobs:
       - name: Test Windows installation and legacy MSI migration
         if: matrix.platform == 'windows-latest'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $installers = @(Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -Filter '*.exe')
           if ($installers.Count -ne 1) { throw 'Expected one NSIS installer.' }

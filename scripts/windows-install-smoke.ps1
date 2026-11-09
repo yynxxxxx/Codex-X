@@ -100,8 +100,23 @@ try {
   Reset-FixtureInstallLocation
 
   Write-Host 'Scenario 2: released v0.3.20 machine MSI -> current-user NSIS -> NSIS update.'
-  $legacyMsi = Join-Path $Work 'Codex-X-0.3.20.msi'
-  Invoke-WebRequest 'https://github.com/yynxxxxx/Codex-X/releases/download/v0.3.20/Codex-X-0.3.20-windows-x64.msi' -OutFile $legacyMsi
+  $legacyAsset = 'Codex-X-0.3.20-windows-x64.msi'
+  $legacyMsi = Join-Path $Work $legacyAsset
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+      if ($attempt -gt 1 -and $env:GH_TOKEN -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+        gh release download v0.3.20 --repo yynxxxxx/Codex-X --pattern $legacyAsset --dir $Work --clobber
+        if ($LASTEXITCODE -ne 0) { throw 'GitHub API fixture download failed.' }
+      } else {
+        Invoke-WebRequest "https://github.com/yynxxxxx/Codex-X/releases/download/v0.3.20/$legacyAsset" -OutFile $legacyMsi -TimeoutSec 60
+      }
+      break
+    } catch {
+      if ($attempt -eq 3) { throw }
+      Write-Host "Legacy fixture download attempt $attempt failed; retrying through GitHub's asset API when available."
+      Start-Sleep -Seconds 3
+    }
+  }
   if ((Get-FileHash $legacyMsi -Algorithm SHA256).Hash.ToLowerInvariant() -ne $LegacySha256) { throw 'Released MSI hash mismatch.' }
   Invoke-Installer (Join-Path $env:SystemRoot 'System32\msiexec.exe') "/i `"$legacyMsi`" INSTALLDIR=`"$env:ProgramFiles\Codex-X`" /qn /norestart /L*v `"$Work\legacy-install.log`""
   if ($LegacyProductCode -notin @(Related-Products)) { throw 'The genuine legacy MSI did not register.' }
