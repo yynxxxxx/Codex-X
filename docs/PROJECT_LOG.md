@@ -14,10 +14,13 @@
 - 复核确认旧 Windows 暂存器只接受 PE/EXE，而 Tauri 根据安装时写入的包类型优先选择 `windows-x86_64-nsis` / `windows-x86_64-msi`。恢复 MSI 默认包时必须同时增加 MSI 安装支持，并保留旧 EXE 客户端的独立更新入口；不能把三个入口统一改成 MSI 后声称旧版可在线安装。
 - Windows 默认及 MSI 更新项恢复 MSI，NSIS 更新项只向已有 EXE 安装提供兼容包。下载、Tauri 公钥验签、主下载失败后的官方 API 恢复和路由退出保护继续保留。MSI 和 NSIS 分别执行 Windows 安装验证。
 - 维护者确认拦截提示来自 Smart App Control。现有日志已记录 Code Integrity 3077，项目尚无 Windows 发布者签名证书或服务配置。MSI 恢复不等同解除该策略对程序的拦截；不修改用户系统安全策略，不把 CI 正常启动或 Tauri 验签等同 SAC 放行。
-- 发布后下载检查复用已有完整文件下载、大小和 GitHub SHA256 校验，并记录公开入口或官方 API 回退结果，替代曾触发 504 的 Range 探测。实际 Windows 安装和本轮 Actions 结果在完成后补充。
+- 发布后下载检查复用已有完整文件下载、大小和 GitHub SHA256 校验，并记录公开入口或官方 API 回退结果，替代曾触发 504 的 Range 探测；最终验证结果见下方。
 - 本地 4 项 Windows 暂存/参数 Rust 测试、11 项更新清单回归通过。WiX fragment 通过上游 v3 XSD 检查，Tauri 检查确认 UpgradeCode 与历史 MSI 一致；新增安装检查在临时 Windows runner 上执行真实安装、窗口启动、旧 MSI 升级和配置哨兵检查，本机未执行 Windows 安装。
 - 首轮正式构建的四平台打包完成、Windows 811 项 Rust 回归及 NSIS 检查通过，但新增 MSI 脚本在身份读取处失败，发布被阻止。原包中的 UpgradeCode 正确；改用原生 Windows Installer 只读 API 后，发现脚本还错误地把 WM_QUIT 当作 Tauri 退出接口，已改为明确模拟已追踪测试进程退出，不涉及产品退出代码或系统安装服务。
 - [MSI 独立快验 42590088559](https://github.com/yynxxxxx/Codex-X/actions/runs/42590088559) 全部通过：四种 EXE 登记冲突、清洁和重复安装、实际窗口启动、真实 v0.3.20 MSI 升级到 v0.3.32 后自动重开、唯一产品登记和配置哨兵。此测试不验证实际 app.exit 回调或 SAC 信任。详细发布约束及本次脚本问题已归档至 `WINDOWS_RELEASE_GUIDE.md`，由根 AGENTS.md 引用。
+- [正式 Release 42590421251](https://github.com/yynxxxxx/Codex-X/actions/runs/42590421251) 最终全部成功并发布 v0.3.32，v0.3.31 继续保持撤回草稿。Windows 811 项原生回归、195 项前端回归、MSI/NSIS 安装升级与配置保留通过；另有 1 项手动基准忽略、2 项依赖本机 SDK 的前端检查跳过。
+- Intel 首次公证为 Accepted，但实际归档缺少票据，发布门槛正确阻止了上线。核对 Tauri CLI 2.11.4 上游 `tauri-macos-sign::staple_app` 发现其忽略 stapler 的失败退出码；仅重跑失败的 Intel job 后，签名、系统评估、票据和 DMG 检查通过，没有跳过门槛。此前手动附票的本地临时副本不作为原发布归档合格证据。
+- 公开固定版本与 latest 更新清单均为 0.3.32，11 个平台项完整。正式 MSI 与旧 EXE 兼容包的实际文件大小、GitHub SHA256、Tauri 文件签名及 trusted-comment 签名分别核验通过；默认/MSI 项指向 MSI，NSIS 项保持 EXE。上述验签不是 Windows 发布者签名，SAC 拦截仍不应标记为已解决。
 
 ## 2026-11-09：v0.3.31 发布与验证（后按维护者要求撤回）
 
