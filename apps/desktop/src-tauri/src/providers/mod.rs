@@ -63,7 +63,7 @@ pub(crate) use store::{
     get_provider_order_inner, is_placeholder_provider, list_saved_providers_inner,
     list_saved_providers_on_connection, matching_saved_provider_ids_for_live,
     matching_saved_provider_ids_for_live_on_connection, normalize_saved_provider,
-    normalize_saved_provider_for_save, provider_template_from_document,
+    normalize_saved_provider_for_save, provider_template_from_document, provider_with_editor_auth,
     read_provider_headers_inner, reserved_codex_provider_id, rollback_provider_store_inner,
     save_detected_provider_with_rollback_inner, save_provider_inner, save_provider_order_inner,
     save_provider_with_rollback_inner, strip_provider_bearer_tokens, update_provider_headers_inner,

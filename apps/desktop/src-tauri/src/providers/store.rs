@@ -1107,6 +1107,43 @@ fn sync_provider_toml_from_fields(provider: &mut SavedProvider) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn provider_with_editor_auth(
+    mut provider: SavedProvider,
+    prefer_toml_auth: bool,
+) -> Result<SavedProvider> {
+    if !prefer_toml_auth {
+        return Ok(provider);
+    }
+    let Some(text) = provider.toml_config.as_deref() else {
+        return Ok(provider);
+    };
+    let mut doc = text
+        .parse::<DocumentMut>()
+        .map_err(|error| CodexxError::Config(format!("供应商 TOML 无效: {error}")))?;
+    let id = selected_provider_id(&doc)?;
+    let env_key = doc
+        .get("model_providers")
+        .and_then(Item::as_table)
+        .and_then(|providers| providers.get(&id))
+        .and_then(Item::as_table)
+        .and_then(|table| table.get("env_key"));
+    let Some(env_key) = env_key else {
+        return Ok(provider);
+    };
+    if env_key.as_str().is_none_or(|name| name.trim().is_empty()) {
+        return Err(CodexxError::Config(
+            "供应商 env_key 必须是非空的环境变量名称".into(),
+        ));
+    }
+    // A manual TOML edit selects environment-based auth. The form still holds
+    // the old saved key; do not let that fallback erase the user's env_key on
+    // activation or persist it beside a different credential source.
+    provider.api_key = None;
+    strip_provider_bearer_tokens(&mut doc);
+    provider.toml_config = Some(doc.to_string().trim_end().to_string());
+    Ok(provider)
+}
+
 pub(crate) fn normalize_saved_provider(provider: SavedProvider) -> Result<SavedProvider> {
     let raw_id = provider.id.trim();
     if raw_id.is_empty() {

@@ -245,6 +245,8 @@ Codex-X 现在不只是“几套内置 Prompt”的启动器，而是一个可�
 
 ### 3. 会话管理：同步、检查与永久删除
 
+会话列表优先显示已设置的名称，悬停可看首次提示词。Windows 支持只读查看和导出 WSL 会话，使用条件和限制见 [WSL 会话说明](docs/WSL_SESSIONS.md)。
+
 <table>
   <tr>
     <td width="50%" valign="top">

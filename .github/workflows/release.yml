@@ -235,6 +235,7 @@ jobs:
         run: |
           pnpm --dir apps/desktop typecheck
           node --test apps/desktop/tests/*.test.mjs
+          python scripts/test_wsl_session_snapshot.py
 
       - name: Verify Windows SDK test tooling
         if: matrix.platform == 'windows-latest'

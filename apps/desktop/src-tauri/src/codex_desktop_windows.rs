@@ -55,6 +55,9 @@ fn powershell(script: &str, data: Value, timeout: Duration) -> Result<Value, Str
         if String::from_utf8_lossy(&output.stderr).contains("CODEXX_STORE_ELEVATION_REQUIRED") {
             return Err("Codex-X 正以管理员身份运行，无法启动 Microsoft Store 版 Codex。请退出 Codex-X，取消“以管理员身份运行”后重新打开。本次尚未关闭 Codex。".into());
         }
+        if String::from_utf8_lossy(&output.stderr).contains("CODEXX_STORE_BROKER_UNAVAILABLE") {
+            return Err("Windows 未找到同一用户的普通权限桌面，无法代为启动 Microsoft Store 版 Codex。请退出 Codex-X，取消“以管理员身份运行”后重新打开。本次尚未关闭 Codex。".into());
+        }
         let details = String::from_utf8_lossy(&output.stderr)
             .chars()
             .take(1800)
@@ -136,15 +139,18 @@ function PackageApp($package) {
   }
   return $null
 }
-function ValidateApp($app) {
+function IsElevated {
+  $principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+  $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+function ValidateApp($app, [bool]$allowElevated=$false) {
   if (-not (IsDesktopExe $app.executable)) { throw 'The selected path is not the official Electron desktop application.' }
   if ([string]$app.bundleId -eq 'OpenAI.Codex.Standalone') {
     if (-not (SamePath ([IO.Path]::GetDirectoryName($app.executable)) $app.path) -or
         -not (TrustedStandalone $app.executable)) { throw 'The desktop executable has no valid OpenAI publisher signature.' }
     return
   }
-  $principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
-  if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  if (-not $allowElevated -and (IsElevated)) {
     throw 'CODEXX_STORE_ELEVATION_REQUIRED'
   }
   $family=([string]$app.bundleId).Split('!')[0]
@@ -156,6 +162,145 @@ function ValidateApp($app) {
       -not (SamePath $registered.executable $app.executable)) { throw 'The registered Store application identity has changed.' }
 }
 function Emit($result) { ConvertTo-Json -InputObject $result -Depth 6 -Compress }
+"#;
+
+// Ask the actual desktop Explorer to activate the registered Store app. Creating
+// a new Shell.Application object and launching directly can inherit elevation.
+// Bind to the desktop view, and require its token to belong to this same user
+// and session without elevation before any existing Codex process is closed.
+const DESKTOP_SHELL: &str = r#"
+function DesktopShell {
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+public static class CodexDesktopShellIdentity {
+  [DllImport("user32.dll")] static extern IntPtr GetShellWindow();
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int kind, out uint value, uint size, out uint needed);
+  [DllImport("advapi32.dll", EntryPoint="GetTokenInformation", SetLastError=true)] static extern bool GetTokenBuffer(IntPtr token, int kind, IntPtr value, uint size, out uint needed);
+  [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+  [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static IntPtr Verify() {
+    IntPtr window=GetShellWindow(); uint pid;
+    if (window==IntPtr.Zero || GetWindowThreadProcessId(window,out pid)==0 || pid==0)
+      throw new InvalidOperationException("No interactive Windows desktop shell is available.");
+    using (Process process=Process.GetProcessById((int)pid)) {
+      if (process.SessionId!=Process.GetCurrentProcess().SessionId)
+        throw new InvalidOperationException("The desktop shell belongs to another Windows session.");
+      IntPtr token;
+      if (!OpenProcessToken(process.Handle,8,out token)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      try {
+        using (WindowsIdentity identity=new WindowsIdentity(token))
+        using (WindowsIdentity current=WindowsIdentity.GetCurrent()) {
+          if (!identity.User.Equals(current.User))
+            throw new InvalidOperationException("The desktop shell belongs to another Windows user.");
+        }
+        uint elevated,needed;
+        if (!GetTokenInformation(token,20,out elevated,4,out needed)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (elevated!=0) throw new InvalidOperationException("The desktop shell is elevated.");
+        GetTokenBuffer(token,25,IntPtr.Zero,0,out needed);
+        if (needed==0) throw new Win32Exception(Marshal.GetLastWin32Error());
+        IntPtr label=Marshal.AllocHGlobal((int)needed);
+        try {
+          if (!GetTokenBuffer(token,25,label,needed,out needed)) throw new Win32Exception(Marshal.GetLastWin32Error());
+          IntPtr sid=Marshal.ReadIntPtr(label);
+          byte count=Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+          if (count==0) throw new InvalidOperationException("The desktop shell has no integrity level.");
+          int integrity=Marshal.ReadInt32(GetSidSubAuthority(sid,(uint)(count-1)));
+          if (integrity<0x2000 || integrity>=0x3000)
+            throw new InvalidOperationException("The desktop shell does not have medium integrity.");
+        } finally { Marshal.FreeHGlobal(label); }
+      } finally { CloseHandle(token); }
+    }
+    return window;
+  }
+}
+'@ | Out-Null
+  $expected=[CodexDesktopShellIdentity]::Verify()
+  $windows=(New-Object -ComObject Shell.Application).Windows()
+  $handle=0
+  $desktop=$windows.FindWindowSW(0,0,8,[ref]$handle,1)
+  if ($null -eq $desktop -or ([long]$handle -band 0xffffffffL) -ne ($expected.ToInt64() -band 0xffffffffL)) {
+    throw 'The interactive desktop shell could not be verified.'
+  }
+  $shell=$desktop.Document.Application
+  if ($null -eq $shell) { throw 'The interactive desktop has no activation interface.' }
+  if ([CodexDesktopShellIdentity]::Verify() -ne $expected) { throw 'The interactive desktop changed during activation preflight.' }
+  return $shell
+}
+"#;
+
+const STOP_DESKTOP: &str = r#"
+function RequireRestartOwner($entry) {
+  $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $owner=Invoke-CimMethod -InputObject $entry -MethodName GetOwnerSid
+  if ($entry.SessionId -ne $session -or $owner.ReturnValue -ne 0 -or $owner.Sid -cne $sid) {
+    throw 'The selected desktop belongs to another Windows user or session; restart was cancelled.'
+  }
+}
+function StopDesktop($app, [bool]$requireCurrentUser=$false) {
+  $main=@(MainProcesses $app.executable)
+  if ($main.Count -gt 1) { throw 'Multiple desktop instances are running; none was stopped.' }
+  if ($requireCurrentUser) {
+    foreach ($entry in @(AppProcesses $app.executable)) { RequireRestartOwner $entry }
+  }
+  foreach ($entry in $main) {
+    $process=BoundProcess $entry $app.executable
+    if ($null -ne $process) {
+      try { $null=$process.CloseMainWindow() } finally { $process.Dispose() }
+    }
+  }
+  $grace=[DateTime]::UtcNow.AddSeconds(2)
+  while ([DateTime]::UtcNow -lt $grace -and @(AppProcesses $app.executable).Count -gt 0) { Start-Sleep -Milliseconds 100 }
+  # The user requested a restart. Stop only live processes belonging to the
+  # selected, verified desktop installation, with their creation time pinned.
+  foreach ($entry in @(AppProcesses $app.executable)) {
+    if ($requireCurrentUser) { RequireRestartOwner $entry }
+    $process=BoundProcess $entry $app.executable
+    if ($null -ne $process) {
+      try { $process.Kill() } catch { } finally { $process.Dispose() }
+    }
+  }
+  $deadline=[DateTime]::UtcNow.AddSeconds(8); $emptySince=$null
+  do {
+    if (@(AppProcesses $app.executable).Count -eq 0) {
+      if ($null -eq $emptySince) { $emptySince=[DateTime]::UtcNow }
+      if (([DateTime]::UtcNow-$emptySince).TotalMilliseconds -ge 500) { return }
+    } else { $emptySince=$null }
+    Start-Sleep -Milliseconds 100
+  } while ([DateTime]::UtcNow -lt $deadline)
+  throw 'The selected desktop processes did not stop; relaunch was cancelled.'
+}
+"#;
+
+const ELEVATED_STORE_RESTART: &str = r#"
+if (-not (IsElevated)) { Emit @{handled=$false}; return }
+ValidateApp $data.app $true
+# Acquire and validate the unelevated broker before stopping anything.
+try { $shell=DesktopShell } catch { throw ('CODEXX_STORE_BROKER_UNAVAILABLE: '+$_.Exception.Message) }
+$wasRunning=@(AppProcesses $data.app.executable).Count -gt 0
+StopDesktop $data.app $true
+$shell.ShellExecute(('shell:AppsFolder\'+[string]$data.app.bundleId),'','','open',1) | Out-Null
+$deadline=[DateTime]::UtcNow.AddSeconds(8)
+do {
+  $main=@(MainProcesses $data.app.executable)
+  if ($main.Count -gt 1) { throw 'Multiple desktop instances started; no debugging connection was made.' }
+  if ($main.Count -eq 1) {
+    $process=BoundProcess $main[0] $data.app.executable
+    if ($null -ne $process) {
+      try { Emit @{handled=$true;wasRunning=$wasRunning;pid=[uint32]$main[0].ProcessId}; return }
+      finally { $process.Dispose() }
+    }
+  }
+  Start-Sleep -Milliseconds 100
+} while ([DateTime]::UtcNow -lt $deadline)
+throw 'The desktop shell accepted activation, but the verified Codex application did not start.'
 "#;
 
 pub(crate) fn detect() -> Result<WindowsDesktopApp, String> {
@@ -260,36 +405,7 @@ pub(crate) fn pids(app: &WindowsDesktopApp) -> Result<Vec<u32>, String> {
 
 pub(crate) fn quit(app: &WindowsDesktopApp) -> Result<(), String> {
     powershell(
-        r#"
-ValidateApp $data.app
-$main=@(MainProcesses $data.app.executable)
-if ($main.Count -gt 1) { throw 'Multiple desktop instances are running; none was stopped.' }
-foreach ($entry in $main) {
-  $process=BoundProcess $entry $data.app.executable
-  if ($null -ne $process) {
-    try { $null=$process.CloseMainWindow() } finally { $process.Dispose() }
-  }
-}
-$grace=[DateTime]::UtcNow.AddSeconds(2)
-while ([DateTime]::UtcNow -lt $grace -and @(AppProcesses $data.app.executable).Count -gt 0) { Start-Sleep -Milliseconds 100 }
-# The user explicitly requested a restart. If a tray/renderer remains, stop
-# only processes whose live executable path still matches this verified app.
-foreach ($entry in @(AppProcesses $data.app.executable)) {
-  $process=BoundProcess $entry $data.app.executable
-  if ($null -ne $process) {
-    try { $process.Kill() } catch { } finally { $process.Dispose() }
-  }
-}
-$deadline=[DateTime]::UtcNow.AddSeconds(8); $emptySince=$null
-do {
-  if (@(AppProcesses $data.app.executable).Count -eq 0) {
-    if ($null -eq $emptySince) { $emptySince=[DateTime]::UtcNow }
-    if (([DateTime]::UtcNow-$emptySince).TotalMilliseconds -ge 500) { Emit $true; exit }
-  } else { $emptySince=$null }
-  Start-Sleep -Milliseconds 100
-} while ([DateTime]::UtcNow -lt $deadline)
-throw 'The selected desktop processes did not stop; relaunch was cancelled.'
-"#,
+        &format!("{STOP_DESKTOP}\nValidateApp $data.app; StopDesktop $data.app; Emit $true"),
         json!({"app":app}),
         Duration::from_secs(20),
     )
@@ -483,10 +599,128 @@ Emit $true
 
 pub(crate) fn restart(home: &Path) -> Result<(String, bool), String> {
     let app = detect_fresh()?;
-    validate(&app)?;
     validate_launch(&app, home)?;
+    if app.bundle_id != "OpenAI.Codex.Standalone" {
+        let result = powershell(
+            &format!("{DESKTOP_SHELL}\n{STOP_DESKTOP}\n{ELEVATED_STORE_RESTART}"),
+            json!({"app":app}),
+            Duration::from_secs(35),
+        )?;
+        if result["handled"].as_bool() == Some(true) {
+            let was_running = result["wasRunning"]
+                .as_bool()
+                .ok_or("Windows 未确认重启前的客户端状态")?;
+            return Ok((app.name, was_running));
+        }
+    }
+    validate(&app)?;
     let was_running = !pids(&app)?.is_empty();
     quit(&app)?;
     launch(&app, Some(home), None)?;
     Ok((app.name, was_running))
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    fn restart_fixture(before: &str, catch: bool) -> Value {
+        let flow = if catch {
+            format!(
+                "try {{ & {{ {ELEVATED_STORE_RESTART} }} }} catch {{ Emit @{{error=$_.Exception.Message;stopped=$global:stopped}} }}"
+            )
+        } else {
+            ELEVATED_STORE_RESTART.to_owned()
+        };
+        powershell(
+            &format!("{before}\n{flow}"),
+            json!({"app":{"executable":"fixture.exe","bundleId":"OpenAI.Codex_2p2nqsd0c76g0!App"}}),
+            Duration::from_secs(15),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn elevated_store_restart_keeps_client_running_when_broker_preflight_fails() {
+        let result = restart_fixture(
+            r#"
+$global:stopped=$false
+function IsElevated { $true }
+function ValidateApp($app, $allowElevated) { if (-not $allowElevated) { throw 'wrong validation mode' } }
+function DesktopShell { throw 'fixture: no same-user unelevated shell' }
+function StopDesktop($app) { $global:stopped=$true }
+"#,
+            true,
+        );
+        assert_eq!(result["stopped"], false);
+        assert_eq!(
+            result["error"],
+            "CODEXX_STORE_BROKER_UNAVAILABLE: fixture: no same-user unelevated shell"
+        );
+    }
+
+    #[test]
+    fn elevated_store_restart_activates_verified_identity_after_preflight_and_stop() {
+        let result = restart_fixture(
+            r#"
+$global:stopped=$false; $global:brokered=$false
+function IsElevated { $true }
+function ValidateApp($app, $allowElevated) { if (-not $allowElevated) { throw 'wrong validation mode' } }
+function DesktopShell {
+  $global:brokered=$true
+  $shell=[pscustomobject]@{}
+  $shell | Add-Member -MemberType ScriptMethod -Name ShellExecute -Value {
+    param($target,$arguments,$directory,$verb,$show)
+    if (-not $global:stopped -or $target -cne 'shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App' -or
+        $arguments -cne '' -or $directory -cne '' -or $verb -cne 'open' -or $show -ne 1) { throw 'unexpected broker activation' }
+  }
+  $shell
+}
+function AppProcesses($exe) { [pscustomobject]@{ProcessId=123} }
+function StopDesktop($app, $requireCurrentUser) {
+  if (-not $global:brokered) { throw 'stop before broker preflight' }
+  if (-not $requireCurrentUser) { throw 'missing process owner validation' }
+  $global:stopped=$true
+}
+function MainProcesses($exe) { [pscustomobject]@{ProcessId=4242} }
+function BoundProcess($entry,$exe) {
+  if ($exe -cne 'fixture.exe' -or $entry.ProcessId -ne 4242) { throw 'unexpected process identity' }
+  $process=[pscustomobject]@{}
+  $process | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+  $process
+}
+"#,
+            false,
+        );
+        assert_eq!(result["handled"], true);
+        assert_eq!(result["wasRunning"], true);
+        assert_eq!(result["pid"], 4242);
+    }
+
+    #[test]
+    fn unelevated_store_restart_uses_existing_activation_path() {
+        let result = restart_fixture(
+            r#"
+function IsElevated { $false }
+function ValidateApp { throw 'unexpected validation' }
+function DesktopShell { throw 'unexpected broker' }
+function StopDesktop { throw 'unexpected stop' }
+"#,
+            false,
+        );
+        assert_eq!(result["handled"], false);
+    }
+
+    #[test]
+    fn desktop_shell_broker_compiles_without_requiring_an_interactive_desktop() {
+        let result = powershell(
+            &format!(
+                "{DESKTOP_SHELL}\ntry {{ DesktopShell | Out-Null }} catch {{ }}; Emit ($null -ne ('CodexDesktopShellIdentity' -as [type]))"
+            ),
+            Value::Null,
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        assert_eq!(result, true);
+    }
 }

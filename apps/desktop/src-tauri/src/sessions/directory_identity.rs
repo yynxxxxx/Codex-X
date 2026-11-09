@@ -241,6 +241,7 @@ mod tests {
         SessionPreview {
             id: id.to_string(),
             title: id.to_string(),
+            first_user_message: None,
             cwd,
             model_provider: None,
             model: None,

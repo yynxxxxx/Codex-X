@@ -1,7 +1,7 @@
 use super::rollout_stream::{decoded_rollout_reader, resolved_rollout_path};
 use super::storage::{
-    is_canonical_rollout_storage_path, list_session_previews_with_paths, session_project_title,
-    sqlite_candidate_paths,
+    discover_sqlite_databases, is_canonical_rollout_storage_path, list_session_previews_with_paths,
+    session_project_title,
 };
 use super::types::{RolloutScan, SessionPreview};
 use crate::error::{CodexxError, Result};
@@ -575,9 +575,20 @@ pub(crate) fn export_codex_sessions_inner(
             .ok_or_else(|| CodexxError::Config("请选择导出文件名".to_string()))?,
     );
     let snapshot = destination_snapshot(&destination)?;
-    let paths = sqlite_candidate_paths(&codex_dir);
-    let (sessions, mut warnings) =
-        list_session_previews_with_paths(&paths, &RolloutScan::default(), "openai", usize::MAX)?;
+    let (sessions, mut warnings) = if super::wsl::is_wsl_path(&codex_dir) {
+        let preview = super::wsl::session_previews(&codex_dir, "openai", usize::MAX)?;
+        (preview.sessions, Vec::new())
+    } else {
+        let discovery = discover_sqlite_databases(&codex_dir);
+        let (mut sessions, warnings) = list_session_previews_with_paths(
+            &discovery.active_paths,
+            &RolloutScan::default(),
+            "openai",
+            usize::MAX,
+        )?;
+        super::names::apply_display_names(&codex_dir, &discovery.related_paths, &mut sessions);
+        (sessions, warnings)
+    };
     let sessions: HashMap<_, _> = sessions
         .into_iter()
         .map(|session| (session.id.clone(), session))

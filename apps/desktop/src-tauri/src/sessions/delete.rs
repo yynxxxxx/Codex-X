@@ -1207,6 +1207,7 @@ pub(crate) fn delete_codex_sessions_inner(
     let selected = normalized_session_ids(input.session_ids)?;
     let requested_sessions = selected.len();
     let codex_dir = resolve_codex_dir(input.config_dir)?;
+    super::wsl::ensure_writable(&codex_dir)?;
     let _maintenance_lock = acquire_session_maintenance_lock(&codex_dir)?;
     let discovery = discover_sqlite_databases(&codex_dir);
     ensure_sqlite_discovery_writable(&discovery)?;

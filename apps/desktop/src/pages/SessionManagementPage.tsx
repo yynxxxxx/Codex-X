@@ -70,6 +70,7 @@ export type Lang = "zh" | "en";
 export type SessionPreview = {
   id: string;
   title: string;
+  firstUserMessage?: string | null;
   modelProvider?: string | null;
   model?: string | null;
   cwd?: string | null;
@@ -98,6 +99,7 @@ export type SessionSyncStatus = {
   mismatchedSessions: number;
   needsSync: boolean;
   scanComplete: boolean;
+  readOnlyReason?: string | null;
   scanFailures: string[];
   backupDir?: string | null;
   warnings: string[];
@@ -223,6 +225,7 @@ export function SessionManagementPage({
         syncing: "同步中...",
         clickToCheck: "点击检查会话",
         scanIncomplete: "无法确认同步状态，请查看下方原因",
+        readOnly: "WSL 会话 · 只读浏览",
         needsSync: (count: number) => `有 ${count} 条会话需要同步`,
         allSynced: "全部会话已同步",
         sessionCount: (count: number) => `${count} 条会话`,
@@ -284,6 +287,7 @@ export function SessionManagementPage({
         syncing: "Syncing...",
         clickToCheck: "Check sessions to get started",
         scanIncomplete: "Unable to verify sync status. See the reason below.",
+        readOnly: "WSL sessions · read-only",
         needsSync: (count: number) => `${count} session(s) need syncing`,
         allSynced: "All sessions are synced",
         sessionCount: (count: number) => `${count} sessions`,
@@ -336,11 +340,12 @@ export function SessionManagementPage({
       };
 
   const scanIncomplete = Boolean(sessionStatus && !sessionStatus.scanComplete);
+  const readOnly = Boolean(sessionStatus?.readOnlyReason);
   const diagnostics = [
     ...(sessionStatus?.scanFailures || []).map((message) => ({ message, blocking: true })),
     ...(sessionStatus?.warnings || []).map((message) => ({ message, blocking: false })),
   ];
-  const dialogOpen = sessionDeleteConfirmOpen && selectedSessions.length > 0;
+  const dialogOpen = !readOnly && sessionDeleteConfirmOpen && selectedSessions.length > 0;
   const sessionScrollRef = useRef<HTMLDivElement | null>(null);
   const directoryIdentities = sessionStatus?.directoryIdentities;
   const pinScopeKey = sessionStatus?.pinScopeKey;
@@ -551,7 +556,7 @@ export function SessionManagementPage({
         <div className="cx-session-delete-list" aria-label={copy.pendingDelete}>
           {selectedSessions.slice(0, 8).map((item) => (
             <div className="cx-session-delete-item" key={item.id}>
-              <strong title={item.title}>{item.title || (isChinese ? "未命名会话" : "Untitled session")}</strong>
+              <strong title={item.firstUserMessage?.trim() || item.title}>{item.title || (isChinese ? "未命名会话" : "Untitled session")}</strong>
               <code>#{shortId(item.id)}</code>
               <span title={item.cwd || item.rolloutPath || undefined}>
                 {compactPath(item.cwd || item.rolloutPath, 72, isChinese ? "未记录路径" : "No path recorded")}
@@ -583,17 +588,17 @@ export function SessionManagementPage({
               {actionBusy === "checkSessions" ? <Loader2 size={16} className="cx-session-spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
               {actionBusy === "checkSessions" ? copy.checking : copy.check}
             </button>
-            <button type="button" className="cx-session-button cx-session-button--primary" onClick={onSyncSessions} disabled={loading || scanIncomplete || !sessionHasMismatches} aria-busy={actionBusy === "syncSessions"}>
+            <button type="button" className="cx-session-button cx-session-button--primary" onClick={onSyncSessions} disabled={loading || readOnly || scanIncomplete || !sessionHasMismatches} title={sessionStatus?.readOnlyReason || undefined} aria-busy={actionBusy === "syncSessions"}>
               {actionBusy === "syncSessions" ? <Loader2 size={16} className="cx-session-spin" aria-hidden="true" /> : <Zap size={16} aria-hidden="true" />}
               {actionBusy === "syncSessions" ? copy.syncing : copy.sync}
             </button>
           </div>
         </header>
 
-        <div className={cx("cx-session-summary", scanIncomplete || sessionHasMismatches ? "cx-session-summary--needs-sync" : "cx-session-summary--synced")}>
+        <div className={cx("cx-session-summary", readOnly || scanIncomplete || sessionHasMismatches ? "cx-session-summary--needs-sync" : "cx-session-summary--synced")} title={sessionStatus?.readOnlyReason || undefined}>
           <span className="cx-session-summary-status">
-            {!sessionStatus ? <Info size={15} aria-hidden="true" /> : scanIncomplete || sessionHasMismatches ? <AlertCircle size={15} aria-hidden="true" /> : <CheckCircle2 size={15} aria-hidden="true" />}
-            {!sessionStatus ? copy.clickToCheck : scanIncomplete ? copy.scanIncomplete : sessionHasMismatches ? copy.needsSync(sessionSyncCount) : copy.allSynced}
+            {!sessionStatus || readOnly ? <Info size={15} aria-hidden="true" /> : scanIncomplete || sessionHasMismatches ? <AlertCircle size={15} aria-hidden="true" /> : <CheckCircle2 size={15} aria-hidden="true" />}
+            {!sessionStatus ? copy.clickToCheck : readOnly ? copy.readOnly : scanIncomplete ? copy.scanIncomplete : sessionHasMismatches ? copy.needsSync(sessionSyncCount) : copy.allSynced}
           </span>
           <span className="cx-session-summary-count">{copy.sessionCount(sessionStatus?.topLevelThreads ?? 0)}</span>
         </div>
@@ -652,8 +657,8 @@ export function SessionManagementPage({
               type="button"
               className={cx("cx-session-button cx-session-delete-trigger", selectedSessionIds.length > 0 ? "cx-session-button--danger" : "cx-session-button--secondary")}
               onClick={onOpenDeleteConfirm}
-              disabled={loading || sessionDeleteBusy || sessionExportBusy || selectedSessionIds.length === 0}
-              title={selectedSessionIds.length > 0 ? undefined : copy.deleteSelected}
+              disabled={loading || readOnly || sessionDeleteBusy || sessionExportBusy || selectedSessionIds.length === 0}
+              title={sessionStatus?.readOnlyReason || (selectedSessionIds.length > 0 ? undefined : copy.deleteSelected)}
             >
               <Trash2 size={15} strokeWidth={1.9} aria-hidden="true" />
               {selectedSessionIds.length > 0 ? copy.deleteMany(selectedSessionIds.length) : copy.deleteSelected}
@@ -772,7 +777,7 @@ export function SessionManagementPage({
                           </span>
                           <div className="cx-session-row-copy">
                             <div className="cx-session-row-title">
-                              <strong title={item.title}>{item.title || (isChinese ? "未命名会话" : "Untitled session")}</strong>
+                              <strong title={item.firstUserMessage?.trim() || item.title}>{item.title || (isChinese ? "未命名会话" : "Untitled session")}</strong>
                               {item.archived && <span className="cx-session-state">{copy.archived}</span>}
                               {item.isSubagent && <span className="cx-session-state" title={copy.internalHint}>{copy.internal}</span>}
                               {item.needsSync && !item.isSubagent && <span className="cx-session-state cx-session-state--warn">{copy.pending}</span>}
@@ -820,7 +825,7 @@ export function SessionManagementPage({
         </div>
 
         {diagnostics.length ? (
-          <details className="cx-session-diagnostics" open={scanIncomplete || undefined}>
+          <details className="cx-session-diagnostics" open={readOnly || scanIncomplete || undefined}>
             <summary>
               <AlertCircle size={15} strokeWidth={1.9} aria-hidden="true" />
               <span>{copy.diagnostics}</span>

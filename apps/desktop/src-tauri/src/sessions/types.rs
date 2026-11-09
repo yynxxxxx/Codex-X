@@ -10,6 +10,7 @@ use std::time::SystemTime;
 pub(crate) struct SessionPreview {
     pub(crate) id: String,
     pub(crate) title: String,
+    pub(crate) first_user_message: Option<String>,
     pub(crate) model_provider: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) cwd: Option<String>,
@@ -42,6 +43,7 @@ pub(crate) struct SessionSyncStatus {
     pub(crate) mismatched_sessions: usize,
     pub(crate) needs_sync: bool,
     pub(crate) scan_complete: bool,
+    pub(crate) read_only_reason: Option<String>,
     pub(crate) scan_failures: Vec<String>,
     pub(crate) backup_dir: Option<String>,
     pub(crate) warnings: Vec<String>,

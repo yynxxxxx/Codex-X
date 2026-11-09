@@ -201,6 +201,9 @@ pub(crate) fn session_sync_status_inner(
 ) -> Result<SessionSyncStatus> {
     let codex_dir = resolve_codex_dir(config_dir)?;
     let target = current_model_provider(&codex_dir, target_provider)?;
+    if super::wsl::is_wsl_path(&codex_dir) {
+        return super::wsl::session_status(&codex_dir, target);
+    }
     let discovery = discover_sqlite_databases(&codex_dir);
     session_sync_status_with_discovery(&codex_dir, target, &discovery)
 }
@@ -251,6 +254,7 @@ pub(super) fn session_sync_status_with_discovery(
                 mismatched_sessions: 0,
                 needs_sync: false,
                 scan_complete: false,
+                read_only_reason: None,
                 scan_failures: failures,
                 backup_dir: None,
                 warnings: scan.warnings,
@@ -258,6 +262,7 @@ pub(super) fn session_sync_status_with_discovery(
             });
         }
     };
+    super::names::apply_display_names(codex_dir, &discovery.related_paths, &mut sessions);
     let mut scan_failures = scan.scan_failures;
     scan_failures.extend(session_failures);
     let mut seen_failures = HashSet::new();
@@ -296,6 +301,7 @@ pub(super) fn session_sync_status_with_discovery(
         mismatched_sessions: mismatched_ids.len(),
         needs_sync,
         scan_complete,
+        read_only_reason: None,
         scan_failures,
         backup_dir: None,
         warnings: scan.warnings,
@@ -314,6 +320,7 @@ impl Drop for SessionMaintenanceLock {
 }
 
 pub(super) fn acquire_session_maintenance_lock(codex_dir: &Path) -> Result<SessionMaintenanceLock> {
+    super::wsl::ensure_writable(codex_dir)?;
     let tmp_dir = codex_dir.join("tmp");
     ensure_directory(&tmp_dir)?;
     let legacy_lock = tmp_dir.join("provider-sync.lock");
@@ -361,6 +368,7 @@ where
     F: FnMut(MutationPoint) -> Result<()>,
 {
     let codex_dir = resolve_codex_dir(config_dir)?;
+    super::wsl::ensure_writable(&codex_dir)?;
     ensure_directory(&codex_dir)?;
     let target_provider = current_model_provider(&codex_dir, target_provider)?;
     let _maintenance_lock = acquire_session_maintenance_lock(&codex_dir)?;

@@ -1238,7 +1238,11 @@ fn merge_provider_toml_into_live_with_policy(
         .get("requires_openai_auth")
         .and_then(|item| item.as_bool())
         .unwrap_or(false);
-    if requires_openai_auth && api_key.is_none() {
+    let has_env_key = source_provider
+        .get("env_key")
+        .and_then(Item::as_str)
+        .is_some_and(|name| !name.trim().is_empty());
+    if requires_openai_auth && api_key.is_none() && !has_env_key {
         return Err(CodexxError::Config(
             "该供应商需要 API Key，未切换且未修改 auth.json".to_string(),
         ));
@@ -2882,6 +2886,123 @@ command = "docs-server"
         );
         delete_provider_inner(&id).unwrap();
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn editor_env_auth_survives_active_save_and_switching_away_and_back() {
+        let _guard = crate::app_db::test_db_guard();
+        let tag = 60_010;
+        let dir = active_provider_test_dir("editor-env-auth", tag);
+        let original = save_provider_inner(active_provider_fixture(
+            tag,
+            &format!("editor-env-{tag}"),
+            "Environment fixture",
+            "fixture-model",
+            "old-form-fixture-key",
+        ))
+        .unwrap();
+        activate_saved_provider_inner(Some(dir.display().to_string()), original.id.clone())
+            .unwrap();
+        let mut edited = original.clone();
+        edited.toml_config.as_mut().unwrap().push_str(
+            "env_key = 'CODEXX_FIXTURE_ENV_KEY'\nenv_key_instructions = 'Set the variable before launching Codex'\n",
+        );
+        let edited = crate::providers::provider_with_editor_auth(edited, true).unwrap();
+        assert!(edited.api_key.is_none());
+        save_active_provider_with_common_config_inner(edited, Some(dir.display().to_string()))
+            .unwrap();
+        assert!(
+            !auth_path(&dir).exists(),
+            "the previous direct key must not survive"
+        );
+
+        let alternate = save_provider_inner(active_provider_fixture(
+            tag + 1,
+            &format!("editor-env-alternate-{tag}"),
+            "Alternate fixture",
+            "other-model",
+            "alternate-fixture-key",
+        ))
+        .unwrap();
+        activate_saved_provider_inner(Some(dir.display().to_string()), alternate.id.clone())
+            .unwrap();
+        activate_saved_provider_inner(Some(dir.display().to_string()), original.id.clone())
+            .unwrap();
+        let doc = fs::read_to_string(config_path(&dir))
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let route = doc["model_providers"]["custom"].as_table().unwrap();
+        assert_eq!(route["env_key"].as_str(), Some("CODEXX_FIXTURE_ENV_KEY"));
+        assert_eq!(
+            route["env_key_instructions"].as_str(),
+            Some("Set the variable before launching Codex")
+        );
+        assert!(route.get("experimental_bearer_token").is_none());
+        assert!(!auth_path(&dir).exists());
+        let saved = saved_provider(&original.id);
+        assert!(saved.api_key.is_none());
+        assert!(saved
+            .toml_config
+            .unwrap()
+            .contains("CODEXX_FIXTURE_ENV_KEY"));
+        delete_provider_inner(&original.id).unwrap();
+        delete_provider_inner(&alternate.id).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn editor_env_auth_is_saved_for_inactive_providers_and_validated() {
+        let mut provider = active_provider_fixture(
+            60_011,
+            "editor-env-inactive",
+            "Environment fixture",
+            "fixture-model",
+            "old-form-fixture-key",
+        );
+        provider.toml_config.as_mut().unwrap().push_str(
+            "env_key = 'CODEXX_FIXTURE_ENV_KEY'\nexperimental_bearer_token = 'old-toml-fixture-key'\n",
+        );
+        // API-key form edits retain the existing explicit-key precedence.
+        assert_eq!(
+            crate::providers::provider_with_editor_auth(provider.clone(), false)
+                .unwrap()
+                .api_key
+                .as_deref(),
+            Some("old-form-fixture-key")
+        );
+        let prepared = crate::providers::provider_with_editor_auth(provider.clone(), true).unwrap();
+        let normalized = normalize_saved_provider(prepared).unwrap();
+        assert!(normalized.api_key.is_none());
+        let text = normalized.toml_config.unwrap();
+        assert!(text.contains("CODEXX_FIXTURE_ENV_KEY"));
+        assert!(!text.contains("old-toml-fixture-key"));
+        for invalid in ["env_key = ''", "env_key = 42"] {
+            let mut invalid_provider = provider.clone();
+            invalid_provider.toml_config = Some(
+                provider
+                    .toml_config
+                    .as_ref()
+                    .unwrap()
+                    .replace("env_key = 'CODEXX_FIXTURE_ENV_KEY'", invalid),
+            );
+            assert!(crate::providers::provider_with_editor_auth(invalid_provider, true).is_err());
+        }
+        let (doc, key) = merge_provider_toml_into_live(
+            Path::new("fixture.toml"),
+            "",
+            &text.replace(
+                "requires_openai_auth = false",
+                "requires_openai_auth = true",
+            ),
+            None,
+        )
+        .unwrap();
+        assert!(key.is_none());
+        assert_eq!(
+            doc["model_providers"]["custom"]["env_key"].as_str(),
+            Some("CODEXX_FIXTURE_ENV_KEY")
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@
 import base64
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -76,7 +77,7 @@ class ValidateUpdaterReleaseTests(unittest.TestCase):
     def run_validator(self, *extra_args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
-                "python3",
+                sys.executable,
                 str(VALIDATOR),
                 "--manifest",
                 str(self.manifest_path),

@@ -201,8 +201,57 @@ fn provider_models_headers_with_env(
     Ok(headers)
 }
 
-fn provider_models_headers(config_text: Option<&str>) -> Result<HeaderMap> {
-    provider_models_headers_with_env(config_text, |name| std::env::var(name).ok())
+fn has_custom_provider_auth(headers: &HeaderMap) -> bool {
+    ["authorization", "x-api-key", "x-goog-api-key"]
+        .iter()
+        .any(|name| headers.contains_key(*name))
+}
+
+fn provider_models_api_key_with_env(
+    config_text: Option<&str>,
+    explicit_api_key: Option<&str>,
+    headers: &HeaderMap,
+    resolve_env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>> {
+    // Existing custom auth headers and explicit form keys retain precedence.
+    // Do not consult a stale/missing env_key when another source was selected.
+    if has_custom_provider_auth(headers) {
+        return Ok(None);
+    }
+    if let Some(key) = explicit_api_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        return Ok(Some(key.to_owned()));
+    }
+    let Some(config_text) = config_text.filter(|text| !text.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|_| CodexxError::Config("供应商 TOML 无效，请先修正配置".into()))?;
+    let env_key = doc
+        .get("model_provider")
+        .and_then(Item::as_str)
+        .and_then(|id| doc.get("model_providers")?.as_table()?.get(id.trim()))
+        .and_then(Item::as_table)
+        .and_then(|table| table.get("env_key"));
+    let Some(env_key) = env_key else {
+        return Ok(None);
+    };
+    let name = env_key
+        .as_str()
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| CodexxError::Config("供应商 env_key 必须是非空的环境变量名称".into()))?;
+    resolve_env(name)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(Some)
+        .ok_or_else(|| {
+            CodexxError::Config(
+                "供应商 env_key 指定的环境变量未设置或为空，请先设置该变量，再重新打开 Codex-X 后重试".into(),
+            )
+        })
 }
 
 fn parse_created(value: Option<serde_json::Value>) -> Option<i64> {
@@ -356,8 +405,27 @@ fn request_provider_models_with_protocol_client(
     protocol: UpstreamApi,
     config_text: Option<&str>,
 ) -> Result<ProviderModelsAttempt> {
-    let headers = provider_models_headers(config_text)?;
-    request_provider_models_with_headers(client, base_url, api_key, protocol, headers)
+    request_provider_models_with_protocol_client_and_env(
+        client,
+        base_url,
+        api_key,
+        protocol,
+        config_text,
+        |name| std::env::var(name).ok(),
+    )
+}
+
+fn request_provider_models_with_protocol_client_and_env(
+    client: &Client,
+    base_url: &str,
+    api_key: Option<&str>,
+    protocol: UpstreamApi,
+    config_text: Option<&str>,
+    resolve_env: impl Fn(&str) -> Option<String>,
+) -> Result<ProviderModelsAttempt> {
+    let headers = provider_models_headers_with_env(config_text, &resolve_env)?;
+    let api_key = provider_models_api_key_with_env(config_text, api_key, &headers, &resolve_env)?;
+    request_provider_models_with_headers(client, base_url, api_key.as_deref(), protocol, headers)
 }
 
 fn request_provider_models_with_headers(
@@ -375,9 +443,7 @@ fn request_provider_models_with_headers(
     if protocol == UpstreamApi::AnthropicMessages {
         request = request.header("anthropic-version", "2023-06-01");
     }
-    let custom_auth = ["authorization", "x-api-key", "x-goog-api-key"]
-        .iter()
-        .any(|name| headers.contains_key(*name));
+    let custom_auth = has_custom_provider_auth(&headers);
     if let Some(api_key) = api_key
         .map(str::trim)
         .filter(|key| !key.is_empty() && !custom_auth)
@@ -795,6 +861,164 @@ mod tests {
         assert!(!request.contains("anthropic-version: 2023-06-01"));
         assert!(!request.contains("x-api-key:"));
         assert!(!request.contains("fixture-unused-key"));
+    }
+
+    #[test]
+    fn environment_provider_key_authenticates_model_discovery_and_connectivity() {
+        let config = "model_provider='selected'\n[model_providers.selected]\nenv_key='FIXTURE_PROVIDER_KEY'\n[model_providers.unrelated]\nenv_key='UNRELATED_KEY'\n";
+        for (protocol, expected_auth, body) in [
+            (
+                UpstreamApi::Responses,
+                "authorization: bearer fixture-environment-key",
+                r#"{"data":[{"id":"fixture-model"}]}"#,
+            ),
+            (
+                UpstreamApi::ChatCompletions,
+                "authorization: bearer fixture-environment-key",
+                r#"{"data":[{"id":"fixture-model"}]}"#,
+            ),
+            (
+                UpstreamApi::AnthropicMessages,
+                "x-api-key: fixture-environment-key",
+                r#"{"data":[{"id":"fixture-model"}]}"#,
+            ),
+            (
+                UpstreamApi::Gemini,
+                "x-goog-api-key: fixture-environment-key",
+                r#"{"models":[{"name":"models/fixture-model","supportedGenerationMethods":["generateContent"]}]}"#,
+            ),
+        ] {
+            let (url, server) = serve_once(200, body);
+            // Model discovery and connection checks share this request pipeline.
+            let attempt = request_provider_models_with_protocol_client_and_env(
+                &direct_client(),
+                &url,
+                Some(" "),
+                protocol,
+                Some(config),
+                |name| {
+                    assert_eq!(name, "FIXTURE_PROVIDER_KEY");
+                    Some("fixture-environment-key".into())
+                },
+            )
+            .unwrap();
+            let ProviderModelsAttempt::Success(result) = attempt else {
+                panic!("expected successful models response");
+            };
+            assert_eq!(result.models[0].id, "fixture-model");
+            assert!(provider_status_result(result.status, result.duration_ms).ok);
+            let request = server.join().unwrap().to_ascii_lowercase();
+            assert!(request.contains(expected_auth));
+            assert!(!request
+                .lines()
+                .next()
+                .unwrap()
+                .contains("fixture-environment-key"));
+        }
+        assert!(!config.contains("fixture-environment-key"));
+    }
+
+    #[test]
+    fn explicit_keys_and_custom_auth_headers_precede_provider_environment_keys() {
+        for (config, explicit_key, expected_auth) in [
+            (
+                "model_provider='custom'\n[model_providers.custom]\nenv_key='UNAVAILABLE_ENV_KEY'\n",
+                Some("fixture-explicit-key"),
+                "authorization: bearer fixture-explicit-key",
+            ),
+            (
+                "model_provider='custom'\n[model_providers.custom]\nenv_key='UNAVAILABLE_ENV_KEY'\nhttp_headers={Authorization='Bearer fixture-custom-auth'}\n",
+                Some("fixture-explicit-key"),
+                "authorization: bearer fixture-custom-auth",
+            ),
+            (
+                "model_provider='custom'\n[model_providers.custom]\nenv_key='UNAVAILABLE_ENV_KEY'\nenv_http_headers={Authorization='FIXTURE_AUTH_HEADER'}\n",
+                Some("fixture-explicit-key"),
+                "authorization: bearer fixture-environment-header",
+            ),
+        ] {
+            let (url, server) = serve_once(200, r#"{"data":[]}"#);
+            request_provider_models_with_protocol_client_and_env(
+                &direct_client(),
+                &url,
+                explicit_key,
+                UpstreamApi::Responses,
+                Some(config),
+                |name| {
+                    assert_eq!(name, "FIXTURE_AUTH_HEADER", "stale env_key must not be resolved");
+                    Some("Bearer fixture-environment-header".into())
+                },
+            )
+            .unwrap();
+            let request = server.join().unwrap().to_ascii_lowercase();
+            assert!(request.contains(expected_auth));
+            assert_eq!(request.matches("authorization:").count(), 1);
+        }
+    }
+
+    #[test]
+    fn unavailable_provider_environment_key_fails_before_request_without_value_echo() {
+        let config =
+            "model_provider='custom'\n[model_providers.custom]\nenv_key='FIXTURE_PROVIDER_KEY'\n";
+        for value in [None, Some("".into()), Some("   ".into())] {
+            let error = request_provider_models_with_protocol_client_and_env(
+                &direct_client(),
+                "http://127.0.0.1:9",
+                None,
+                UpstreamApi::Responses,
+                Some(config),
+                |_| value.clone(),
+            )
+            .err()
+            .expect("missing key must fail before connecting")
+            .to_string();
+            assert!(error.contains("env_key"));
+            assert!(error.contains("重新打开 Codex-X"));
+            assert!(!error.contains("127.0.0.1"));
+        }
+        let error = request_provider_models_with_protocol_client_and_env(
+            &direct_client(),
+            "http://127.0.0.1:9",
+            None,
+            UpstreamApi::Responses,
+            Some(config),
+            |_| Some("fixture-private-key\r\nInjected: value".into()),
+        )
+        .err()
+        .expect("invalid key must fail before connecting")
+        .to_string();
+        assert!(error.contains("API Key"));
+        assert!(!error.contains("fixture-private-key"));
+        assert!(!error.contains("Injected"));
+    }
+
+    #[test]
+    fn environment_authentication_errors_do_not_echo_key_or_upstream_body() {
+        let config =
+            "model_provider='custom'\n[model_providers.custom]\nenv_key='FIXTURE_PROVIDER_KEY'\n";
+        let (url, server) = serve_once(401, r#"{"error":"fixture-private-response"}"#);
+        let attempt = request_provider_models_with_protocol_client_and_env(
+            &direct_client(),
+            &url,
+            None,
+            UpstreamApi::Responses,
+            Some(config),
+            |_| Some("fixture-private-env-key".into()),
+        )
+        .unwrap();
+        let ProviderModelsAttempt::HttpError {
+            status,
+            duration_ms,
+        } = attempt
+        else {
+            panic!("expected authentication error");
+        };
+        let result = provider_status_result(status, duration_ms);
+        assert!(!result.ok);
+        assert_eq!(result.status, Some(401));
+        assert!(!result.message.contains("fixture-private-env-key"));
+        assert!(!result.message.contains("fixture-private-response"));
+        assert!(server.join().unwrap().contains("fixture-private-env-key"));
     }
 
     #[test]

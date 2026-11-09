@@ -266,6 +266,8 @@ A backup is created automatically before every enable or disable action. In addi
 
 ### 5. Session Management: Inspect, Repair, and Permanently Delete
 
+Session lists prefer saved display names and show the first prompt on hover. Windows can browse and export WSL sessions in read-only mode; see the [WSL session guide](docs/WSL_SESSIONS.md) for requirements and limits.
+
 <table>
   <tr>
     <td width="50%" valign="top">

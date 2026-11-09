@@ -5,11 +5,13 @@ mod delete;
 mod directory_identity;
 mod export;
 mod global_state;
+mod names;
 mod rollout_stream;
 mod storage;
 mod sync;
 mod transaction;
 mod types;
+mod wsl;
 
 #[cfg(test)]
 pub(crate) use backup::{

@@ -1024,7 +1024,7 @@ pub(crate) fn sqlite_candidate_paths_with_timeout(
     discover_sqlite_databases_with_busy_timeout(codex_dir, Some(timeout)).active_paths
 }
 
-fn clean_session_title(values: [Option<String>; 3]) -> Option<String> {
+fn clean_session_title<const N: usize>(values: [Option<String>; N]) -> Option<String> {
     values
         .into_iter()
         .flatten()
@@ -1753,13 +1753,19 @@ pub(crate) fn list_session_previews(
     target_provider: &str,
     limit: usize,
 ) -> Result<(Vec<SessionPreview>, Vec<String>)> {
+    if super::wsl::is_wsl_path(codex_dir) {
+        return super::wsl::session_previews(codex_dir, target_provider, limit)
+            .map(|preview| (preview.sessions, Vec::new()));
+    }
     let discovery = discover_sqlite_databases(codex_dir);
-    list_session_previews_with_paths(
+    let (mut sessions, warnings) = list_session_previews_with_paths(
         &discovery.active_first_session_paths(),
         rollouts,
         target_provider,
         limit,
-    )
+    )?;
+    super::names::apply_display_names(codex_dir, &discovery.related_paths, &mut sessions);
+    Ok((sessions, warnings))
 }
 
 pub(super) fn list_session_previews_with_paths(
@@ -1792,6 +1798,7 @@ pub(super) fn list_session_previews_with_paths(
         let subagent_thread_ids = sqlite_subagent_thread_ids(&conn, &cols)?;
 
         let title_col = sql_select_column(&cols, "title", "NULL");
+        let name_col = sql_select_column(&cols, "name", "NULL");
         let first_message_col = sql_select_column(&cols, "first_user_message", "NULL");
         let preview_col = sql_select_column(&cols, "preview", "NULL");
         let provider_col = sql_select_column(&cols, "model_provider", "NULL");
@@ -1813,7 +1820,7 @@ pub(super) fn list_session_previews_with_paths(
         };
 
         let query = format!(
-            "SELECT \"id\", {title_col}, {first_message_col}, {preview_col}, {provider_col}, {model_col}, {cwd_col}, {rollout_col}, {updated_ms_col}, {updated_col}, {archived_col}, {has_user_event_col} FROM threads ORDER BY {order_col} DESC"
+            "SELECT \"id\", {title_col}, {first_message_col}, {preview_col}, {provider_col}, {model_col}, {cwd_col}, {rollout_col}, {updated_ms_col}, {updated_col}, {archived_col}, {has_user_event_col}, {name_col} FROM threads ORDER BY {order_col} DESC"
         );
         let mut stmt = conn
             .prepare(&query)
@@ -1832,7 +1839,9 @@ pub(super) fn list_session_previews_with_paths(
                 let updated_at: Option<i64> = row.get(9)?;
                 let archived: i64 = row.get(10)?;
                 let has_user_event: i64 = row.get(11)?;
-                let clean_title = clean_session_title([title, first_message, preview])
+                let first_user_message = clean_session_title([first_message.clone()]);
+                let name = row.get::<_, Option<String>>(12).ok().flatten();
+                let clean_title = clean_session_title([name, title, first_message, preview])
                     .unwrap_or_else(|| format!("会话 {}", id.chars().take(8).collect::<String>()));
                 let normalized_provider = model_provider
                     .as_ref()
@@ -1863,6 +1872,7 @@ pub(super) fn list_session_previews_with_paths(
                 Ok(SessionPreview {
                     id,
                     title: clean_title,
+                    first_user_message,
                     model_provider: normalized_provider.clone(),
                     model: model.and_then(|v| {
                         let v = v.trim().to_string();

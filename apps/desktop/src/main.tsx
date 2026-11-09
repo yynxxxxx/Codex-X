@@ -811,6 +811,7 @@ function App() {
   const [providerForm, setProviderForm] = React.useState<SavedProvider>(defaultProviderForm);
   const [providerTomlDraft, setProviderTomlDraft] = React.useState("");
   const [providerTomlDirty, setProviderTomlDirty] = React.useState(false);
+  const providerApiKeyEditedRef = React.useRef(false);
   const [providerCommonConfigDirty, setProviderCommonConfigDirty] = React.useState(false);
   const [providerDraftRefreshToken, setProviderDraftRefreshToken] = React.useState(0);
   const [providerApiKeyVisible, setProviderApiKeyVisible] = React.useState(false);
@@ -1522,7 +1523,7 @@ function App() {
   const filteredSessions = React.useMemo(() => {
     const query = deferredSessionQuery.trim().toLowerCase();
     if (!query) return visibleSessions;
-    return visibleSessions.filter((item) => [item.title, item.cwd, item.rolloutPath, item.modelProvider, item.model, item.id]
+    return visibleSessions.filter((item) => [item.title, item.firstUserMessage, item.cwd, item.rolloutPath, item.modelProvider, item.model, item.id]
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(query)));
   }, [deferredSessionQuery, visibleSessions]);
@@ -2154,6 +2155,7 @@ function App() {
 
   const saveProviderOnly = () => {
     const pendingProvider = normalizedProviderForm();
+    const preferTomlAuth = providerTomlDirty && !providerApiKeyEditedRef.current;
     const mappingValidation = validateProviderModelMappings(pendingProvider.modelMappings || [], pendingProvider.model, lang);
     if (pendingProvider.modelMappings?.length && pendingProvider.wireApi !== "responses") {
       setError(lang === "zh" ? "模型映射需要 Responses 接口，请将 Wire API 设为 responses" : "Model mappings require the Responses API. Set Wire API to responses");
@@ -2186,9 +2188,9 @@ function App() {
         const applyAfterSave = editingDetectedProvider
           || Boolean(editingProviderId && editingProviderId === effectiveActiveProviderId);
         const applied = applyAfterSave
-          ? await invoke<ActionResult>("save_active_provider", { provider, configDir: configDir || null, applyCommonConfig: providerCommonConfigDirty })
+          ? await invoke<ActionResult>("save_active_provider", { provider, configDir: configDir || null, applyCommonConfig: providerCommonConfigDirty, preferTomlAuth })
           : null;
-        if (!applyAfterSave) await invoke<SavedProvider>("save_provider", { provider });
+        if (!applyAfterSave) await invoke<SavedProvider>("save_provider", { provider, preferTomlAuth });
         const providerList = await invoke<SavedProvider[]>("list_saved_providers");
         return { applied, providerList };
       },
@@ -3640,6 +3642,7 @@ function App() {
                 onSaveOfficial={saveOfficialConfig}
                 onApiKeyChange={(value) => {
                   resetAvailableProviderModels();
+                  providerApiKeyEditedRef.current = true;
                   setProviderForm((current) => ({ ...current, apiKey: value }));
                 }}
                 onBaseUrlChange={(value) => {
@@ -3663,7 +3666,10 @@ function App() {
                   providerDraftRequestRef.current += 1;
                   setProviderTomlDraft(value);
                   setProviderTomlDirty(true);
-                  if (origin === "manual") setProviderCommonConfigDirty(true);
+                  if (origin === "manual") {
+                    providerApiKeyEditedRef.current = false;
+                    setProviderCommonConfigDirty(true);
+                  }
                 }}
                 onProviderHeadersConfigChange={(value) => {
                   providerDraftRequestRef.current += 1;
