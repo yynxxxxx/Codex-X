@@ -74,7 +74,13 @@ jobs:
       - name: Build test installer without publishing or release signing credentials
         run: |
           Set-Content -Path "$env:RUNNER_TEMP\installer-check.json" -Value '{"bundle":{"createUpdaterArtifacts":false}}' -Encoding utf8
-          pnpm --dir apps/desktop tauri build --bundles nsis --config "$env:RUNNER_TEMP\installer-check.json" --ci
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            pnpm --dir apps/desktop tauri build --bundles nsis --config "$env:RUNNER_TEMP\installer-check.json" --ci
+            $buildExitCode = $LASTEXITCODE
+            if ($buildExitCode -eq 0) { break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
+          }
+          if ($buildExitCode -ne 0) { exit $buildExitCode }
       - name: Test real MSI migration and subsequent updates
         run: |
           $installers = @(Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -Filter '*.exe')
