@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <!-- Referencing this group links the complete fragment, including its
+         launch condition. No uninstall command from the registry is executed. -->
+    <ComponentGroup Id="CodexXInstallerGuards" />
+    <Property Id="CODEXX_NSIS_USER32" Secure="yes">
+      <RegistrySearch Id="CodexXNsisUser32" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex-X" Name="UninstallString" Type="raw" Win64="no" />
+    </Property>
+    <Property Id="CODEXX_NSIS_USER64" Secure="yes">
+      <RegistrySearch Id="CodexXNsisUser64" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex-X" Name="UninstallString" Type="raw" Win64="yes" />
+    </Property>
+    <Property Id="CODEXX_NSIS_MACHINE32" Secure="yes">
+      <RegistrySearch Id="CodexXNsisMachine32" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex-X" Name="UninstallString" Type="raw" Win64="no" />
+    </Property>
+    <Property Id="CODEXX_NSIS_MACHINE64" Secure="yes">
+      <RegistrySearch Id="CodexXNsisMachine64" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex-X" Name="UninstallString" Type="raw" Win64="yes" />
+    </Property>
+    <Condition Message="The EXE installation of Codex-X is already present. Close Codex-X and uninstall the EXE edition from Windows Settings (keep application data), then run this MSI again. Existing EXE installations can continue to use in-app updates.">Installed OR NOT (CODEXX_NSIS_USER32 OR CODEXX_NSIS_USER64 OR CODEXX_NSIS_MACHINE32 OR CODEXX_NSIS_MACHINE64)</Condition>
+  </Fragment>
+</Wix>

@@ -465,8 +465,8 @@ async fn install_windows(
     exit_guard: InstallationExitGuard<'static>,
 ) -> Result<InstallResult, UpdateFailure> {
     tauri::async_runtime::spawn_blocking(move || {
-        // Stage bytes before changing live routes. Only signed .exe payloads
-        // from this release pipeline are supported by the new Windows flow.
+        // Stage verified MSI/EXE bytes before changing live routes. The selected
+        // updater platform keeps each existing installation on its own format.
         let installer = windows::StagedInstaller::create(&bytes).map_err(|_| {
             failure(
                 FailureStage::Install,
@@ -495,7 +495,7 @@ async fn install_windows(
         log.record("installer_handed_off");
         let _ = on_event.send(AppUpdateEvent::HandedOff);
         // Normal Tauri exit destroys windows/tray/single-instance lock. The
-        // new installer waits for this PID before touching installed files.
+        // NSIS installer waits for this PID; MSI uses standard Restart Manager.
         exit_guard.handed_off();
         app.exit(0);
         Ok(InstallResult {

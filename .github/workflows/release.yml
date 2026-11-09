@@ -177,7 +177,7 @@ jobs:
           - name: Windows x64
             platform: windows-latest
             macos: false
-            args: --bundles nsis
+            args: --bundles msi,nsis
             asset_pattern: Codex-X-[version]-windows-x64[ext]
 
     steps:
@@ -236,6 +236,7 @@ jobs:
           pnpm --dir apps/desktop typecheck
           node --test apps/desktop/tests/*.test.mjs
           python scripts/test_wsl_session_snapshot.py
+          python scripts/test_validate_updater_release.py
 
       - name: Verify Windows SDK test tooling
         if: matrix.platform == 'windows-latest'
@@ -351,7 +352,7 @@ jobs:
           releaseAssetNamePattern: ${{ matrix.asset_pattern }}
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
-          updaterJsonPreferNsis: true
+          updaterJsonPreferNsis: false
           retryAttempts: 3
 
       - name: Verify updater signatures were generated
@@ -372,6 +373,25 @@ jobs:
           $installers = @(Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -Filter '*.exe')
           if ($installers.Count -ne 1) { throw 'Expected one NSIS installer.' }
           ./scripts/windows-install-smoke.ps1 -Installer $installers[0].FullName
+
+      - name: Test MSI installation, upgrade, and application launch
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $installers = @(Get-ChildItem apps/desktop/src-tauri/target/release/bundle/msi -Filter '*.msi')
+          if ($installers.Count -ne 1) { throw 'Expected one MSI installer.' }
+          ./scripts/windows-msi-install-smoke.ps1 -Installer $installers[0].FullName
+
+      - name: Retain failed MSI installation diagnostics
+        if: failure() && matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-msi-installation-diagnostics
+          path: ${{ runner.temp }}/codex-x-msi-smoke-*/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Verify signed and notarized macOS bundles
         if: matrix.macos
@@ -480,7 +500,7 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --release-tag "$RELEASE_TAG" \
             --rewrite-download-urls \
-            --migrate-windows-to-nsis \
+            --restore-windows-msi \
             --require-signature-assets
           gh release upload "$RELEASE_TAG" latest.json --clobber
 
@@ -502,38 +522,17 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: gh release edit "$RELEASE_TAG" --draft=false --latest
 
-      - name: Verify published updater endpoint
+      - name: Verify published updater downloads
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          endpoint="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/latest.json"
-          curl -fsSL \
-            --retry 12 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            "$endpoint" \
-            -o published-latest.json
-          python3 scripts/validate_updater_release.py \
-            --manifest published-latest.json \
-            --assets release-assets.json \
-            --version "$VERSION" \
-            --repository "$GITHUB_REPOSITORY" \
-            --release-tag "$RELEASE_TAG"
+        run: python3 scripts/verify_published_release.py
 
-          python3 - <<'PY' > updater-urls.txt
-          import json
-          manifest = json.load(open("published-latest.json", encoding="utf-8"))
-          for entry in manifest["platforms"].values():
-              print(entry["url"])
-          PY
-          sort -u updater-urls.txt | while read -r url; do
-            curl -fsSL \
-              --range 0-0 \
-              --retry 5 \
-              --retry-delay 3 \
-              --retry-all-errors \
-              "$url" \
-              -o /dev/null
-          done
+      - name: Retain published download verification report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: published-release-verification-${{ needs.prepare.outputs.tag }}
+          path: published-release-verification/
+          if-no-files-found: warn
+          retention-days: 14
