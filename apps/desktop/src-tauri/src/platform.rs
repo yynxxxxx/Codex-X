@@ -912,106 +912,190 @@ pub(crate) fn desktop_command_output(
         .ok_or_else(|| "客户端系统操作超时，未继续重启或连接客户端。".into())
 }
 
-#[cfg(target_os = "macos")]
-fn wait_macos_stopped(executable: &Path) -> Result<(), String> {
-    let deadline = Instant::now() + CODEX_DESKTOP_QUIT_TIMEOUT;
-    let mut empty_since = None;
-    while Instant::now() < deadline {
-        let pids = match macos_main_process_ids(executable, Some(deadline)) {
-            Ok(pids) => pids,
-            Err(_) if Instant::now() >= deadline => break,
-            Err(error) => return Err(error),
+// A failed process query is neither proof that the old app is still running nor
+// proof that it has stopped. Keep confirmation bounded and require consecutive
+// successful observations before proceeding with the next lifecycle step.
+#[cfg(any(target_os = "macos", test))]
+struct DesktopProcessObservation {
+    running: bool,
+    settle: Duration,
+    stable: Option<(Vec<u32>, Instant)>,
+    last: Result<Vec<u32>, String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl DesktopProcessObservation {
+    fn new(running: bool, settle: Duration) -> Self {
+        Self {
+            running,
+            settle,
+            stable: None,
+            last: Err("尚未确认客户端进程状态".into()),
+        }
+    }
+
+    fn observe(&mut self, sample: Result<Vec<u32>, String>, now: Instant) -> Option<Vec<u32>> {
+        self.last = sample.map(|mut pids| {
+            pids.sort_unstable();
+            pids.dedup();
+            pids
+        });
+        let Ok(pids) = &self.last else {
+            self.stable = None;
+            return None;
         };
-        if pids.is_empty() {
-            let since = empty_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= Duration::from_millis(500) {
-                return Ok(());
-            }
-        } else {
-            empty_since = None;
+        if self.running == pids.is_empty() {
+            self.stable = None;
+            return None;
+        }
+        let (previous, since) = self.stable.get_or_insert_with(|| (pids.clone(), now));
+        if previous != pids {
+            *previous = pids.clone();
+            *since = now;
+        }
+        (now.saturating_duration_since(*since) >= self.settle).then(|| pids.clone())
+    }
+
+    fn confirmed_absent(&self) -> bool {
+        matches!(&self.last, Ok(pids) if pids.is_empty())
+    }
+
+    fn error(&self, context: &str) -> String {
+        match &self.last {
+            Err(error) => format!("{context}；进程状态暂时无法确认：{error}"),
+            _ => context.to_owned(),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn observe_macos_processes(
+    executable: &Path,
+    deadline: Instant,
+    observation: &mut DesktopProcessObservation,
+) -> Option<Vec<u32>> {
+    while Instant::now() < deadline {
+        let sample = macos_main_process_ids(executable, Some(deadline));
+        if let Some(pids) = observation.observe(sample, Instant::now()) {
+            return Some(pids);
         }
         thread::sleep(CODEX_DESKTOP_POLL_INTERVAL);
     }
-    Err("Codex/ChatGPT 客户端未正常退出，已取消重新启动；请先结束当前任务后重试。".into())
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn wait_macos_stopped(executable: &Path) -> Result<(), String> {
+    let mut observation = DesktopProcessObservation::new(false, Duration::from_millis(500));
+    if observe_macos_processes(
+        executable,
+        Instant::now() + CODEX_DESKTOP_QUIT_TIMEOUT,
+        &mut observation,
+    )
+    .is_some()
+    {
+        return Ok(());
+    }
+    Err(observation.error("未能确认 Codex/ChatGPT 已完全退出，未启动重复实例；请稍后重试"))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_launch_arguments(bundle: &str, home: &str, new_instance: bool) -> Vec<String> {
+    let mut arguments = Vec::new();
+    if new_instance {
+        arguments.push("-n".into());
+    }
+    arguments.extend([
+        "-a".to_owned(),
+        bundle.to_owned(),
+        "--env".to_owned(),
+        format!("CODEX_HOME={home}"),
+        "--stdin".to_owned(),
+        "/dev/null".to_owned(),
+        "--stdout".to_owned(),
+        "/dev/null".to_owned(),
+        "--stderr".to_owned(),
+        "/dev/null".to_owned(),
+    ]);
+    arguments
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn launch_macos_with_observation(
+    mut launch: impl FnMut(bool) -> Result<bool, String>,
+    mut observe: impl FnMut(bool) -> Result<(), DesktopProcessObservation>,
+) -> Result<(), String> {
+    let mut last_error = "未确认 Codex 客户端已启动".to_owned();
+    for attempt in 0..2 {
+        let accepted = match launch(attempt == 0) {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                last_error = error;
+                false
+            }
+        };
+        if accepted {
+            last_error = "系统已收到启动请求，但尚未确认客户端已持续运行".into();
+        }
+        match observe(accepted) {
+            Ok(()) => return Ok(()),
+            Err(observation) => {
+                last_error = observation.error(&last_error);
+                // A successful open receipt alone does not prove the GUI is
+                // running. Recover once only after a successful empty query.
+                // Recovery omits -n, so a late first launch is activated rather
+                // than opening a second copy of the same app.
+                if !observation.confirmed_absent() || attempt == 1 {
+                    break;
+                }
+            }
+        }
+    }
+    Err(format!("启动 Codex/ChatGPT 未完成：{last_error}"))
 }
 
 #[cfg(target_os = "macos")]
 fn launch_macos_codex_app(app: &MacosCodexApp, home: &Path) -> Result<(), String> {
-    let bundle_path = app
+    let bundle = app
         .bundle_path
         .to_str()
         .ok_or("Codex 客户端路径不是有效文本")?;
     let home = home.to_str().ok_or("Codex 配置目录不是有效文本")?;
-    let mut last_error = "未确认 Codex 客户端已启动".to_owned();
-    for attempt in 0..2 {
-        let arguments = [
-            "-n".to_owned(),
-            "-a".to_owned(),
-            bundle_path.to_owned(),
-            "--env".to_owned(),
-            format!("CODEX_HOME={home}"),
-            "--stdin".to_owned(),
-            "/dev/null".to_owned(),
-            "--stdout".to_owned(),
-            "/dev/null".to_owned(),
-            "--stderr".to_owned(),
-            "/dev/null".to_owned(),
-        ];
-        let output = run_command_with_timeout(
-            macos_open_command(&arguments, true),
-            None,
-            CODEX_DESKTOP_COMMAND_TIMEOUT,
-        )
-        .map(|(_, output)| output)
-        .ok_or_else(|| "客户端系统操作超时，未继续重启或连接客户端。".to_owned());
-        let accepted = output.as_ref().is_ok_and(|output| output.status.success());
-        if let Ok(output) = &output {
-            if !output.status.success() {
-                let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-                if !message.is_empty() {
-                    last_error = message;
-                }
-            }
-        } else if let Err(error) = output {
-            last_error = error;
-        }
-        // LaunchServices can acknowledge a launch before a process appears,
-        // or report a stale quit/launch error after the new process starts.
-        let deadline = Instant::now()
-            + if accepted {
-                CODEX_DESKTOP_QUIT_TIMEOUT
+    launch_macos_with_observation(
+        |new_instance| {
+            let output = run_command_with_timeout(
+                macos_open_command(&macos_launch_arguments(bundle, home, new_instance), true),
+                None,
+                CODEX_DESKTOP_COMMAND_TIMEOUT,
+            )
+            .map(|(_, output)| output)
+            .ok_or_else(|| "LaunchServices 启动请求超时".to_owned())?;
+            if output.status.success() {
+                Ok(true)
             } else {
-                Duration::from_millis(750)
-            };
-        let mut observed = None;
-        while Instant::now() < deadline {
-            let pids = match macos_main_process_ids(&app.executable_path, Some(deadline)) {
-                Ok(pids) => pids,
-                Err(_) if Instant::now() >= deadline => break,
-                Err(error) => return Err(error),
-            };
-            if !pids.is_empty() {
-                let (previous, since) =
-                    observed.get_or_insert_with(|| (pids.clone(), Instant::now()));
-                if *previous == pids && since.elapsed() >= Duration::from_millis(200) {
-                    return Ok(());
-                }
-                if *previous != pids {
-                    *previous = pids;
-                    *since = Instant::now();
-                }
-            } else {
-                observed = None;
+                let details = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                Err(if details.is_empty() {
+                    "LaunchServices 未接受启动请求".into()
+                } else {
+                    details
+                })
             }
-            thread::sleep(CODEX_DESKTOP_POLL_INTERVAL);
-        }
-        if accepted || attempt == 1 {
-            break;
-        }
-        // Retry only an unacknowledged launch with no surviving main process.
-        // Never open a second instance after LaunchServices confirmed one.
-    }
-    Err(format!("启动 Codex/ChatGPT 未完成：{last_error}"))
+        },
+        |accepted| {
+            let deadline = Instant::now()
+                + if accepted {
+                    CODEX_DESKTOP_QUIT_TIMEOUT
+                } else {
+                    Duration::from_millis(750)
+                };
+            let mut observation = DesktopProcessObservation::new(true, Duration::from_millis(200));
+            if observe_macos_processes(&app.executable_path, deadline, &mut observation).is_some() {
+                Ok(())
+            } else {
+                Err(observation)
+            }
+        },
+    )
 }
 
 // LaunchServices helpers for explicit desktop restart and locale apply.
@@ -1188,8 +1272,12 @@ pub(crate) fn locale_launch_desktop(
     while Instant::now() < deadline {
         let pids = match macos_main_process_ids(executable, Some(deadline)) {
             Ok(pids) => pids,
-            Err(_) if Instant::now() >= deadline => break,
-            Err(error) => return Err(error),
+            Err(error) => {
+                last_error = error;
+                observed = None;
+                thread::sleep(CODEX_DESKTOP_POLL_INTERVAL);
+                continue;
+            }
         };
         if pids.len() > 1 {
             return Err("发现多个官方主进程，未连接任何实例；请保留一个后重试。".into());
@@ -1930,6 +2018,272 @@ mod tests {
             paths.last(),
             Some(&Path::new("/Users/tester/Applications/ChatGPT.app").to_path_buf())
         );
+    }
+
+    #[test]
+    fn macos_process_confirmation_survives_read_errors_without_treating_them_as_exit() {
+        use super::DesktopProcessObservation;
+        let start = Instant::now();
+        let mut stopped = DesktopProcessObservation::new(false, Duration::from_millis(500));
+        assert!(stopped.observe(Ok(vec![]), start).is_none());
+        assert!(stopped
+            .observe(
+                Err("temporary ps failure".into()),
+                start + Duration::from_millis(400)
+            )
+            .is_none());
+        assert!(!stopped.confirmed_absent());
+        assert!(stopped
+            .observe(Ok(vec![]), start + Duration::from_millis(500))
+            .is_none());
+        assert!(stopped
+            .observe(Ok(vec![]), start + Duration::from_millis(999))
+            .is_none());
+        assert_eq!(
+            stopped.observe(Ok(vec![]), start + Duration::from_millis(1000)),
+            Some(vec![])
+        );
+
+        let mut started = DesktopProcessObservation::new(true, Duration::from_millis(200));
+        assert!(started
+            .observe(Err("temporary ps failure".into()), start)
+            .is_none());
+        assert!(started
+            .observe(Ok(vec![42]), start + Duration::from_millis(10))
+            .is_none());
+        assert_eq!(
+            started.observe(Ok(vec![42]), start + Duration::from_millis(210)),
+            Some(vec![42])
+        );
+    }
+
+    #[test]
+    fn macos_successful_launch_receipt_without_gui_recovers_once_without_new_instance() {
+        use super::{launch_macos_with_observation, DesktopProcessObservation};
+        let mut launches = Vec::new();
+        let mut checks = 0;
+        let result = launch_macos_with_observation(
+            |new_instance| {
+                launches.push(new_instance);
+                Ok(true)
+            },
+            |accepted| {
+                assert!(accepted);
+                checks += 1;
+                if checks == 1 {
+                    let mut empty = DesktopProcessObservation::new(true, Duration::ZERO);
+                    empty.observe(Ok(vec![]), Instant::now());
+                    Err(empty)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(launches, vec![true, false]);
+    }
+
+    #[test]
+    fn macos_unknown_or_starting_process_does_not_trigger_another_launch() {
+        use super::{launch_macos_with_observation, DesktopProcessObservation};
+        for sample in [Err("temporary process query failure".into()), Ok(vec![42])] {
+            let mut launches = 0;
+            let result = launch_macos_with_observation(
+                |_| {
+                    launches += 1;
+                    Ok(true)
+                },
+                |_| {
+                    let mut uncertain =
+                        DesktopProcessObservation::new(true, Duration::from_secs(1));
+                    uncertain.observe(sample.clone(), Instant::now());
+                    Err(uncertain)
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(launches, 1);
+        }
+    }
+
+    #[test]
+    fn macos_launch_error_with_a_confirmed_gui_is_success_and_recovery_is_bounded() {
+        use super::{launch_macos_with_observation, DesktopProcessObservation};
+        let mut launches = 0;
+        assert!(launch_macos_with_observation(
+            |_| {
+                launches += 1;
+                Err("late open failure".into())
+            },
+            |accepted| {
+                assert!(!accepted);
+                Ok(())
+            },
+        )
+        .is_ok());
+        assert_eq!(launches, 1);
+        launches = 0;
+        assert!(launch_macos_with_observation(
+            |_| {
+                launches += 1;
+                Ok(true)
+            },
+            |_| {
+                let mut empty = DesktopProcessObservation::new(true, Duration::ZERO);
+                empty.observe(Ok(vec![]), Instant::now());
+                Err(empty)
+            },
+        )
+        .is_err());
+        assert_eq!(launches, 2);
+    }
+
+    #[test]
+    fn macos_recovery_keeps_configuration_scope_and_detached_streams() {
+        use super::macos_launch_arguments;
+        let first = macos_launch_arguments("/Applications/ChatGPT.app", "/tmp/配置 空间", true);
+        let retry = macos_launch_arguments("/Applications/ChatGPT.app", "/tmp/配置 空间", false);
+        assert_eq!(first[0], "-n");
+        assert_eq!(&first[1..], retry.as_slice());
+        assert!(retry
+            .windows(2)
+            .any(|args| args == ["--env", "CODEX_HOME=/tmp/配置 空间"]));
+        for stream in ["--stdin", "--stdout", "--stderr"] {
+            assert!(retry.windows(2).any(|args| args == [stream, "/dev/null"]));
+        }
+        assert!(!retry
+            .iter()
+            .any(|arg| arg.starts_with("--remote-debugging")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "manually exercises LaunchServices with a disposable test app, never an official client"]
+    fn macos_launch_services_fixture_survives_launcher_exit_and_restarts() {
+        use super::{
+            launch_macos_codex_app, macos_main_process_ids, macos_process_metadata,
+            run_command_with_timeout, wait_macos_stopped, MacosCodexApp,
+        };
+        use serde_json::{json, Value};
+        use std::process::Command;
+        const TEST: &str =
+            "platform::tests::macos_launch_services_fixture_survives_launcher_exit_and_restarts";
+        let worker = std::env::var_os("CODEXX_FIXTURE_ROOT").map(std::path::PathBuf::from);
+        let temporary = worker.is_none().then(|| tempfile::tempdir().unwrap());
+        let root = worker
+            .clone()
+            .unwrap_or_else(|| temporary.as_ref().unwrap().path().to_owned())
+            .canonicalize()
+            .unwrap();
+        let app = MacosCodexApp {
+            bundle_path: root.join("RestartFixture.app"),
+            executable_path: root.join("RestartFixture.app/Contents/MacOS/CodexXRestartFixture"),
+            bundle_id: "dev.codexx.restart-fixture".into(),
+            app_name: "Codex-X restart fixture".into(),
+        };
+        let home = root.join("配置 空间");
+        if worker.is_some() {
+            assert_eq!(
+                fs::read_to_string(root.join("fixture-marker")).unwrap(),
+                "disposable restart fixture"
+            );
+            let own = macos_process_metadata(std::process::id(), None).unwrap();
+            launch_macos_codex_app(&app, &home).unwrap();
+            fs::write(
+                root.join("launcher.json"),
+                json!({"pid":std::process::id(),"group":own.group}).to_string(),
+            )
+            .unwrap();
+            return;
+        }
+        fs::create_dir_all(app.executable_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::write(root.join("fixture-marker"), "disposable restart fixture").unwrap();
+        fs::write(app.bundle_path.join("Contents/Info.plist"), format!(
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>dev.codexx.restart-fixture.p{}</string><key>CFBundleExecutable</key><string>CodexXRestartFixture</string><key>CFBundleName</key><string>Codex-X restart fixture</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/></dict></plist>", std::process::id())).unwrap();
+        let source = root.join("fixture.m");
+        fs::write(&source, include_str!("testdata/macos-restart-fixture.m")).unwrap();
+        let built = Command::new("/usr/bin/xcrun")
+            .args(["clang", "-fobjc-arc", "-framework", "AppKit"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&app.executable_path)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let result = std::panic::catch_unwind(|| {
+            let mut launcher = Command::new(std::env::current_exe().unwrap());
+            launcher
+                .args([TEST, "--ignored", "--exact", "--nocapture"])
+                .env("CODEXX_FIXTURE_ROOT", &root)
+                .env("__CFBundleIdentifier", "dev.codexx.fake-manager")
+                .env("TAURI_FIXTURE_STATE", "must-not-leak")
+                .env("NODE_OPTIONS", "--fixture-must-not-leak")
+                .env("RESTART_FIXTURE_PROVIDER", "synthetic-value")
+                .env("CODEX_HOME", root.join("wrong-config-scope"));
+            let (_, output) = run_command_with_timeout(launcher, None, Duration::from_secs(30))
+                .expect("disposable launcher completes and releases its pipes");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let launched: Value =
+                serde_json::from_slice(&fs::read(root.join("launcher.json")).unwrap()).unwrap();
+            let state: Value =
+                serde_json::from_slice(&fs::read(home.join("started.json")).unwrap()).unwrap();
+            let first_pid = state["pid"].as_u64().unwrap() as u32;
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(
+                macos_main_process_ids(&app.executable_path, None).unwrap(),
+                vec![first_pid]
+            );
+            let actual = macos_process_metadata(first_pid, None).unwrap();
+            assert_ne!(actual.parent as u64, launched["pid"].as_u64().unwrap());
+            assert_ne!(actual.group as u64, launched["group"].as_u64().unwrap());
+            assert_eq!(state["home"].as_str(), home.to_str());
+            for key in [
+                "providerPreserved",
+                "managerIdentityAbsent",
+                "managerStateAbsent",
+                "nodeOptionsAbsent",
+            ] {
+                assert_eq!(state[key], true, "{key}");
+            }
+            fs::write(home.join("quit"), "exit only this fixture").unwrap();
+            wait_macos_stopped(&app.executable_path).unwrap();
+            fs::remove_file(home.join("quit")).unwrap();
+            fs::remove_file(home.join("started.json")).unwrap();
+            launch_macos_codex_app(&app, &home).unwrap();
+            let second: Value =
+                serde_json::from_slice(&fs::read(home.join("started.json")).unwrap()).unwrap();
+            let second_pid = second["pid"].as_u64().unwrap() as u32;
+            assert_ne!(first_pid, second_pid);
+            assert_eq!(
+                macos_main_process_ids(&app.executable_path, None).unwrap(),
+                vec![second_pid]
+            );
+            assert_eq!(second["home"].as_str(), home.to_str());
+            println!("LaunchServices fixture: launcher exited, client remained independent; config scope and environment verified; quit/relaunch confirmed with a new PID.");
+        });
+        // Cleanup is restricted to this generated executable and bundle path.
+        let _ = fs::write(home.join("quit"), "exit only this fixture");
+        if wait_macos_stopped(&app.executable_path).is_err() {
+            for pid in macos_main_process_ids(&app.executable_path, None).unwrap_or_default() {
+                let _ = Command::new("/bin/kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status();
+            }
+            let _ = wait_macos_stopped(&app.executable_path);
+        }
+        let _ = Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+            .arg("-u").arg(&app.bundle_path).output();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]
