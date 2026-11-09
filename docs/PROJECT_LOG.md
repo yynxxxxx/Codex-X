@@ -8,7 +8,7 @@
 
 日志不得包含 Token、认证文件内容、用户数据或仅适用于某台电脑的隐私路径。
 
-## 2026-11-09：v0.3.31 验证与发布准备
+## 2026-11-09：v0.3.31 发布与验证
 
 - Issue #71 的 `client_metadata` 已在 `489ba67` 修复并包含于 v0.3.30。保留现有三种转换协议剥离该字段、原生 Responses 保留原字节的回归，本次不重复改动该逻辑。
 - Issue #77 已用正式 v0.3.30 原生程序和独立配置/管理数据库复现。手动 TOML 编辑选择 `env_key` 时，保存命令清除表单携带的旧密钥及内嵌 Bearer；普通 API Key 表单编辑保留原有优先级，混合编辑按最后一次鉴权编辑处理。热保存、切换往返、非活动配置及非法变量名称均有回归；连通性和模型请求从运行环境解析变量，不落库。
@@ -17,7 +17,10 @@
 - 本地类型检查、前端回归与 renderer 构建通过；WSL helper 的 6 项回归和更新清单校验器的 8 项回归通过。清单校验测试改用当前 Python 解释器，修复 Windows 没有 `python3` 命令时无法运行的问题。
 - [Windows 候选验证](https://github.com/yynxxxxx/Codex-X/actions/runs/42569286121) 全部成功：810 项 Rust 通过、1 项手动基准忽略；195 项 Node 通过、2 项依赖已安装 SDK 的测试跳过；WSL helper 6 项通过。干净用户安装和覆盖更新、真实 v0.3.20 系统 MSI 迁移及后续更新、卸载返回 3010 后无需重启继续更新三组验收通过，配置哨兵保持不变；同时验证旧目录、子目录及 junction 重叠安装会被拒绝。
 - 本机 Edge 中的实际前端交互 6/6 通过，覆盖活动与非活动供应商的三种 TOML/API Key 编辑顺序及其他配置保留。候选原生程序已从该运行下载，但 Windows Code Integrity 事件 3077（Smart App Control 的 VerifiedAndReputableDesktop 策略）拒绝启动未进行 Windows 发布者签名的新程序；因此本机原生保存、切换、网络鉴权和名称显示脚本尚未执行，不能写为本机验收通过。未修改系统安全策略，现有安装仅做程序文件备份，未被候选替换。
-- 候选流水线保留 release 程序和安装包，便于本地隔离验收。NSIS 工具下载加入有限重试；历史 MSI 下载遇 504 时可回退 GitHub 资产 API，继续核验原固定 SHA256。正式发布仍使用原有四平台构建、更新签名及安装/公证验证；正式发布结果将在完成后记录。
+- 候选流水线保留 release 程序和安装包，便于本地隔离验收。NSIS 工具下载加入有限重试；历史 MSI 下载遇 504 时可回退 GitHub 资产 API，继续核验原固定 SHA256。
+- [v0.3.31 已公开发布](https://github.com/yynxxxxx/Codex-X/releases/tag/v0.3.31)。[正式四平台构建](https://github.com/yynxxxxx/Codex-X/actions/runs/42570814184) 的 Linux、两种 macOS 和 Windows job 全部成功；两种 macOS 另行通过签名、公证及 DMG 校验，Windows 实际安装、旧 MSI 迁移和便携包生成通过。公开资产共 10 项，更新清单包含 11 个平台条目。
+- 原发布 job 在公开后的最后一次 Range 下载探测遇到 504，因此该运行整体保留失败记录；不能将其写成整个原流水线成功。本机复现三个标准地址的 Range GET 504，而同六个资产的官方 API Range 均可读。新增[独立只读复核](https://github.com/yynxxxxx/Codex-X/actions/runs/42573048654)，实际完整下载并核对所有文件大小和 GitHub SHA256，结果成功：六个安装包均从标准公开地址获取并校验通过，`latest.json` 使用官方 API 回退，未重写任何已发布资产。
+- 正式 Windows 安装包实际下载后，SHA256 与 GitHub digest 一致，并使用 tag 中的公钥通过 Ed25519/BLAKE2b 文件签名和 trusted-comment 签名核验，公钥 ID 为 `6BA0DBDE56BB0A5E`。这是 Tauri 更新签名，不是 Windows Authenticode 发布者签名。正式便携程序在本机同样因 Smart App Control 被拒绝启动；本机仍保留 v0.3.30，程序文件与已验证的旧版备份一致，未声称完成本机原生升级验收。
 
 ## 2026-10-09：在线更新主通道故障后的自动恢复
 
