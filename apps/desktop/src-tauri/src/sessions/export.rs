@@ -586,7 +586,11 @@ pub(crate) fn export_codex_sessions_inner(
             "openai",
             usize::MAX,
         )?;
-        super::names::apply_display_names(&codex_dir, &discovery.related_paths, &mut sessions);
+        super::names::apply_display_names(
+            &codex_dir,
+            &discovery.active_first_related_paths(),
+            &mut sessions,
+        );
         (sessions, warnings)
     };
     let sessions: HashMap<_, _> = sessions
@@ -748,6 +752,54 @@ mod tests {
         drop(input);
         fs::remove_file(path).unwrap();
         compressed
+    }
+
+    #[test]
+    fn current_thread_names_win_over_older_databases_in_browsing_sync_and_export() {
+        let fixture = Fixture::new();
+        fixture.add(
+            "shared",
+            "Initial prompt",
+            &[event("user", "Initial prompt")],
+            false,
+        );
+        Connection::open(&fixture.database).unwrap().execute_batch("ALTER TABLE threads ADD COLUMN name TEXT; UPDATE threads SET name='Current session name';").unwrap();
+        for (filename, name) in [
+            ("state_4.sqlite", "Old state name"),
+            ("codex-dev.db", "Old desktop name"),
+        ] {
+            let legacy = fixture.codex.join(filename);
+            fs::copy(&fixture.database, &legacy).unwrap();
+            Connection::open(legacy)
+                .unwrap()
+                .execute("UPDATE threads SET name=?1", [name])
+                .unwrap();
+        }
+        let discovery = discover_sqlite_databases(&fixture.codex);
+        assert_eq!(discovery.active_paths, vec![fixture.database.clone()]);
+        assert_ne!(discovery.related_paths[0], fixture.database);
+        assert_eq!(discovery.active_first_related_paths()[0], fixture.database);
+
+        let (sessions, _) = super::super::storage::list_session_previews(
+            &fixture.codex,
+            &RolloutScan::default(),
+            "openai",
+            100,
+        )
+        .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "Current session name");
+        let status = super::super::sync::session_sync_status_inner(
+            Some(fixture.codex.display().to_string()),
+            Some("openai".into()),
+        )
+        .unwrap();
+        assert_eq!(status.sessions[0].title, "Current session name");
+        let result = fixture.export(&["shared"], "current-name.md").unwrap();
+        assert_eq!(result.failed_sessions, 0);
+        assert!(fs::read_to_string(result.path)
+            .unwrap()
+            .starts_with("# Current session name\n"));
     }
 
     #[test]

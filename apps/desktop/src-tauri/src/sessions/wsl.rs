@@ -17,13 +17,29 @@ struct WslTarget {
     linux_home: String,
 }
 
-fn wsl_target(path: &Path) -> Option<WslTarget> {
+fn normalized_unc_path(path: &Path) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
-    let normalized = if normalized.to_ascii_lowercase().starts_with("//?/unc/") {
+    if normalized.to_ascii_lowercase().starts_with("//?/unc/") {
         format!("//{}", &normalized[8..])
     } else {
         normalized
-    };
+    }
+}
+
+// Guard writes by server identity alone. A malformed or aliased target must
+// fail the strict preview parser rather than fall back to Windows SQLite.
+fn has_wsl_server(path: &Path) -> bool {
+    let normalized = normalized_unc_path(path);
+    normalized
+        .strip_prefix("//")
+        .and_then(|unc| unc.split('/').next())
+        .is_some_and(|server| {
+            server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$")
+        })
+}
+
+fn wsl_target(path: &Path) -> Option<WslTarget> {
+    let normalized = normalized_unc_path(path);
     let mut parts = normalized.strip_prefix("//")?.split('/');
     let server = parts.next()?;
     if !server.eq_ignore_ascii_case("wsl.localhost") && !server.eq_ignore_ascii_case("wsl$") {
@@ -55,7 +71,25 @@ fn wsl_target(path: &Path) -> Option<WslTarget> {
 }
 
 pub(super) fn is_wsl_path(path: &Path) -> bool {
-    cfg!(target_os = "windows") && wsl_target(path).is_some()
+    cfg!(target_os = "windows") && selected_wsl_directory(path).is_some()
+}
+
+fn selected_wsl_directory(path: &Path) -> Option<PathBuf> {
+    if has_wsl_server(path) {
+        return Some(path.to_path_buf());
+    }
+    // A parent directory can be a junction even when CODEX_HOME itself is a
+    // normal directory. Resolve the whole existing path, not just its last item.
+    #[cfg(target_os = "windows")]
+    {
+        path.canonicalize()
+            .ok()
+            .filter(|canonical| has_wsl_server(canonical))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
 }
 
 pub(super) fn ensure_writable(codex_dir: &Path) -> Result<()> {
@@ -113,8 +147,10 @@ pub(super) fn session_previews(
     target_provider: &str,
     limit: usize,
 ) -> Result<WslSessions> {
-    let target =
-        wsl_target(codex_dir).ok_or_else(|| CodexxError::Config("WSL 数据目录格式无效".into()))?;
+    let selected_directory = selected_wsl_directory(codex_dir)
+        .ok_or_else(|| CodexxError::Config("WSL 数据目录格式无效".into()))?;
+    let target = wsl_target(&selected_directory)
+        .ok_or_else(|| CodexxError::Config("WSL 数据目录格式无效".into()))?;
     let temporary = tempfile::Builder::new()
         .prefix("codex-x-wsl-read-")
         .tempdir()
@@ -306,15 +342,39 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn wsl_mutations_fail_before_creating_locks_or_opening_databases() {
-        let root = Path::new(r"\\wsl.localhost\Nonexistent-Fixture\home\fixture\.codex");
-        assert!(ensure_writable(root)
-            .unwrap_err()
-            .to_string()
-            .contains("只读"));
-        assert!(super::super::sync::acquire_session_maintenance_lock(root)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("只读"));
+        for root in [
+            r"\\wsl.localhost\Nonexistent-Fixture\home\fixture\.codex",
+            r"\\wsl.localhost\Nonexistent-Fixture\home\fixture\.\.codex",
+            r"\\wsl$\Nonexistent-Fixture\home\fixture\parent\..\.codex",
+            r"\\?\UNC\wsl.localhost\Nonexistent-Fixture\home\fixture\..\.codex",
+        ] {
+            let root = Path::new(root);
+            assert!(ensure_writable(root)
+                .unwrap_err()
+                .to_string()
+                .contains("只读"));
+            assert!(super::super::sync::acquire_session_maintenance_lock(root)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("只读"));
+        }
+    }
+
+    #[test]
+    fn invalid_wsl_targets_stay_identified_as_wsl_for_write_guards() {
+        for path in [
+            r"\\wsl.localhost\Ubuntu\home\fixture\.\.codex",
+            r"\\wsl$\Ubuntu\home\fixture\parent\..\.codex",
+            r"\\?\UNC\WSL.LOCALHOST\Ubuntu\home\fixture\..\.codex",
+            r"\\wsl$\--exec\home\.codex",
+            r"\\wsl$\Ubuntu",
+        ] {
+            assert!(has_wsl_server(Path::new(path)), "{path}");
+            assert!(wsl_target(Path::new(path)).is_none(), "{path}");
+        }
+        assert!(!has_wsl_server(Path::new(
+            r"\\wsl.localhost.example\share\.codex"
+        )));
     }
 }

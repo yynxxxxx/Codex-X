@@ -742,6 +742,10 @@ impl SqliteDiscovery {
     pub(super) fn active_first_session_paths(&self) -> Vec<PathBuf> {
         primary_paths_first(&self.active_paths, &self.session_paths)
     }
+
+    pub(super) fn active_first_related_paths(&self) -> Vec<PathBuf> {
+        primary_paths_first(&self.active_paths, &self.related_paths)
+    }
 }
 
 #[derive(Debug)]
@@ -1764,7 +1768,11 @@ pub(crate) fn list_session_previews(
         target_provider,
         limit,
     )?;
-    super::names::apply_display_names(codex_dir, &discovery.related_paths, &mut sessions);
+    super::names::apply_display_names(
+        codex_dir,
+        &discovery.active_first_related_paths(),
+        &mut sessions,
+    );
     Ok((sessions, warnings))
 }
 

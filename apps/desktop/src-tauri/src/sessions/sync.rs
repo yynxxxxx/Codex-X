@@ -262,7 +262,11 @@ pub(super) fn session_sync_status_with_discovery(
             });
         }
     };
-    super::names::apply_display_names(codex_dir, &discovery.related_paths, &mut sessions);
+    super::names::apply_display_names(
+        codex_dir,
+        &discovery.active_first_related_paths(),
+        &mut sessions,
+    );
     let mut scan_failures = scan.scan_failures;
     scan_failures.extend(session_failures);
     let mut seen_failures = HashSet::new();

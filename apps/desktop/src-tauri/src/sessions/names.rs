@@ -57,7 +57,8 @@ fn database_names(
     id_column: &str,
     name_column: &str,
 ) -> HashMap<String, String> {
-    let mut names = HashMap::new();
+    let mut names: HashMap<String, (String, Option<f64>)> = HashMap::new();
+    let prefer_latest_catalog = table == "local_thread_catalog";
     let ids = ids.iter().collect::<Vec<_>>();
     for path in paths {
         let Ok(conn) = Connection::open_with_flags(
@@ -76,32 +77,55 @@ fn database_names(
         if !columns.contains(id_column) || !columns.contains(name_column) {
             continue;
         }
-        let order = if columns.contains("source_updated_at") {
+        let source_updated_at = if prefer_latest_catalog && columns.contains("source_updated_at") {
+            "source_updated_at"
+        } else {
+            "NULL"
+        };
+        let order = if prefer_latest_catalog && columns.contains("source_updated_at") {
             " ORDER BY source_updated_at DESC"
         } else {
             ""
         };
         for chunk in ids.chunks(400) {
             let query = format!(
-                "SELECT \"{id_column}\", \"{name_column}\" FROM \"{table}\" WHERE \"{id_column}\" IN ({}){order}",
+                "SELECT \"{id_column}\", \"{name_column}\", {source_updated_at} FROM \"{table}\" WHERE \"{id_column}\" IN ({}){order}",
                 vec!["?"; chunk.len()].join(",")
             );
             let Ok(mut statement) = conn.prepare(&query) else {
                 continue;
             };
             let Ok(rows) = statement.query_map(params_from_iter(chunk.iter()), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<f64>>(2)
+                        .ok()
+                        .flatten()
+                        .filter(|value| value.is_finite()),
+                ))
             }) else {
                 continue;
             };
-            for (id, name) in rows.flatten() {
+            for (id, name, updated_at) in rows.flatten() {
                 if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
-                    names.entry(id).or_insert_with(|| name.trim().to_string());
+                    let replace = names.get(&id).is_none_or(|(_, previous_time)| {
+                        prefer_latest_catalog
+                            && updated_at.is_some_and(|time| {
+                                previous_time.is_none_or(|previous| time > previous)
+                            })
+                    });
+                    if replace {
+                        names.insert(id, (name.trim().to_string(), updated_at));
+                    }
                 }
             }
         }
     }
     names
+        .into_iter()
+        .map(|(id, (name, _))| (id, name))
+        .collect()
 }
 
 pub(super) fn apply_display_names(
@@ -182,5 +206,35 @@ mod tests {
         let names = index_names(directory.path(), &HashSet::from(["wanted".into()]));
         assert_eq!(names["wanted"], "Valid name");
         assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn catalogs_choose_the_newest_source_timestamp_across_databases_and_active_first_on_ties() {
+        let directory = tempfile::tempdir().unwrap();
+        let active = directory.path().join("state_5.sqlite");
+        let legacy = directory.path().join("codex-dev.db");
+        Connection::open(&active).unwrap().execute_batch("CREATE TABLE threads(id TEXT, title TEXT); INSERT INTO threads VALUES ('newest','Initial prompt'),('tied','Initial prompt'); CREATE TABLE local_thread_catalog(thread_id TEXT, display_title TEXT, source_updated_at INTEGER); INSERT INTO local_thread_catalog VALUES ('newest','Older active catalog',1),('tied','Active catalog wins tie',7);").unwrap();
+        Connection::open(&legacy).unwrap().execute_batch("CREATE TABLE local_thread_catalog(thread_id TEXT, display_title TEXT, source_updated_at INTEGER); INSERT INTO local_thread_catalog VALUES ('newest','Latest catalog title',9),('tied','Legacy catalog loses tie',7);").unwrap();
+        let discovery = super::super::storage::discover_sqlite_databases(directory.path());
+        assert_eq!(discovery.active_paths, vec![active.clone()]);
+        assert_eq!(discovery.active_first_related_paths()[0], active);
+        let (mut sessions, _) = super::super::storage::list_session_previews_with_paths(
+            &discovery.active_paths,
+            &super::super::types::RolloutScan::default(),
+            "openai",
+            100,
+        )
+        .unwrap();
+        apply_display_names(
+            directory.path(),
+            &discovery.active_first_related_paths(),
+            &mut sessions,
+        );
+        let names = sessions
+            .into_iter()
+            .map(|session| (session.id, session.title))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(names["newest"], "Latest catalog title");
+        assert_eq!(names["tied"], "Active catalog wins tie");
     }
 }
