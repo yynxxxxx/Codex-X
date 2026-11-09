@@ -37,6 +37,38 @@ foreach ($case in $cases) {
   }
   Write-Host "Passed: $($case.Name)"
 }
+# Exercise the actual elevated Store flow with mocked activation only. These
+# fixtures never contact Explorer or launch/stop a desktop application.
+$storeStart = Constant 'START_WITH_DESKTOP_SHELL'
+$storeRestart = Constant 'ELEVATED_STORE_RESTART'
+$storeCases = @(
+  @{Name='elevated_store_restart_keeps_client_running_when_broker_preflight_fails';Expected=@{handled=$true;ok=$false;afterAttempt=$false;error='CODEXX_STORE_BROKER_UNAVAILABLE: fixture: no same-user unelevated shell'}},
+  @{Name='elevated_store_restart_activates_verified_identity_after_preflight_and_stop';Expected=@{handled=$true;ok=$true;wasRunning=$true;pid=4242}},
+  @{Name='elevated_store_activation_failure_reports_that_close_already_started';Expected=@{handled=$true;ok=$false;afterAttempt=$true;error='fixture activation failed after stop'}},
+  @{Name='elevated_store_start_failure_without_an_old_process_still_requires_observation';Expected=@{handled=$true;ok=$false;afterAttempt=$true;error='fixture activation confirmation was delayed'}},
+  @{Name='unelevated_store_restart_uses_existing_activation_path';Expected=@{handled=$false}}
+)
+foreach ($case in $storeCases) {
+  $start=$source.IndexOf('fn '+$case.Name+'(')
+  if ($start -lt 0) { throw "Missing Store fixture: $($case.Name)" }
+  $match=[regex]::Match($source.Substring($start), '(?s)restart_fixture\(\s*r#"(.*?)"#,\s*(true|false)\s*,?\s*\)')
+  if (-not $match.Success) { throw "Cannot extract Store fixture: $($case.Name)" }
+  $result = & {
+    $data=[pscustomobject]@{app=[pscustomobject]@{executable='fixture.exe';bundleId='OpenAI.Codex_2p2nqsd0c76g0!App'}}
+    . ([scriptblock]::Create($common))
+    . ([scriptblock]::Create($stop))
+    . ([scriptblock]::Create($storeStart))
+    . ([scriptblock]::Create($match.Groups[1].Value))
+    . ([scriptblock]::Create($storeRestart))
+  }
+  $actual = ($result -join "`n") | ConvertFrom-Json
+  foreach ($key in $case.Expected.Keys) {
+    $left=ConvertTo-Json -InputObject $actual.$key -Compress
+    $right=ConvertTo-Json -InputObject $case.Expected[$key] -Compress
+    if ($left -cne $right) { throw "$($case.Name): $key returned $left, expected $right" }
+  }
+  Write-Host "Passed: $($case.Name)"
+}
 # Exercise actual limited-query Windows APIs only against this test host itself.
 . ([scriptblock]::Create($common))
 EnsureProcessApi

@@ -396,16 +396,18 @@ function StartWithDesktopShell($app,$shell) {
 const ELEVATED_STORE_RESTART: &str = r#"
 if (-not (IsElevated)) { Emit @{handled=$false}; return }
 $script:CodexCloseStarted=$false
+$script:CodexStartAttempted=$false
 try {
   ValidateApp $data.app $true
   # Acquire and validate the unelevated broker before stopping anything.
   try { $shell=DesktopShell } catch { throw ('CODEXX_STORE_BROKER_UNAVAILABLE: '+$_.Exception.Message) }
   $wasRunning=@(AppProcesses $data.app.executable).Count -gt 0
   StopDesktop $data.app $true
+  $script:CodexStartAttempted=$true
   $started=StartWithDesktopShell $data.app $shell
   Emit @{handled=$true;ok=$true;wasRunning=$wasRunning;pid=$started.pid}
 } catch {
-  Emit @{handled=$true;ok=$false;afterClose=$script:CodexCloseStarted;error=$_.Exception.Message}
+  Emit @{handled=$true;ok=$false;afterAttempt=($script:CodexCloseStarted -or $script:CodexStartAttempted);error=$_.Exception.Message}
 }
 "#;
 
@@ -510,21 +512,23 @@ pub(crate) fn pids(app: &WindowsDesktopApp) -> Result<Vec<u32>, String> {
 }
 
 struct StopFailure {
-    after_close: Option<bool>,
+    // false: no close/activation was attempted; true: either was attempted;
+    // None: the command outcome is unknown (for example a runner timeout).
+    after_attempt: Option<bool>,
     message: String,
 }
 
 fn stop_desktop(app: &WindowsDesktopApp) -> Result<(), StopFailure> {
     let result = powershell(
-        &format!("{STOP_DESKTOP}\nValidateApp $data.app; try {{ StopDesktop $data.app; Emit @{{ok=$true}} }} catch {{ Emit @{{ok=$false;afterClose=$script:CodexCloseStarted;error=$_.Exception.Message}} }}"),
+        &format!("{STOP_DESKTOP}\nValidateApp $data.app; try {{ StopDesktop $data.app; Emit @{{ok=$true}} }} catch {{ Emit @{{ok=$false;afterAttempt=$script:CodexCloseStarted;error=$_.Exception.Message}} }}"),
         json!({"app":app}),
         Duration::from_secs(20),
-    ).map_err(|message| StopFailure { after_close: None, message })?;
+    ).map_err(|message| StopFailure { after_attempt: None, message })?;
     if result["ok"].as_bool() == Some(true) {
         return Ok(());
     }
     Err(StopFailure {
-        after_close: result["afterClose"].as_bool(),
+        after_attempt: result["afterAttempt"].as_bool(),
         message: operation_error(
             result["error"]
                 .as_str()
@@ -799,7 +803,7 @@ fn recover_restart(
     mut no_processes: impl FnMut() -> Result<bool, String>,
     mut start_once: impl FnMut() -> Result<u32, String>,
 ) -> Result<(), String> {
-    if failure.after_close == Some(false) {
+    if failure.after_attempt == Some(false) {
         return Err(format!("重启准备失败，客户端未被关闭：{}", failure.message));
     }
     match current_main() {
@@ -839,7 +843,7 @@ fn recover_restart(
                 }
             }
             Err(format!(
-                "客户端已退出，但重新打开未完成。{}；恢复启动：{recovery}",
+                "客户端重新打开未完成。{}；恢复启动：{recovery}",
                 failure.message
             ))
         }
@@ -863,13 +867,13 @@ pub(crate) fn restart(home: &Path) -> Result<(String, bool), String> {
             other => {
                 let failure = match other {
                     Ok(value) => StopFailure {
-                        after_close: value["afterClose"].as_bool(),
+                        after_attempt: value["afterAttempt"].as_bool(),
                         message: operation_error(
                             value["error"].as_str().unwrap_or("未收到客户端重启结果"),
                         ),
                     },
                     Err(message) => StopFailure {
-                        after_close: None,
+                        after_attempt: None,
                         message,
                     },
                 };
@@ -889,7 +893,7 @@ pub(crate) fn restart(home: &Path) -> Result<(String, bool), String> {
         Ok(()) => match launch(&app, Some(home), None) {
             Ok(_) => return Ok((app.name, was_running)),
             Err(message) => StopFailure {
-                after_close: Some(true),
+                after_attempt: Some(true),
                 message,
             },
         },
@@ -910,9 +914,9 @@ mod recovery_tests {
     use super::*;
     use std::cell::Cell;
 
-    fn failure(after_close: Option<bool>) -> StopFailure {
+    fn failure(after_attempt: Option<bool>) -> StopFailure {
         StopFailure {
-            after_close,
+            after_attempt,
             message: "fixture failure".into(),
         }
     }
@@ -1022,6 +1026,18 @@ mod recovery_tests {
         );
         assert!(result.is_ok());
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn delayed_store_start_with_no_original_process_accepts_observed_main() {
+        assert!(recover_restart(
+            &[],
+            failure(Some(true)),
+            || Ok(Some(20)),
+            || panic!("already started"),
+            || panic!("must not duplicate activation")
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1209,7 +1225,7 @@ function StopDesktop($app) { $global:stopped=$true }
 "#,
             true,
         );
-        assert_eq!(result["afterClose"], false);
+        assert_eq!(result["afterAttempt"], false);
         assert_eq!(result["ok"], false);
         assert_eq!(
             result["error"],
@@ -1270,8 +1286,30 @@ function StartWithDesktopShell { throw 'fixture activation failed after stop' }
         );
         assert_eq!(result["handled"], true);
         assert_eq!(result["ok"], false);
-        assert_eq!(result["afterClose"], true);
+        assert_eq!(result["afterAttempt"], true);
         assert_eq!(result["error"], "fixture activation failed after stop");
+    }
+
+    #[test]
+    fn elevated_store_start_failure_without_an_old_process_still_requires_observation() {
+        let result = restart_fixture(
+            r#"
+function IsElevated { $true }
+function ValidateApp { }
+function DesktopShell { [pscustomobject]@{} }
+function AppProcesses { }
+function StopDesktop { $script:CodexCloseStarted=$false }
+function StartWithDesktopShell { throw 'fixture activation confirmation was delayed' }
+"#,
+            false,
+        );
+        assert_eq!(result["handled"], true);
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["afterAttempt"], true);
+        assert_eq!(
+            result["error"],
+            "fixture activation confirmation was delayed"
+        );
     }
 
     #[test]
