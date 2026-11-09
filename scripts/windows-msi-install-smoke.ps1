@@ -35,10 +35,6 @@ public static class CodexXMsiVerification {
   public static extern uint MsiRecordGetStringW(uint record, uint field, StringBuilder value, ref uint length);
   [DllImport("msi.dll", ExactSpelling=true)]
   public static extern uint MsiCloseHandle(uint handle);
-  [DllImport("user32.dll")]
-  public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
-  [DllImport("user32.dll", SetLastError=true)]
-  public static extern bool PostThreadMessage(uint thread, uint message, UIntPtr wParam, IntPtr lParam);
 }
 '@
 function Related-Products {
@@ -148,17 +144,19 @@ function Start-App([string]$Exe) {
   $script:StartedApps += $process
   return Wait-AppWindow $process
 }
-function Request-AppExit($Process) {
-  # Quit the fixture's UI event loop as the updater does after handing off to
-  # msiexec. WM_CLOSE is unsuitable: the application intentionally hides to tray.
+function Stop-FixtureApp($Process) {
+  # This package test simulates the updater process exiting after handoff.
+  # It does not exercise the application's actual app.exit callback: WM_CLOSE
+  # hides to tray, and WM_QUIT is not a supported Tauri shutdown interface.
+  # Only a GUI process explicitly started/identified by this disposable test
+  # is stopped. Windows Installer is a sibling process and is never stopped.
+  if (-not ($StartedApps | Where-Object { $_.Id -eq $Process.Id })) {
+    throw 'Refusing to stop an untracked application process.'
+  }
   $Process.Refresh()
   if ($Process.HasExited) { return }
-  [uint32]$owner = 0
-  $thread = [CodexXMsiVerification]::GetWindowThreadProcessId($Process.MainWindowHandle, [ref]$owner)
-  if ($owner -ne $Process.Id -or $thread -eq 0 -or -not [CodexXMsiVerification]::PostThreadMessage($thread, 0x0012, [UIntPtr]::Zero, [IntPtr]::Zero)) {
-    throw 'Could not request exit from the test application UI thread.'
-  }
-  if (-not $Process.WaitForExit(20000)) { throw 'Test app did not exit after the UI quit request.' }
+  $Process.Kill()
+  if (-not $Process.WaitForExit(20000)) { throw 'The disposable test application did not exit.' }
 }
 function Wait-AutolaunchedApp([string]$Exe) {
   $deadline = [DateTime]::UtcNow.AddSeconds(45)
@@ -216,11 +214,11 @@ try {
   Invoke-Msi "/i `"$Installer`" /qn /norestart /L*v `"$Work\clean.log`""
   $exe = Assert-Installed
   $app = Start-App $exe
-  Request-AppExit $app
+  Stop-FixtureApp $app
   Invoke-Msi "/i `"$Installer`" /passive /norestart /L*v `"$Work\repeat.log`""
   $exe = Assert-Installed
   $app = Start-App $exe
-  Request-AppExit $app
+  Stop-FixtureApp $app
   Invoke-Msi "/x $ProductCode /qn /norestart /L*v `"$Work\remove-clean.log`""
   if (@(Related-Products).Count -ne 0) { throw 'Clean MSI uninstall retained product registration.' }
   Assert-Sentinels
@@ -246,23 +244,19 @@ try {
   $oldExe = Join-Path (Product-Info $LegacyProductCode 'InstallLocation') 'codex-x.exe'
   $oldApp = Start-App $oldExe
   $update = Start-Msi "/i `"$Installer`" /passive /norestart AUTOLAUNCHAPP=True /L*v `"$Work\upgrade.log`""
-  # Mirrors the updater's spawn-then-exit handoff without terminating msiexec.
-  Request-AppExit $oldApp
+  # Simulate the existing updater process exiting after the installation handoff.
+  Stop-FixtureApp $oldApp
   Wait-Msi $update
   $exe = Assert-Installed
   $newApp = Wait-AutolaunchedApp $exe
-  Request-AppExit $newApp
+  Stop-FixtureApp $newApp
   Assert-Sentinels
-  Write-Host "MSI $Version checks passed: registration guard, installation, repeat installation, historical upgrade, native startup and configuration preservation. Smart App Control trust was not assessed."
+  Write-Host "MSI $Version checks passed: registration guard, installation, repeat installation, historical upgrade, native startup and configuration preservation. Application exit callback and Smart App Control trust were not assessed."
 } finally {
   foreach ($process in $StartedApps) {
     $process.Refresh()
     if (-not $process.HasExited) {
-      try { Request-AppExit $process } catch {
-        # Only our explicitly tracked disposable GUI fixtures are terminated.
-        # Never stop Windows Installer or an untracked application process.
-        $process.Kill(); [void]$process.WaitForExit(10000)
-      }
+      Stop-FixtureApp $process
     }
   }
   foreach ($product in @(Related-Products)) {
