@@ -2,6 +2,16 @@
 
 记录 Codex-X 的新功能、体验改进和问题修复。
 
+## [v0.3.33] - 2026-11-09
+
+- 修复 Windows 重启 Codex/ChatGPT 时误报进程路径或权限错误，导致客户端关闭后没有重新打开的问题；操作失败时显示更清楚的原因。
+- 改善 macOS 重启时的状态确认和启动恢复，减少短暂延迟导致的失败，并避免重复打开客户端。
+
+**Windows 安装说明**
+
+- MSI 用户可直接在软件内检查更新。旧 EXE 用户请先卸载 EXE 版，保留应用数据，再安装 MSI，之后继续在线更新。
+- 如果提示“智能应用控制已阻止此应用”，确认安装包来自本仓库后，打开 **Windows 安全中心 → 应用和浏览器控制 → 智能应用控制设置 → 关闭**，再重新安装或启动。此操作会关闭该项系统防护。[微软设置说明](https://support.microsoft.com/zh-cn/windows/security/windows-security/app-browser-control-in-the-windows-security-app)
+
 ## [v0.3.32] - 2026-11-09
 
 - Windows 安装包统一为 MSI，支持软件内在线更新。

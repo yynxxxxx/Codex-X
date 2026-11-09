@@ -5,6 +5,12 @@ on:
     branches:
       - 'codex/windows-updater-*'
   workflow_dispatch:
+    inputs:
+      restart_only:
+        description: Run isolated Windows restart checks without rebuilding installers
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -14,8 +20,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  restart-fixtures:
+    name: Verify isolated desktop restart behavior
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Check production Windows PowerShell helpers
+        shell: powershell
+        run: ./scripts/test_windows_desktop_restart.ps1
+      - name: Check PowerShell 7 compatibility
+        shell: pwsh
+        run: ./scripts/test_windows_desktop_restart.ps1
+
   windows-installer:
     name: Verify Windows update migration
+    needs: restart-fixtures
+    if: ${{ !inputs.restart_only }}
     runs-on: windows-latest
     timeout-minutes: 45
     defaults:

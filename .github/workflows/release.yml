@@ -196,6 +196,11 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
+      - name: Verify Windows desktop restart process handling
+        if: matrix.platform == 'windows-latest'
+        shell: powershell
+        run: ./scripts/test_windows_desktop_restart.ps1
+
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
