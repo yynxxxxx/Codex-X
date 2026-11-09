@@ -9,7 +9,9 @@ on:
         type: string
 
 permissions:
-  contents: read
+  # GitHub only exposes draft releases to repository tokens with write access.
+  # This workflow downloads and tests assets; it never edits a release.
+  contents: write
 
 jobs:
   verify:
