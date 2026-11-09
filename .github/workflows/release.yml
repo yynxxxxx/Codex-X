@@ -177,7 +177,7 @@ jobs:
           - name: Windows x64
             platform: windows-latest
             macos: false
-            args: --bundles msi,nsis
+            args: --bundles msi
             asset_pattern: Codex-X-[version]-windows-x64[ext]
 
     steps:
@@ -364,16 +364,6 @@ jobs:
             echo "No updater signatures were generated" >&2
             exit 1
           fi
-
-      - name: Test Windows installation and legacy MSI migration
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $installers = @(Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -Filter '*.exe')
-          if ($installers.Count -ne 1) { throw 'Expected one NSIS installer.' }
-          ./scripts/windows-install-smoke.ps1 -Installer $installers[0].FullName
 
       - name: Test MSI installation, upgrade, and application launch
         if: matrix.platform == 'windows-latest'

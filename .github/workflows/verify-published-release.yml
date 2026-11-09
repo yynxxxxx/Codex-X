@@ -7,6 +7,11 @@ on:
         description: Published release tag to verify, for example v0.3.31
         required: true
         type: string
+      use_current_verifier:
+        description: Use current checks for explicitly revised release metadata
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -27,10 +32,10 @@ jobs:
               raise SystemExit("Invalid release tag")
           PY
 
-      - name: Checkout published tag
+      - name: Checkout selected verification rules
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: ${{ inputs.use_current_verifier && github.sha || format('refs/tags/{0}', inputs.tag) }}
           persist-credentials: false
 
       - name: Verify manifest and complete asset downloads

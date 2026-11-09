@@ -75,7 +75,7 @@ jobs:
         run: |
           Set-Content -Path "$env:RUNNER_TEMP\installer-check.json" -Value '{"bundle":{"createUpdaterArtifacts":false}}' -Encoding utf8
           for ($attempt = 1; $attempt -le 3; $attempt++) {
-            pnpm --dir apps/desktop tauri build --bundles msi,nsis --config "$env:RUNNER_TEMP\installer-check.json" --ci
+            pnpm --dir apps/desktop tauri build --bundles msi --config "$env:RUNNER_TEMP\installer-check.json" --ci
             $buildExitCode = $LASTEXITCODE
             if ($buildExitCode -eq 0) { break }
             if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
@@ -86,20 +86,11 @@ jobs:
         with:
           name: windows-candidate
           path: |
-            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
             apps/desktop/src-tauri/target/release/bundle/msi/*.msi
             apps/desktop/src-tauri/target/release/codex-x.exe
             THIRD_PARTY_NOTICES.md
           retention-days: 7
           if-no-files-found: error
-
-      - name: Test real MSI migration and subsequent updates
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $installers = @(Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis -Filter '*.exe')
-          if ($installers.Count -ne 1) { throw 'Expected one Windows installer.' }
-          ./scripts/windows-install-smoke.ps1 -Installer $installers[0].FullName
 
       - name: Test MSI installation, upgrade, and application launch
         env:

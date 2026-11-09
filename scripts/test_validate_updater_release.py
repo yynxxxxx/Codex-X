@@ -20,7 +20,7 @@ PLATFORM_ASSETS = {
     "darwin-x86_64": "Codex-X-intel.app.tar.gz",
     "darwin-x86_64-app": "Codex-X-intel.app.tar.gz",
     "windows-x86_64": "Codex-X.msi",
-    "windows-x86_64-nsis": "Codex-X.exe",
+    "windows-x86_64-nsis": "Codex-X.msi",
     "windows-x86_64-msi": "Codex-X.msi",
     "linux-x86_64": "Codex-X.AppImage",
     "linux-x86_64-deb": "Codex-X.deb",
@@ -133,18 +133,20 @@ class ValidateUpdaterReleaseTests(unittest.TestCase):
             )
         )
 
-    def test_restores_msi_default_without_changing_nsis_or_other_platforms(self) -> None:
+    def test_restores_all_windows_targets_without_changing_other_platforms(self) -> None:
         manifest = json.loads(self.manifest_path.read_text())
-        manifest["platforms"]["windows-x86_64"] = dict(manifest["platforms"]["windows-x86_64-nsis"])
+        for key in ("windows-x86_64", "windows-x86_64-nsis"):
+            manifest["platforms"][key]["url"] = draft_url("withdrawn-installer.exe")
+            manifest["platforms"][key]["signature"] = base64.b64encode(b"e" * 64).decode()
         original = manifest["platforms"]
         self.manifest_path.write_text(json.dumps(manifest))
         result = self.run_validator("--rewrite-download-urls", "--restore-windows-msi")
         self.assertEqual(result.returncode, 0, result.stderr)
         actual = json.loads(self.manifest_path.read_text())["platforms"]
         self.assertEqual(actual["windows-x86_64"], actual["windows-x86_64-msi"])
-        self.assertNotEqual(actual["windows-x86_64-msi"]["url"], actual["windows-x86_64-nsis"]["url"])
+        self.assertEqual(actual["windows-x86_64-msi"], actual["windows-x86_64-nsis"])
         for key, value in original.items():
-            if key != "windows-x86_64":
+            if not key.startswith("windows-"):
                 self.assertEqual(actual[key]["signature"], value["signature"])
                 self.assertEqual(actual[key]["url"].rsplit("/", 1)[1], value["url"].rsplit("/", 1)[1])
 
@@ -156,13 +158,16 @@ class ValidateUpdaterReleaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing signed MSI", result.stderr)
 
-    def test_restoration_keeps_nsis_update_channel_mandatory(self) -> None:
+    def test_restoration_adds_missing_windows_aliases_from_msi_source(self) -> None:
         manifest = json.loads(self.manifest_path.read_text())
         del manifest["platforms"]["windows-x86_64-nsis"]
+        del manifest["platforms"]["windows-x86_64"]
         self.manifest_path.write_text(json.dumps(manifest))
         result = self.run_validator("--rewrite-download-urls", "--restore-windows-msi")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("missing signed NSIS compatibility", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        actual = json.loads(self.manifest_path.read_text())["platforms"]
+        self.assertEqual(actual["windows-x86_64-msi"], actual["windows-x86_64-nsis"])
+        self.assertEqual(actual["windows-x86_64-msi"], actual["windows-x86_64"])
 
     def test_rejects_msi_signature_divergence(self) -> None:
         manifest = json.loads(self.manifest_path.read_text())
@@ -172,30 +177,32 @@ class ValidateUpdaterReleaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("same signed MSI installer", result.stderr)
 
-    def test_allows_distinct_signed_msi_and_nsis_packages(self) -> None:
+    def test_rejects_divergent_signature_on_historical_nsis_target(self) -> None:
         manifest = json.loads(self.manifest_path.read_text())
         manifest["platforms"]["windows-x86_64-nsis"]["signature"] = base64.b64encode(b"n" * 64).decode()
         self.manifest_path.write_text(json.dumps(manifest))
         result = self.run_validator("--rewrite-download-urls")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("all Windows updater keys must use the same signed MSI", result.stderr)
 
-    def test_rejects_exe_default_even_when_msi_key_exists(self) -> None:
+    def test_rejects_unreferenced_exe_assets_and_signature_assets(self) -> None:
+        original_assets = json.loads(self.assets_path.read_text())
+        for name in ("Codex-X.exe", "Codex-X.exe.sig", "CODEX-X.EXE", "CODEX-X.EXE.SIG"):
+            with self.subTest(name=name):
+                self.assets_path.write_text(json.dumps([*original_assets, {"name": name}]))
+                result = self.run_validator("--rewrite-download-urls", "--restore-windows-msi")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("EXE installer assets are forbidden", result.stderr)
+
+    def test_historical_nsis_target_requires_msi_even_if_other_asset_exists(self) -> None:
         manifest = json.loads(self.manifest_path.read_text())
-        manifest["platforms"]["windows-x86_64"] = dict(manifest["platforms"]["windows-x86_64-nsis"])
+        manifest["platforms"]["windows-x86_64-nsis"]["url"] = draft_url("Codex-X.deb")
         self.manifest_path.write_text(json.dumps(manifest))
         result = self.run_validator("--rewrite-download-urls")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("expected a .msi updater", result.stderr)
 
-    def test_rejects_msi_payload_for_installed_nsis_clients(self) -> None:
-        manifest = json.loads(self.manifest_path.read_text())
-        manifest["platforms"]["windows-x86_64-nsis"] = dict(manifest["platforms"]["windows-x86_64-msi"])
-        self.manifest_path.write_text(json.dumps(manifest))
-        result = self.run_validator("--rewrite-download-urls", "--restore-windows-msi")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("expected a .exe updater", result.stderr)
-
-    def test_requires_both_signature_assets_before_publishing(self) -> None:
+    def test_requires_msi_and_other_platform_signature_assets_before_publishing(self) -> None:
         result = self.run_validator("--rewrite-download-urls", "--require-signature-assets")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("signature asset is missing", result.stderr)

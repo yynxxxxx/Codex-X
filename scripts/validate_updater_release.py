@@ -18,27 +18,31 @@ REQUIRED_PLATFORMS = {
     "darwin-x86_64": ".app.tar.gz",
     "darwin-x86_64-app": ".app.tar.gz",
     "windows-x86_64": ".msi",
-    "windows-x86_64-nsis": ".exe",
-    # MSI is the default; installed NSIS clients retain their own update channel.
+    # Keep the historical target name, but publish only MSI installers.
+    "windows-x86_64-nsis": ".msi",
     "windows-x86_64-msi": ".msi",
     "linux-x86_64": ".AppImage",
     "linux-x86_64-deb": ".deb",
     "linux-x86_64-rpm": ".rpm",
     "linux-x86_64-appimage": ".AppImage",
 }
-WINDOWS_MSI_PLATFORMS = ("windows-x86_64", "windows-x86_64-msi")
+WINDOWS_MSI_PLATFORMS = (
+    "windows-x86_64", "windows-x86_64-msi", "windows-x86_64-nsis"
+)
 
 
 def restore_windows_msi(manifest: dict[str, Any]) -> None:
-    """Restore MSI defaults without breaking installed NSIS clients' updates."""
+    """Map every Windows target to the one published, signed MSI installer.
+
+    This metadata cannot add MSI support to old EXE-only clients. Those clients
+    require a one-time manual MSI installation, as documented in release notes.
+    """
     platforms = manifest.get("platforms")
     if not isinstance(platforms, dict):
         fail("latest.json has no platforms object")
     source = platforms.get("windows-x86_64-msi")
     if not isinstance(source, dict):
         fail("missing signed MSI platform for Windows restoration")
-    if not isinstance(platforms.get("windows-x86_64-nsis"), dict):
-        fail("missing signed NSIS compatibility platform for installed clients")
     for platform in WINDOWS_MSI_PLATFORMS:
         platforms[platform] = dict(source)
 
@@ -145,6 +149,8 @@ def main() -> None:
     for asset in assets:
         if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
             fail("release assets response contains an invalid entry")
+        if asset["name"].lower().endswith((".exe", ".exe.sig")):
+            fail("EXE installer assets are forbidden in an MSI-only release")
         asset_names.add(asset["name"])
         assets_by_name[asset["name"]] = asset
         for field in ("url", "browser_download_url"):
@@ -213,7 +219,7 @@ def main() -> None:
         for key in WINDOWS_MSI_PLATFORMS
     }
     if len(windows_entries) != 1:
-        fail("default and MSI updater keys must use the same signed MSI installer")
+        fail("all Windows updater keys must use the same signed MSI installer")
 
     signature_status = (
         "signature assets required"
