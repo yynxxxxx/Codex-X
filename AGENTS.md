@@ -2,6 +2,7 @@
 
 ## Windows 安装与在线更新
 
+- 修改 Windows 安装、在线更新或发布工作流前，阅读并遵循 [Windows 发布约定](docs/WINDOWS_RELEASE_GUIDE.md)。
 - Windows 默认安装包保留 MSI，并维持安装版的软件内在线更新；不要擅自更换默认安装格式或删除更新入口。
 - 修改发布资产或更新清单时，检查已经发布的客户端实际支持的安装格式。旧 EXE 安装版的兼容更新通道不能直接改指 MSI。
 - Tauri 更新包验签与 Windows 发布者签名是不同检查；不得把前者通过写成 Smart App Control 已放行。
