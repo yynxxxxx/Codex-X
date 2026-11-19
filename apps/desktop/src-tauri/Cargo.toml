@@ -1,6 +1,6 @@
 [package]
 name = "codex-x"
-version = "0.3.34"
+version = "0.3.35"
 description = "Codex Switch & Instruct desktop manager"
 authors = ["yynxxxxx"]
 license = "MIT"

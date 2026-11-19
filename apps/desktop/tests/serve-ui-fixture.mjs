@@ -20,7 +20,8 @@ const server = await createServer({
       name: "codex-x-ui-fixture",
       transformIndexHtml: {
         order: "pre",
-        handler: () => [{ tag: "script", children: fixture, injectTo: "head-prepend" }],
+        // Keep the original charset declaration before the large inline fixture.
+        handler: () => [{ tag: "script", children: fixture, injectTo: "head" }],
       },
     },
     react(),

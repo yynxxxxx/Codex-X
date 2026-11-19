@@ -77,7 +77,7 @@ fn scan_provider_sync_data(
     )?;
     let (mut internal_thread_ids, _classification_failures) =
         rollout_internal_thread_ids(codex_dir, &active_unclassified.rollout_paths_by_thread_id);
-    internal_thread_ids.extend(scan_catalog_internal_thread_ids(&discovery.related_paths)?);
+    internal_thread_ids.extend(scan_catalog_internal_thread_ids(&discovery.catalog_paths)?);
     let classification = RolloutScan {
         internal_thread_ids,
         ..RolloutScan::default()
@@ -154,7 +154,7 @@ fn scan_provider_sync_data(
     syncable_thread_ids.retain(|id| !excluded_thread_ids.contains(id));
     let catalog = scan_catalog_sync(
         &discovery.thread_paths,
-        &discovery.related_paths,
+        &discovery.catalog_paths,
         target_provider,
         &syncable_thread_ids,
     )?;
@@ -201,11 +201,14 @@ pub(crate) fn session_sync_status_inner(
 ) -> Result<SessionSyncStatus> {
     let codex_dir = resolve_codex_dir(config_dir)?;
     let target = current_model_provider(&codex_dir, target_provider)?;
-    if super::wsl::is_wsl_path(&codex_dir) {
-        return super::wsl::session_status(&codex_dir, target);
-    }
-    let discovery = discover_sqlite_databases(&codex_dir);
-    session_sync_status_with_discovery(&codex_dir, target, &discovery)
+    let mut status = if super::wsl::is_wsl_path(&codex_dir) {
+        super::wsl::session_status(&codex_dir, target)?
+    } else {
+        let discovery = discover_sqlite_databases(&codex_dir);
+        session_sync_status_with_discovery(&codex_dir, target, &discovery)?
+    };
+    super::export::fill_first_user_messages(&codex_dir, &mut status.sessions);
+    Ok(status)
 }
 
 pub(super) fn session_sync_status_with_discovery(
@@ -396,7 +399,8 @@ where
     }
 
     hook(MutationPoint::BeforeSqliteLock)?;
-    let mut pending_sqlite = prepare_sqlite_updates(&discovery.related_paths)?;
+    let mut pending_sqlite =
+        prepare_sqlite_updates(&discovery.provider_update_paths(), &discovery.catalog_paths)?;
     let scan = match scan_provider_sync_data(&codex_dir, &target_provider, &discovery, true) {
         Ok(scan) => scan,
         Err(error) => {
@@ -2528,6 +2532,155 @@ mod tests {
         assert_eq!(result.status.mismatched_sessions, 0);
 
         fs::remove_dir_all(codex_dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn stable_catalog_ignores_thirteen_missing_dev_rows_and_repairs_real_stable_drift() {
+        let codex_dir = temp_codex_dir("stable-catalog-authority");
+        write_config(&codex_dir, "custom");
+        let ids = (0..34)
+            .map(|index| format!("catalog-thread-{index:02}"))
+            .collect::<Vec<_>>();
+        let state = codex_dir.join("state_5.sqlite");
+        create_thread_database(&state, &ids[0], "custom");
+        let conn = Connection::open(&state).unwrap();
+        for id in &ids[1..] {
+            conn.execute("INSERT INTO threads (id,model_provider,title) VALUES (?1,'custom','Visible session')", [id]).unwrap();
+        }
+        drop(conn);
+        let stable = codex_dir.join("sqlite/codex.db");
+        let dev = codex_dir.join("sqlite/codex-dev.db");
+        let rows = ids
+            .iter()
+            .map(|id| (id.as_str(), "custom"))
+            .collect::<Vec<_>>();
+        create_catalog_database(&stable, &rows);
+        Connection::open(&stable)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE inbox_items(id TEXT); CREATE TABLE automation_runs(id TEXT);",
+            )
+            .unwrap();
+        create_catalog_database(&dev, &rows[..21]);
+        Connection::open(&dev)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE inbox_items(id TEXT); CREATE TABLE automation_runs(id TEXT);",
+            )
+            .unwrap();
+        let original_dev = fs::read(&dev).unwrap();
+        let scope = Some(codex_dir.display().to_string());
+        let status = session_sync_status_inner(scope.clone(), None).unwrap();
+        assert!(status.scan_complete);
+        assert_eq!(status.sessions.len(), 34);
+        assert_eq!(status.mismatched_sessions, 0);
+        assert!(!status.needs_sync);
+        assert!(status.sessions.iter().all(|session| !session.needs_sync));
+        let unchanged = sync_sessions_provider_inner(scope.clone(), None).unwrap();
+        assert_eq!(unchanged.updated_threads, 0);
+        assert_eq!(unchanged.updated_rollouts, 0);
+        assert!(unchanged.backup_dir.is_empty());
+        assert_eq!(fs::read(&dev).unwrap(), original_dev);
+
+        Connection::open(&stable).unwrap().execute("UPDATE local_thread_catalog SET model_provider='openai',missing_candidate=1 WHERE thread_id=?1", [&ids[0]]).unwrap();
+        Connection::open(&stable)
+            .unwrap()
+            .execute(
+                "DELETE FROM local_thread_catalog WHERE thread_id=?1",
+                [&ids[1]],
+            )
+            .unwrap();
+        let status = session_sync_status_inner(scope.clone(), None).unwrap();
+        assert!(status.needs_sync);
+        assert_eq!(status.mismatched_sessions, 2);
+        assert!(
+            status
+                .sessions
+                .iter()
+                .find(|session| session.id == ids[0])
+                .unwrap()
+                .needs_sync
+        );
+        let repaired = sync_sessions_provider_inner(scope.clone(), None).unwrap();
+        assert!(!repaired.status.needs_sync);
+        assert!(repaired.updated_threads > 0);
+        assert_eq!(
+            catalog_provider_and_visibility(&stable, &ids[0]),
+            Some(("custom".into(), 0))
+        );
+        assert_eq!(
+            catalog_provider_and_visibility(&stable, &ids[1]),
+            Some(("custom".into(), 0))
+        );
+        assert_eq!(fs::read(&dev).unwrap(), original_dev);
+        fs::remove_file(&dev).unwrap();
+        assert!(
+            !session_sync_status_inner(scope.clone(), None)
+                .unwrap()
+                .needs_sync
+        );
+        assert_eq!(
+            sync_sessions_provider_inner(scope, None)
+                .unwrap()
+                .updated_threads,
+            0
+        );
+        assert!(!dev.exists());
+        fs::remove_dir_all(codex_dir).unwrap();
+    }
+
+    #[test]
+    fn inactive_dev_catalog_does_not_classify_or_update_but_its_threads_still_sync() {
+        let codex_dir = temp_codex_dir("stable-catalog-dual-purpose-dev");
+        write_config(&codex_dir, "custom");
+        let id = "catalog-dual-purpose-user";
+        let state = codex_dir.join("state_5.sqlite");
+        create_thread_database(&state, id, "openai");
+        let stable = codex_dir.join("sqlite/codex.db");
+        let dev = codex_dir.join("sqlite/codex-dev.db");
+        create_catalog_database(&stable, &[(id, "custom")]);
+        Connection::open(&stable)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE inbox_items(id TEXT); CREATE TABLE automation_runs(id TEXT);",
+            )
+            .unwrap();
+        create_catalog_database(&dev, &[(id, "openai")]);
+        create_thread_database(&dev, id, "openai");
+        Connection::open(&dev).unwrap().execute("UPDATE local_thread_catalog SET thread_source='subagent', missing_candidate=1 WHERE thread_id=?1", [id]).unwrap();
+        let scope = Some(codex_dir.display().to_string());
+        let status = session_sync_status_inner(scope.clone(), None).unwrap();
+        assert!(status.needs_sync);
+        assert_eq!(status.top_level_threads, 1);
+        assert_eq!(status.subagent_threads, 0);
+        assert!(status.sessions[0].needs_sync);
+        assert!(!status.sessions[0].is_subagent);
+        let repaired = sync_sessions_provider_inner(scope.clone(), None).unwrap();
+        assert!(!repaired.status.needs_sync);
+        assert_eq!(thread_provider(&state, id), "custom");
+        assert_eq!(thread_provider(&dev, id), "custom");
+        assert_eq!(
+            catalog_provider_and_visibility(&dev, id),
+            Some(("openai".into(), 1))
+        );
+        assert_eq!(
+            Connection::open(&dev)
+                .unwrap()
+                .query_row(
+                    "SELECT thread_source FROM local_thread_catalog WHERE thread_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "subagent"
+        );
+        assert_eq!(
+            sync_sessions_provider_inner(scope, None)
+                .unwrap()
+                .updated_threads,
+            0
+        );
+        fs::remove_dir_all(codex_dir).unwrap();
     }
 
     #[test]

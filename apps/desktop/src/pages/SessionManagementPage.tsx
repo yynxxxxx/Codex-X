@@ -14,7 +14,7 @@ import {
   Trash2,
   Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Button, Checkbox, ModalShell, cx } from "../components/ui";
 import {
   mergeSessionDirectoryGroups,
@@ -33,6 +33,14 @@ const SESSION_COLUMN_HEADER_HEIGHT = 34;
 const SESSION_VIRTUAL_OVERSCAN_ROWS = 8;
 const DEFAULT_SESSION_VIEWPORT_HEIGHT = 640;
 const SESSION_ALL_FOLDERS_KEY = "__codexx_all_folders__";
+const FIRST_MESSAGE_PREVIEW_LENGTH = 2000;
+
+function firstMessagePreview(value?: string | null) {
+  const text = value?.trim() || "";
+  if (text.length <= FIRST_MESSAGE_PREVIEW_LENGTH) return text;
+  // Preserve line breaks and avoid splitting a Unicode surrogate pair.
+  return `${text.slice(0, FIRST_MESSAGE_PREVIEW_LENGTH).replace(/[\uD800-\uDBFF]$/, "")}…`;
+}
 // Defer the browser storage getter so unavailable storage is caught by the reader.
 const sessionPinStorage = { getItem: (key: string) => localStorage.getItem(key) };
 
@@ -212,6 +220,7 @@ export function SessionManagementPage({
   onDeleteSafetyConfirmedChange,
 }: SessionManagementPageProps) {
   const isChinese = lang === "zh";
+  const promptIdPrefix = useId();
   const codexDir = sessionStatus?.codexDir || "default";
   const copy = isChinese
     ? {
@@ -341,6 +350,8 @@ export function SessionManagementPage({
 
   const scanIncomplete = Boolean(sessionStatus && !sessionStatus.scanComplete);
   const readOnly = Boolean(sessionStatus?.readOnlyReason);
+  const statusUpdating = actionBusy === "syncSessions" || actionBusy === "checkSessions";
+  const showSyncWarnings = !statusUpdating && Boolean(sessionStatus) && !readOnly && !scanIncomplete;
   const diagnostics = [
     ...(sessionStatus?.scanFailures || []).map((message) => ({ message, blocking: true })),
     ...(sessionStatus?.warnings || []).map((message) => ({ message, blocking: false })),
@@ -595,10 +606,10 @@ export function SessionManagementPage({
           </div>
         </header>
 
-        <div className={cx("cx-session-summary", readOnly || scanIncomplete || sessionHasMismatches ? "cx-session-summary--needs-sync" : "cx-session-summary--synced")} title={sessionStatus?.readOnlyReason || undefined}>
-          <span className="cx-session-summary-status">
-            {!sessionStatus || readOnly ? <Info size={15} aria-hidden="true" /> : scanIncomplete || sessionHasMismatches ? <AlertCircle size={15} aria-hidden="true" /> : <CheckCircle2 size={15} aria-hidden="true" />}
-            {!sessionStatus ? copy.clickToCheck : readOnly ? copy.readOnly : scanIncomplete ? copy.scanIncomplete : sessionHasMismatches ? copy.needsSync(sessionSyncCount) : copy.allSynced}
+        <div className={cx("cx-session-summary", !statusUpdating && sessionStatus && (readOnly || scanIncomplete || sessionHasMismatches ? "cx-session-summary--needs-sync" : "cx-session-summary--synced"))} title={sessionStatus?.readOnlyReason || undefined} aria-busy={statusUpdating}>
+          <span className="cx-session-summary-status" role="status">
+            {statusUpdating ? <Loader2 size={15} className="cx-session-spin" aria-hidden="true" /> : !sessionStatus || readOnly ? <Info size={15} aria-hidden="true" /> : scanIncomplete || sessionHasMismatches ? <AlertCircle size={15} aria-hidden="true" /> : <CheckCircle2 size={15} aria-hidden="true" />}
+            {statusUpdating ? actionBusy === "syncSessions" ? copy.syncing : copy.checking : !sessionStatus ? copy.clickToCheck : readOnly ? copy.readOnly : scanIncomplete ? copy.scanIncomplete : sessionHasMismatches ? copy.needsSync(sessionSyncCount) : copy.allSynced}
           </span>
           <span className="cx-session-summary-count">{copy.sessionCount(sessionStatus?.topLevelThreads ?? 0)}</span>
         </div>
@@ -749,17 +760,21 @@ export function SessionManagementPage({
                     {visibleSessionRows.map((row) => {
                       const { item } = row;
                       const sessionPinned = pinnedSessionSet.has(item.id);
+                      const promptPreview = firstMessagePreview(item.firstUserMessage);
+                      const promptDescription = promptPreview ? (isChinese ? "首次提示词：" : "First prompt: ") + promptPreview : "";
+                      const promptId = `${promptIdPrefix}-${encodeURIComponent(item.id)}`;
                       return (
                         <div
                           className={cx(
                             "cx-session-row",
                             "cx-session-virtual-item",
-                            item.needsSync && !item.isSubagent && "cx-session-row--needs-sync",
+                            showSyncWarnings && item.needsSync && !item.isSubagent && "cx-session-row--needs-sync",
                             selectedSessionSet.has(item.id) && "cx-session-row--selected",
                             sessionPinned && "cx-session-row--pinned",
                           )}
                           key={row.key}
                           role="row"
+                          title={promptDescription || item.title || undefined}
                           style={{ top: row.top, height: row.height }}
                           onClick={(event) => {
                             if (!(event.target as HTMLElement).closest("button, input") && !loading && !sessionDeleteBusy) onToggleSessionSelected(item.id);
@@ -773,14 +788,16 @@ export function SessionManagementPage({
                               disabled={loading || sessionDeleteBusy}
                               onChange={() => onToggleSessionSelected(item.id)}
                               aria-label={`${copy.selectSession}: ${item.title || (isChinese ? "未命名会话" : "Untitled session")} (#${shortId(item.id)})`}
+                              aria-describedby={promptPreview ? promptId : undefined}
                             />
                           </span>
                           <div className="cx-session-row-copy">
                             <div className="cx-session-row-title">
-                              <strong title={item.firstUserMessage?.trim() || item.title}>{item.title || (isChinese ? "未命名会话" : "Untitled session")}</strong>
+                              <strong>{item.title || (isChinese ? "未命名会话" : "Untitled session")}</strong>
+                              {promptPreview && <span id={promptId} hidden>{promptDescription}</span>}
                               {item.archived && <span className="cx-session-state">{copy.archived}</span>}
                               {item.isSubagent && <span className="cx-session-state" title={copy.internalHint}>{copy.internal}</span>}
-                              {item.needsSync && !item.isSubagent && <span className="cx-session-state cx-session-state--warn">{copy.pending}</span>}
+                              {showSyncWarnings && item.needsSync && !item.isSubagent && <span className="cx-session-state cx-session-state--warn">{copy.pending}</span>}
                             </div>
                             {(!sessionGroupByCwd || selectedFolderKey === SESSION_ALL_FOLDERS_KEY) && <p title={item.cwd || item.rolloutPath || undefined}>{compactPath(item.cwd || item.rolloutPath, 72, isChinese ? "未记录路径" : "No path recorded")}</p>}
                           </div>

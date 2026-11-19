@@ -345,6 +345,116 @@ fn safe_rollout_path(codex_dir: &Path, session: &SessionPreview) -> Result<PathB
     Ok(canonical)
 }
 
+const FIRST_MESSAGE_FILE_BYTES: u64 = 512 * 1024;
+const FIRST_MESSAGE_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+const FIRST_MESSAGE_BATCH_FILES: usize = 64;
+
+fn preview_reference_in_scope(roots: &[PathBuf], path: &Path) -> bool {
+    use std::path::Component;
+    if path.components().any(|component| match component {
+        Component::ParentDir => true,
+        Component::Normal(value) if cfg!(windows) => value.to_string_lossy().contains(':'),
+        _ => false,
+    }) {
+        return false;
+    }
+    if !path.is_absolute()
+        && (path.has_root()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::Prefix(_))))
+    {
+        return false;
+    }
+    roots.iter().any(|root| {
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        ["sessions", "archived_sessions"]
+            .iter()
+            .any(|folder| candidate.starts_with(root.join(folder)))
+    })
+}
+
+fn read_initial_user_event(
+    reader: impl Read,
+    expected_id: &str,
+    remaining: &mut u64,
+) -> Option<String> {
+    let allowance = (*remaining).min(FIRST_MESSAGE_FILE_BYTES);
+    let mut reader = BufReader::new(reader.take(allowance));
+    let mut verified = false;
+    let result = (|| loop {
+        let mut line = Vec::new();
+        let count = reader.read_until(b'\n', &mut line).ok()?;
+        if count == 0 {
+            return None;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let record: Record = serde_json::from_slice(&line).ok()?;
+        if record.kind == "session_meta" {
+            if record.payload.id.as_deref() != Some(expected_id) {
+                return None;
+            }
+            verified = true;
+        } else if !verified {
+            return None;
+        } else if record.kind == "event_msg" && record.payload.kind == "user_message" {
+            // Only an explicit user event establishes the first prompt. A
+            // title, summary, preview or injected response item is not proof.
+            return visible_message(record).map(|message| message.body.trim().to_string());
+        }
+    })();
+    // Charge decoded read-ahead too, even when a prompt is found early.
+    *remaining = remaining.saturating_sub(allowance - reader.get_ref().limit());
+    result
+}
+
+pub(super) fn fill_first_user_messages(codex_dir: &Path, sessions: &mut [SessionPreview]) {
+    let mut remaining = FIRST_MESSAGE_BATCH_BYTES;
+    let mut roots = vec![codex_dir.to_path_buf()];
+    // Resolve only the user-selected root, never an untrusted rollout reference.
+    if let Ok(canonical) = codex_dir.canonicalize() {
+        roots.push(canonical);
+    }
+    for session in sessions
+        .iter_mut()
+        .filter(|session| session.first_user_message.is_none())
+        .take(FIRST_MESSAGE_BATCH_FILES)
+    {
+        if remaining == 0 {
+            break;
+        }
+        let Some(raw) = session.rollout_path.as_deref() else {
+            continue;
+        };
+        if !preview_reference_in_scope(&roots, Path::new(raw)) {
+            continue;
+        }
+        // Reuse export's regular-file and selected sessions/archived_sessions
+        // checks. Never search by basename or fall back to another installation.
+        let Ok(path) = safe_rollout_path(codex_dir, session) else {
+            continue;
+        };
+        let Ok(file) = File::open(&path) else {
+            continue;
+        };
+        if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+            continue;
+        }
+        // Bound both compressed input and decoded output. An unavailable,
+        // malformed or later first message leaves the metadata unknown.
+        let Ok(reader) = decoded_rollout_reader(file.take(FIRST_MESSAGE_FILE_BYTES), &path) else {
+            continue;
+        };
+        session.first_user_message = read_initial_user_event(reader, &session.id, &mut remaining);
+    }
+}
+
 fn markdown_label(value: &str) -> String {
     value
         .chars()
@@ -577,7 +687,7 @@ pub(crate) fn export_codex_sessions_inner(
     let snapshot = destination_snapshot(&destination)?;
     let (sessions, mut warnings) = if super::wsl::is_wsl_path(&codex_dir) {
         let preview = super::wsl::session_previews(&codex_dir, "openai", usize::MAX)?;
-        (preview.sessions, Vec::new())
+        (preview.sessions, preview.warnings)
     } else {
         let discovery = discover_sqlite_databases(&codex_dir);
         let (mut sessions, warnings) = list_session_previews_with_paths(
@@ -789,17 +899,208 @@ mod tests {
         .unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "Current session name");
+        assert_eq!(
+            sessions[0].first_user_message.as_deref(),
+            Some("Initial prompt")
+        );
         let status = super::super::sync::session_sync_status_inner(
             Some(fixture.codex.display().to_string()),
             Some("openai".into()),
         )
         .unwrap();
         assert_eq!(status.sessions[0].title, "Current session name");
+        assert_eq!(
+            status.sessions[0].first_user_message.as_deref(),
+            Some("Initial prompt")
+        );
         let result = fixture.export(&["shared"], "current-name.md").unwrap();
         assert_eq!(result.failed_sessions, 0);
         assert!(fs::read_to_string(result.path)
             .unwrap()
             .starts_with("# Current session name\n"));
+    }
+
+    #[test]
+    fn first_message_fallback_reads_verified_events_and_preserves_explicit_metadata() {
+        let fixture = Fixture::new();
+        fixture.add(
+            "stored",
+            "Renamed",
+            &[event("user", "Rollout prompt")],
+            false,
+        );
+        let compressed = fixture.add(
+            "compressed",
+            "Summary",
+            &[
+                response("user", "# AGENTS.md instructions: injected context"),
+                event("user", "Actual first prompt\nwith a second line"),
+                event("user", "Later prompt"),
+            ],
+            false,
+        );
+        compress_fixture(&compressed);
+        let wrong = fixture.add(
+            "wrong",
+            "Wrong identity",
+            &[event("user", "Other conversation")],
+            false,
+        );
+        fs::write(&wrong, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"other\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Other conversation\"}}\n").unwrap();
+        fixture.add(
+            "missing",
+            "A summary is not a prompt",
+            &[response("user", "# AGENTS.md instructions: context only")],
+            false,
+        );
+        let external = fixture.add(
+            "external",
+            "Outside selected storage",
+            &[event("user", "Outside prompt")],
+            false,
+        );
+        let moved = fixture.root.join("outside.jsonl");
+        fs::rename(external, &moved).unwrap();
+        let conn = Connection::open(&fixture.database).unwrap();
+        conn.execute(
+            "UPDATE threads SET first_user_message='Stored first prompt' WHERE id='stored'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE threads SET rollout_path=?1 WHERE id='external'",
+            [moved.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        let (sessions, _) = super::super::storage::list_session_previews(
+            &fixture.codex,
+            &RolloutScan::default(),
+            "openai",
+            100,
+        )
+        .unwrap();
+        let by_id = sessions
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            by_id["stored"].first_user_message.as_deref(),
+            Some("Stored first prompt")
+        );
+        assert_eq!(
+            by_id["compressed"].first_user_message.as_deref(),
+            Some("Actual first prompt\nwith a second line")
+        );
+        assert_eq!(by_id["compressed"].title, "Summary");
+        for id in ["wrong", "missing", "external"] {
+            assert!(by_id[id].first_user_message.is_none(), "{id}");
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT first_user_message FROM threads WHERE id='compressed'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn first_message_fallback_supports_legacy_schema_and_stops_at_read_budgets() {
+        let fixture = Fixture::new();
+        fixture.add(
+            "legacy",
+            "Session summary",
+            &[event("user", "Real initial message")],
+            false,
+        );
+        Connection::open(&fixture.database)
+            .unwrap()
+            .execute_batch("ALTER TABLE threads DROP COLUMN first_user_message;")
+            .unwrap();
+        let (sessions, _) = super::super::storage::list_session_previews(
+            &fixture.codex,
+            &RolloutScan::default(),
+            "openai",
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            sessions[0].first_user_message.as_deref(),
+            Some("Real initial message")
+        );
+
+        let bytes = format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread\"}}}}\n{{\"type\":\"response_item\",\"payload\":{{\"ignored\":\"{}\"}}}}\n{}\n", "x".repeat(FIRST_MESSAGE_FILE_BYTES as usize), event("user", "Too late"));
+        let mut reader = std::io::Cursor::new(bytes);
+        let mut remaining = FIRST_MESSAGE_BATCH_BYTES;
+        assert!(read_initial_user_event(&mut reader, "thread", &mut remaining).is_none());
+        assert_eq!(reader.position(), FIRST_MESSAGE_FILE_BYTES);
+        assert_eq!(
+            remaining,
+            FIRST_MESSAGE_BATCH_BYTES - FIRST_MESSAGE_FILE_BYTES
+        );
+        reader.set_position(0);
+        remaining = 17;
+        assert!(read_initial_user_event(&mut reader, "thread", &mut remaining).is_none());
+        assert_eq!(reader.position(), 17);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn first_message_preview_rejects_external_and_traversing_paths_before_io() {
+        let root = std::env::temp_dir().join("selected-codex-home");
+        let alias = std::env::temp_dir().join("selected-codex-resolved");
+        let roots = [root.clone(), alias.clone()];
+        for path in [
+            PathBuf::from("sessions/thread.jsonl"),
+            root.join("sessions/thread.jsonl"),
+            alias.join("archived_sessions/thread.jsonl.zst"),
+        ] {
+            assert!(
+                preview_reference_in_scope(&roots, &path),
+                "{}",
+                path.display()
+            );
+        }
+        for path in [
+            root.join("other/thread.jsonl"),
+            root.join("sessions-other/thread.jsonl"),
+            root.join("sessions/../sessions/thread.jsonl"),
+            root.join("../other/sessions/thread.jsonl"),
+            PathBuf::from("../sessions/thread.jsonl"),
+        ] {
+            assert!(
+                !preview_reference_in_scope(&roots, &path),
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_message_preview_accepts_each_selected_wsl_server_and_rejects_other_roots() {
+        for server in ["wsl$", "wsl.localhost"] {
+            let root = PathBuf::from(format!(r"\\{server}\Ubuntu\home\user\.codex"));
+            assert!(preview_reference_in_scope(
+                std::slice::from_ref(&root),
+                &root.join(r"sessions\thread.jsonl")
+            ));
+            for raw in [
+                r"\\remote\share\thread.jsonl",
+                r"\\wsl.localhost\Debian\home\user\.codex\sessions\thread.jsonl",
+                r"C:sessions\thread.jsonl",
+                r"\sessions\thread.jsonl",
+                r"sessions\thread.jsonl:other",
+                r"sessions\..\thread.jsonl",
+            ] {
+                assert!(
+                    !preview_reference_in_scope(std::slice::from_ref(&root), Path::new(raw)),
+                    "{raw}"
+                );
+            }
+        }
     }
 
     #[test]

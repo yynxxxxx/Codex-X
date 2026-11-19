@@ -103,6 +103,67 @@ pub(super) fn ensure_writable(codex_dir: &Path) -> Result<()> {
 struct SnapshotManifest {
     databases: Vec<String>,
     active: Option<String>,
+    #[serde(default)]
+    warnings: Vec<String>,
+}
+
+fn decode_wsl_output(bytes: &[u8]) -> String {
+    // WSL host errors can be UTF-16LE; Python emits UTF-8 JSON.
+    if bytes.starts_with(&[0xff, 0xfe])
+        || (bytes.len() >= 4 && bytes.len() % 2 == 0 && bytes.contains(&0))
+    {
+        let bytes = bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(bytes);
+        let units = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+fn snapshot_failure(distribution: &str, stdout: &[u8], stderr: &[u8]) -> String {
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(stdout) {
+        if let (Some(kind), Some(message)) = (
+            value["error"]["kind"].as_str(),
+            value["error"]["message"].as_str(),
+        ) {
+            let detail = message.trim().chars().take(600).collect::<String>();
+            let reason = match kind {
+                "database" => "WSL 当前会话数据库无法读取，未用旧版数据库替代当前会话。",
+                "TimeoutError" => "读取 WSL 会话超时，请暂停正在写入会话的任务后重试。",
+                "PermissionError" => {
+                    "没有权限读取 WSL 会话目录或写入临时快照，请检查对应目录权限。"
+                }
+                "FileNotFoundError" => "WSL 会话目录或快照路径不存在，请检查所选目录。",
+                "ValueError" => "WSL 会话目录配置无效，请检查 CODEX_HOME 和 sqlite_home。",
+                _ => "WSL 会话读取失败。",
+            };
+            return format!("{reason}{detail}");
+        }
+    }
+    let detail = format!(
+        "{}\n{}",
+        decode_wsl_output(stderr),
+        decode_wsl_output(stdout)
+    )
+    .trim()
+    .chars()
+    .take(600)
+    .collect::<String>();
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("python3")
+        && (lower.contains("not found")
+            || lower.contains("no such file")
+            || lower.contains("execvpe"))
+    {
+        return format!("WSL 发行版 {distribution} 中未找到 Python 3。Ubuntu/Debian 可在该发行版中运行 sudo apt install python3，然后重试。{detail}");
+    }
+    if lower.contains("wsl_e_distro_not_found") {
+        return format!("找不到 WSL 发行版 {distribution}，请检查所选目录中的发行版名称。{detail}");
+    }
+    format!("无法在 WSL 发行版 {distribution} 中读取会话，请确认该发行版可以启动。{detail}")
 }
 
 fn snapshot_path(directory: &Path, name: &str) -> Result<PathBuf> {
@@ -137,6 +198,7 @@ fn linux_path_for_windows(target: &WslTarget, value: &str) -> String {
 
 pub(super) struct WslSessions {
     pub(super) sessions: Vec<SessionPreview>,
+    pub(super) warnings: Vec<String>,
     sqlite_dbs: usize,
     sqlite_threads: usize,
     subagent_threads: usize,
@@ -180,14 +242,17 @@ pub(super) fn session_previews(
     let output = crate::platform::desktop_command_output(
         Path::new("wsl.exe"),
         &arguments,
-        Duration::from_secs(20),
+        Duration::from_secs(45),
     )
     .map_err(|_| {
-        CodexxError::Config("读取 WSL 会话超时。请确认发行版已启动，然后重新检查会话。".into())
+        CodexxError::Config("无法启动或等待 WSL 会话读取完成。请确认 WSL 可用、所选发行版已启动，然后重新检查会话。".into())
     })?;
     if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        return Err(CodexxError::Config(format!("无法在 WSL 中读取会话。请在 {} 中确认 python3 可用（Ubuntu/Debian 可运行 sudo apt install python3），然后重试。{}", target.distribution, detail.trim().chars().take(600).collect::<String>())));
+        return Err(CodexxError::Config(snapshot_failure(
+            &target.distribution,
+            &output.stdout,
+            &output.stderr,
+        )));
     }
     let manifest: SnapshotManifest = serde_json::from_slice(&output.stdout)
         .map_err(|_| CodexxError::Config("无法解析 WSL 会话快照结果".into()))?;
@@ -243,6 +308,7 @@ pub(super) fn session_previews(
     }
     Ok(WslSessions {
         sessions,
+        warnings: manifest.warnings,
         sqlite_dbs: active.len(),
         sqlite_threads,
         subagent_threads,
@@ -255,6 +321,7 @@ pub(super) fn session_status(
 ) -> Result<SessionSyncStatus> {
     let WslSessions {
         sessions,
+        mut warnings,
         sqlite_dbs,
         sqlite_threads,
         subagent_threads,
@@ -262,6 +329,7 @@ pub(super) fn session_status(
     let top_level_threads = sqlite_threads.saturating_sub(subagent_threads);
     let (directory_identities, pin_scope_key) =
         super::directory_identity::session_directory_identities(codex_dir, &sessions);
+    warnings.push(READ_ONLY_REASON.into());
     Ok(SessionSyncStatus {
         codex_dir: codex_dir.display().to_string(),
         directory_identities,
@@ -285,7 +353,7 @@ pub(super) fn session_status(
         read_only_reason: Some(READ_ONLY_REASON.into()),
         scan_failures: Vec::new(),
         backup_dir: None,
-        warnings: vec![READ_ONLY_REASON.into()],
+        warnings,
         sessions,
     })
 }
@@ -321,6 +389,36 @@ mod tests {
         ] {
             assert!(wsl_target(Path::new(path)).is_none(), "{path}");
         }
+    }
+
+    #[test]
+    fn snapshot_failures_distinguish_database_runtime_and_missing_python() {
+        let database = snapshot_failure("Ubuntu", br#"{"error":{"kind":"database","message":"/home/fixture/.codex/state_5.sqlite: file is not a database"}}"#, b"");
+        assert!(database.contains("当前会话数据库无法读取"));
+        assert!(database.contains("state_5.sqlite"));
+        assert!(!database.contains("apt install"));
+        let python = snapshot_failure(
+            "Ubuntu",
+            b"",
+            b"execvpe(python3) failed: No such file or directory",
+        );
+        assert!(python.contains("sudo apt install python3"));
+        let distro = snapshot_failure("Missing", b"Wsl/Service/WSL_E_DISTRO_NOT_FOUND", b"");
+        assert!(distro.contains("找不到 WSL 发行版 Missing"));
+        assert!(!distro.contains("apt install"));
+        let timeout = snapshot_failure(
+            "Ubuntu",
+            br#"{"error":{"kind":"TimeoutError","message":"fixture timeout"}}"#,
+            b"",
+        );
+        assert!(timeout.contains("读取 WSL 会话超时"));
+        assert!(!timeout.contains("apt install"));
+        let message = "没有具有所提供名称的分发。错误代码: Wsl/Service/WSL_E_DISTRO_NOT_FOUND";
+        let utf16 = message
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert!(snapshot_failure("Missing", &utf16, b"").contains("找不到 WSL 发行版 Missing"));
     }
 
     #[test]

@@ -92,7 +92,14 @@ fn create_sqlite_rollback_table(conn: &Connection) -> Result<()> {
     create_catalog_rollback_tables(conn)
 }
 
-pub(super) fn prepare_sqlite_updates(sqlite_paths: &[PathBuf]) -> Result<Vec<PendingSqliteUpdate>> {
+pub(super) fn prepare_sqlite_updates(
+    sqlite_paths: &[PathBuf],
+    catalog_paths: &[PathBuf],
+) -> Result<Vec<PendingSqliteUpdate>> {
+    let catalog_identities = catalog_paths
+        .iter()
+        .map(|path| path.canonicalize().map_err(|error| io_err(path, error)))
+        .collect::<Result<HashSet<_>>>()?;
     let mut pending = Vec::new();
     let mut seen_databases = HashSet::new();
     let prepare_result = (|| -> Result<()> {
@@ -121,7 +128,11 @@ pub(super) fn prepare_sqlite_updates(sqlite_paths: &[PathBuf]) -> Result<Vec<Pen
             } else {
                 HashSet::new()
             };
-            let catalog_columns = catalog_columns(&conn)?;
+            let catalog_columns = if catalog_identities.contains(&identity) {
+                catalog_columns(&conn)?
+            } else {
+                HashSet::new()
+            };
             let supports_thread_updates =
                 thread_columns.contains("id") && thread_columns.contains("model_provider");
             let supports_catalog_updates =
@@ -264,15 +275,17 @@ fn apply_sqlite_updates(
             .difference(&internal_ids)
             .cloned()
             .collect();
-        let catalog_counts = apply_catalog_updates(
-            &update.conn,
-            &update.catalog_columns,
-            target_provider,
-            catalog_sources,
-            &local_syncable_ids,
-        )?;
-        update.counts.provider_rows += catalog_counts.provider_rows;
-        update.counts.catalog_insert_rows += catalog_counts.inserted_rows;
+        if !update.catalog_columns.is_empty() {
+            let catalog_counts = apply_catalog_updates(
+                &update.conn,
+                &update.catalog_columns,
+                target_provider,
+                catalog_sources,
+                &local_syncable_ids,
+            )?;
+            update.counts.provider_rows += catalog_counts.provider_rows;
+            update.counts.catalog_insert_rows += catalog_counts.inserted_rows;
+        }
     }
     Ok(())
 }
@@ -338,7 +351,9 @@ fn restore_sqlite_update(
             )));
         }
 
-        restore_catalog_updates(&update.conn, &update.catalog_columns)?;
+        if !update.catalog_columns.is_empty() {
+            restore_catalog_updates(&update.conn, &update.catalog_columns)?;
+        }
         let mut statements = Vec::new();
         if update.thread_columns.contains("id") && update.thread_columns.contains("model_provider")
         {

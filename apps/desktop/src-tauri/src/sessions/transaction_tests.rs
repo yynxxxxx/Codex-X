@@ -219,8 +219,11 @@ fn blocked_rollout_scan_aborts_before_hooks_or_database_updates() {
     rollouts
         .blocked_failures
         .push("会话文件读取失败，未完成扫描".to_string());
-    let mut pending =
-        prepare_sqlite_updates(&[fixture.database.clone(), fixture.catalog.clone()]).unwrap();
+    let mut pending = prepare_sqlite_updates(
+        &[fixture.database.clone(), fixture.catalog.clone()],
+        std::slice::from_ref(&fixture.catalog),
+    )
+    .unwrap();
     let mut journal = MutationJournal::default();
     let mut hook_called = false;
     let error = execute_provider_sync_mutation(
@@ -518,8 +521,11 @@ fn unchanged_candidate_without_verified_hash_is_rejected_before_mutation() {
     let mut rollouts = fixture.scan();
     rollouts.changes.clear();
     rollouts.verified_rollout_hashes.clear();
-    let mut pending =
-        prepare_sqlite_updates(&[fixture.database.clone(), fixture.catalog.clone()]).unwrap();
+    let mut pending = prepare_sqlite_updates(
+        &[fixture.database.clone(), fixture.catalog.clone()],
+        std::slice::from_ref(&fixture.catalog),
+    )
+    .unwrap();
     let mut journal = MutationJournal::default();
     let mut hook_called = false;
     let error = execute_provider_sync_mutation(
@@ -951,8 +957,8 @@ fn sqlite_prepare_deduplicates_symlink_aliases() {
     create_thread_database(&database, id, &rollout);
     symlink(&database, &alias).expect("create database symlink");
 
-    let mut pending =
-        prepare_sqlite_updates(&[database.clone(), alias]).expect("prepare aliased database once");
+    let mut pending = prepare_sqlite_updates(&[database.clone(), alias], &[])
+        .expect("prepare aliased database once");
 
     assert_eq!(pending.len(), 1);
     assert_eq!(

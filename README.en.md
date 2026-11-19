@@ -13,6 +13,11 @@
   A cross-platform desktop tool for **OpenAI Codex Desktop / Codex CLI**. Manage prompt templates, switch third-party APIs, organize / repair / permanently delete local sessions, manage Skills / MCP, and inspect TOML and login credentials without repeatedly editing configuration files by hand.
 
   <p>
+    <a href="https://trendshift.io/repositories/104938"><img src="https://trendshift.io/api/badge/repositories/104938" alt="No. 2 on GitHub Trending for Rust" width="250" height="55" /></a><br />
+    <sub><a href="https://github.com/antonkomarev/github-trending-archive/blob/aeea175a90b86aba1844727221cf2aaa8decd908/archive/repository/2026/2026-09-20/rust.json">Rust daily chart · #2 on 2026-09-20</a></sub>
+  </p>
+
+  <p>
     <img src="https://img.shields.io/github/v/release/yynxxxxx/Codex-X?label=version&color=blue" alt="version" />
     <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-555" alt="platform" />
     <img src="https://img.shields.io/badge/built%20with-Tauri%202-24C8DB" alt="tauri" />
@@ -166,31 +171,6 @@ You can use it to:
     <th align="center">Availability</th>
   </tr>
   <tr>
-    <td><a href="examples/gpt5.5-unrestricted.md"><code>gpt5.5-unrestricted.md</code></a></td>
-    <td align="left">Compact and general-purpose for everyday coding and technical work</td>
-    <td align="center">Bundled offline<br />GitHub updates</td>
-  </tr>
-  <tr>
-    <td><a href="examples/gpt5.4-unrestricted.md"><code>gpt5.4-unrestricted.md</code></a></td>
-    <td align="left">GPT-5.4 / Codex CLI workflows with a CTF and security-research focus</td>
-    <td align="center">Bundled offline<br />GitHub updates</td>
-  </tr>
-  <tr>
-    <td><a href="examples/gpt5.5-jeli.md"><code>gpt5.5-jeli.md</code></a></td>
-    <td align="left">A plain-language general version with a fuller engineering and reverse-engineering workflow</td>
-    <td align="center">Bundled offline<br />GitHub updates</td>
-  </tr>
-  <tr>
-    <td><a href="examples/gpt-5.6-sol-unrestricted.md"><code>gpt-5.6-sol-unrestricted.md</code></a></td>
-    <td align="left">A GPT-5.6 SOL prompt focused on direct execution and bilingual tasks</td>
-    <td align="center">Bundled offline<br />GitHub updates</td>
-  </tr>
-  <tr>
-    <td><a href="examples/%E6%B5%B7%E9%B8%A53.0%E7%A0%B4%E7%94%B2.md"><code>海鸥3.0破甲.md</code></a></td>
-    <td align="left">A Chinese technical-operator persona with routing for coding, CTF, reverse engineering, memory, and protocol work</td>
-    <td align="center">Bundled offline<br />GitHub updates</td>
-  </tr>
-  <tr>
     <td><a href="examples/software-development-maintainer.md"><code>software-development-maintainer.md</code></a></td>
     <td align="left">Long-term maintenance with reuse, minimal changes, safety, testing, and maintainability</td>
     <td align="center">GitHub sync</td>
@@ -266,7 +246,7 @@ A backup is created automatically before every enable or disable action. In addi
 
 ### 5. Session Management: Inspect, Repair, and Permanently Delete
 
-Session lists prefer saved display names and show the first prompt on hover. Windows can browse and export WSL sessions in read-only mode; see the [WSL session guide](docs/WSL_SESSIONS.md) for requirements and limits.
+The session list shows saved names. Hover over a row to preview the first user prompt. On Windows, select the WSL `.codex` directory and click **Check sessions** to browse or export existing conversations. [WSL session guide](docs/WSL_SESSIONS.md)
 
 <table>
   <tr>
@@ -307,44 +287,7 @@ Manage Codex capability extensions from the **Skills & MCP** page instead of sea
   </tr>
 </table>
 
-### 7. Reverse Skills Navigation
-
-<div align="center">
-  <a href="https://yynxxxxx.github.io/Codex-X/">
-    <img src="https://img.shields.io/badge/Codex--X-Online%20Reverse%20Skills%20Guide-0ea5e9?style=for-the-badge&logo=githubpages&logoColor=white" alt="Codex-X Online Reverse Skills Guide" />
-  </a>
-</div>
-
-<br />
-
-<table>
-  <tr>
-    <td width="55%">
-      <b>Online guide</b>: explains the “armor breaking” workflow, how to enable GPT-5.5 / unrestricted jeli in Codex-X, and how to combine it with reverse-engineering Skills.
-      <br /><br />
-      <b>Categories</b>: Android APK / Windows EXE / Web protocol reverse engineering.
-      <br /><br />
-      <b>Includes</b>: Skill purpose, install commands, source links, and recommended workflow.
-    </td>
-    <td width="45%">
-      <ul>
-        <li>🧩 GPT-5.5 / unrestricted jeli workflow</li>
-        <li>📱 Android APK reverse Skills</li>
-        <li>🪟 Windows EXE / DLL reverse Skills</li>
-        <li>🌐 Web / API / protocol reverse Skills</li>
-        <li>📋 One-click copy install commands</li>
-      </ul>
-    </td>
-  </tr>
-</table>
-
-<p align="center">
-  <a href="https://yynxxxxx.github.io/Codex-X/">
-    <b>🚀 Open Codex-X Reverse Skills Guide</b>
-  </a>
-</p>
-
-### 8. Cross-platform desktop app
+### 7. Cross-platform desktop app
 
 - macOS Apple Silicon `.dmg`
 - macOS Intel `.dmg`
@@ -409,14 +352,7 @@ pnpm --dir apps/desktop tauri build
 
 ## Desktop Installation Notes
 
-If you see “app is damaged” when opening an unsigned / unnotarized DMG, this is normal macOS Gatekeeper behavior.
-
-- Best option: sign and notarize with an Apple Developer ID
-- Local testing only: remove the quarantine attribute manually
-
-```bash
-xattr -dr com.apple.quarantine /Applications/Codex-X.app
-```
+The macOS release DMGs are signed and notarized. Choose the Apple Silicon or Intel download for your Mac.
 
 ## License
 

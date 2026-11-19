@@ -66,7 +66,11 @@ const button = (html, label) => {
 
 test("session rows show the name while the initial prompt is the escaped hover text", async () => {
   const html = renderToStaticMarkup(createElement(await sessionPage(), props()));
-  assert.match(html, /<strong title="Initial &lt;prompt&gt;">Renamed session<\/strong>/);
+  assert.match(html, /role="row" title="First prompt: Initial &lt;prompt&gt;"/);
+  assert.match(html, /<strong>Renamed session<\/strong>/);
+  const describedBy = html.match(/aria-describedby="([^"]+)"/);
+  assert.ok(describedBy, "the keyboard-focusable selection control describes the first message");
+  assert.ok(html.includes(`<span id="${describedBy[1]}" hidden="">First prompt: Initial &lt;prompt&gt;</span>`));
   assert.doesNotMatch(button(html, "Sync sessions"), /\sdisabled=/);
   assert.doesNotMatch(button(html, "Delete 1 permanently"), /\sdisabled=/);
 });
@@ -76,8 +80,65 @@ test("WSL read-only preview remains browsable and exportable while sync and dele
   assert.match(html, /WSL sessions · read-only/);
   assert.doesNotMatch(html, /All sessions are synced/);
   assert.match(html, /Renamed session/);
+  assert.match(html, /role="row" title="First prompt: Initial &lt;prompt&gt;"/);
   assert.match(button(html, "Sync sessions"), /\sdisabled=/);
   assert.match(button(html, "Delete 1 permanently"), /\sdisabled=/);
   assert.doesNotMatch(button(html, "Export selected"), /\sdisabled=/);
   assert.doesNotMatch(html, /role="dialog"/);
+});
+
+test("long multiline prompts have bounded escaped previews while absent prompts are not invented", async () => {
+  const Page = await sessionPage();
+  const renderSession = item => renderToStaticMarkup(createElement(Page, props(undefined, {
+    visibleSessions: [item], filteredSessions: [item], allSessionsByCwd: new Map([[item.cwd, [item]]]), groupedSessions: [[item.cwd, [item]]],
+  })));
+  const longPrompt = `First line <&>\n${"x".repeat(1984)}😀tail`;
+  const html = renderSession({ ...session, firstUserMessage: longPrompt });
+  assert.match(html, /role="row" title="First prompt: First line &lt;&amp;&gt;\n/);
+  assert.match(html, /…"/);
+  assert.doesNotMatch(html, /tail|\uFFFD|[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+  assert.match(html, /<strong>Renamed session<\/strong>/);
+  const missing = renderSession({ ...session, firstUserMessage: " \n " });
+  assert.match(missing, /role="row" title="Renamed session"/);
+  assert.doesNotMatch(missing, /First prompt:|aria-describedby=/);
+});
+
+test("syncing and checking hide snapshot warnings while keeping session previews visible", async () => {
+  const Page = await sessionPage();
+  for (const [actionBusy, label] of [["syncSessions", "Syncing..."], ["checkSessions", "Checking..."]]) {
+    const html = renderToStaticMarkup(createElement(Page, props(undefined, {
+      loading: true, actionBusy, sessionSyncCount: 13,
+    })));
+    assert.match(html, /class="cx-session-summary"[^>]*aria-busy="true"/);
+    assert.ok(html.includes(label));
+    assert.doesNotMatch(html, /13 session\(s\) need syncing|cx-session-summary--needs-sync|cx-session-summary--synced|cx-session-row--needs-sync|cx-session-state--warn/);
+    assert.match(html, /<strong>Renamed session<\/strong>/);
+    assert.match(html, /role="row" title="First prompt: Initial &lt;prompt&gt;"/);
+    assert.match(button(html, label), /\sdisabled=/);
+    const previouslySynced = renderToStaticMarkup(createElement(Page, props(undefined, {
+      loading: true, actionBusy, sessionHasMismatches: false, sessionSyncCount: 0,
+    })));
+    assert.doesNotMatch(previouslySynced, /All sessions are synced|cx-session-summary--synced/);
+  }
+});
+
+test("a fresh pending result restores its count and retry action after checking", async () => {
+  const html = renderToStaticMarkup(createElement(await sessionPage(), props()));
+  assert.match(html, /1 session\(s\) need syncing/);
+  assert.match(html, /cx-session-summary--needs-sync/);
+  assert.match(html, /cx-session-row--needs-sync/);
+  assert.match(html, /cx-session-state--warn/);
+  assert.doesNotMatch(button(html, "Check sessions"), /\sdisabled=/);
+  assert.doesNotMatch(button(html, "Sync sessions"), /\sdisabled=/);
+});
+
+test("an unavailable recheck result stays neutral and allows another check", async () => {
+  const html = renderToStaticMarkup(createElement(await sessionPage(), props(undefined, {
+    sessionStatus: null, sessionHasMismatches: false, sessionSyncCount: 0,
+    visibleSessions: [], filteredSessions: [], groupedSessions: [], allSessionsByCwd: new Map(),
+  })));
+  assert.match(html, /Check sessions to get started/);
+  assert.doesNotMatch(html, /All sessions are synced|session\(s\) need syncing|cx-session-summary--synced|cx-session-summary--needs-sync|cx-session-state--warn/);
+  assert.doesNotMatch(button(html, "Check sessions"), /\sdisabled=/);
+  assert.match(button(html, "Sync sessions"), /\sdisabled=/);
 });

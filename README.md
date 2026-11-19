@@ -13,6 +13,11 @@
   一款面向 **OpenAI Codex 桌面端 / Codex CLI** 的跨平台桌面工具。把提示词模板、自定义 Prompt、第三方 API 供应商、会话同步、Skills / MCP 和 TOML 配置都放进可视化界面里，不用反复手改文件。
 
   <p>
+    <a href="https://trendshift.io/repositories/104938"><img src="https://trendshift.io/api/badge/repositories/104938" alt="GitHub Trending Rust 日榜第 2 名" width="250" height="55" /></a><br />
+    <sub><a href="https://github.com/antonkomarev/github-trending-archive/blob/aeea175a90b86aba1844727221cf2aaa8decd908/archive/repository/2026/2026-09-20/rust.json">Rust 日榜第 2 名 · 2026-09-20</a></sub>
+  </p>
+
+  <p>
     <img src="https://img.shields.io/github/v/release/yynxxxxx/Codex-X?label=version&color=blue" alt="version" />
     <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-555" alt="platform" />
     <img src="https://img.shields.io/badge/built%20with-Tauri%202-24C8DB" alt="tauri" />
@@ -59,7 +64,7 @@
   <tr>
     <td align="center" width="50%">
       <b>分类管理</b><br />
-      <sub>把提示词按破甲 / 逆向、软件开发、写作辅助等分类维护</sub><br />
+      <sub>把提示词按软件开发、写作辅助等分类维护</sub><br />
       <img src="docs/screenshots/app/new-ui/prompt-categories.png" alt="Codex-X 提示词分类管理" width="420" />
     </td>
     <td align="center" width="50%">
@@ -141,7 +146,7 @@
 
 Codex-X 现在不只是“几套内置 Prompt”的启动器，而是一个可视化提示词注入与管理工具：
 
-- 按分类管理提示词，例如破甲 / 逆向、软件开发、写作辅助，也可以新增自己的分类
+- 按分类管理提示词，例如软件开发、写作辅助，也可以新增自己的分类
 - 支持同步 GitHub 模板、导入 Markdown、手动添加提示词、编辑标题 / 文件名 / 内容
 - 每个提示词都有独立开关，打开时自动按当前启用方式写入 Codex 指令文件
 - 支持“保留原提示词”和“替换原提示词”两种模式，适合日常叠加或完整切换
@@ -153,31 +158,6 @@ Codex-X 现在不只是“几套内置 Prompt”的启动器，而是一个可�
     <th align="center">模板</th>
     <th align="center">适合场景</th>
     <th align="center">获取方式</th>
-  </tr>
-  <tr>
-    <td><a href="examples/gpt5.5-unrestricted.md"><code>gpt5.5-unrestricted.md</code></a></td>
-    <td align="left">短小通用，适合日常 coding 与常规技术任务</td>
-    <td align="center">离线内置<br />GitHub 更新</td>
-  </tr>
-  <tr>
-    <td><a href="examples/gpt5.4-unrestricted.md"><code>gpt5.4-unrestricted.md</code></a></td>
-    <td align="left">面向 GPT-5.4 / Codex CLI，偏 CTF 与安全研究工作流</td>
-    <td align="center">离线内置<br />GitHub 更新</td>
-  </tr>
-  <tr>
-    <td><a href="examples/gpt5.5-jeli.md"><code>gpt5.5-jeli.md</code></a></td>
-    <td align="left">大白话通用版，提供更完整的工程与逆向执行流程</td>
-    <td align="center">离线内置<br />GitHub 更新</td>
-  </tr>
-  <tr>
-    <td><a href="examples/gpt-5.6-sol-unrestricted.md"><code>gpt-5.6-sol-unrestricted.md</code></a></td>
-    <td align="left">gpt5.6-sol 破甲提示词，偏直接执行与中英文任务</td>
-    <td align="center">离线内置<br />GitHub 更新</td>
-  </tr>
-  <tr>
-    <td><a href="examples/%E6%B5%B7%E9%B8%A53.0%E7%A0%B4%E7%94%B2.md"><code>海鸥3.0破甲.md</code></a></td>
-    <td align="left">中文技术操作员人格，覆盖 coding、CTF、逆向、内存与协议任务路由</td>
-    <td align="center">离线内置<br />GitHub 更新</td>
   </tr>
   <tr>
     <td><a href="examples/software-development-maintainer.md"><code>software-development-maintainer.md</code></a></td>
@@ -245,7 +225,7 @@ Codex-X 现在不只是“几套内置 Prompt”的启动器，而是一个可�
 
 ### 3. 会话管理：同步、检查与永久删除
 
-会话列表优先显示已设置的名称，悬停可看首次提示词。Windows 支持只读查看和导出 WSL 会话，使用条件和限制见 [WSL 会话说明](docs/WSL_SESSIONS.md)。
+会话列表优先显示会话名称，鼠标悬停在会话行上可预览首次提示词。在 Windows 中选择 WSL 的 `.codex` 目录，点击「检查会话」即可查看或导出已有会话。[WSL 会话使用说明](docs/WSL_SESSIONS.md)
 
 <table>
   <tr>
@@ -297,44 +277,7 @@ Codex-X 现在不只是“几套内置 Prompt”的启动器，而是一个可�
 - Provider 编辑页可直接编辑完整 TOML
 - 保存后同步到 Codex 配置目录
 
-### 6. 逆向 Skills 导航
-
-<div align="center">
-  <a href="https://yynxxxxx.github.io/Codex-X/">
-    <img src="https://img.shields.io/badge/Codex--X-在线逆向%20Skills%20导航-0ea5e9?style=for-the-badge&logo=githubpages&logoColor=white" alt="Codex-X 在线逆向 Skills 导航" />
-  </a>
-</div>
-
-<br />
-
-<table>
-  <tr>
-    <td width="55%">
-      <b>在线教程页</b>：解释什么是“破甲”、Codex-X 如何启用 GPT-5.5 / unrestricted jeli、以及如何搭配不同领域的逆向 Skills。
-      <br /><br />
-      <b>分类覆盖</b>：Android APK / Windows EXE / Web 协议逆向。
-      <br /><br />
-      <b>内容包含</b>：Skill 用途、安装方式、来源地址、推荐使用流程。
-    </td>
-    <td width="45%">
-      <ul>
-        <li>🧩 GPT-5.5 / unrestricted jeli 使用流程</li>
-        <li>📱 Android APK 逆向 Skills</li>
-        <li>🪟 Windows EXE / DLL 逆向 Skills</li>
-        <li>🌐 Web / API / 协议逆向 Skills</li>
-        <li>📋 安装命令一键复制</li>
-      </ul>
-    </td>
-  </tr>
-</table>
-
-<p align="center">
-  <a href="https://yynxxxxx.github.io/Codex-X/">
-    <b>🚀 打开 Codex-X 逆向 Skills 导航</b>
-  </a>
-</p>
-
-### 7. 跨平台桌面软件
+### 6. 跨平台桌面软件
 
 - macOS Apple Silicon `.dmg`
 - macOS Intel `.dmg`
@@ -401,14 +344,7 @@ pnpm --dir apps/desktop tauri build
 
 ## 桌面端安装说明
 
-如果你在未签名 / 未公证的 DMG 中看到“软件已损坏”提示，这是 macOS Gatekeeper 的正常行为。
-
-- 最佳方式：使用 Apple Developer ID 签名并 notarize
-- 仅本地测试：可手动移除 quarantine 属性
-
-```bash
-xattr -dr com.apple.quarantine /Applications/Codex-X.app
-```
+macOS 正式版 DMG 已通过 Apple 签名和公证。请按芯片架构选择 Apple Silicon 或 Intel 版本。
 
 ## 许可证
 

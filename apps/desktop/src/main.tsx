@@ -3253,6 +3253,9 @@ function App() {
       return status;
     } catch (sessionError) {
       sessionSyncToastPendingRef.current = false;
+      // The pre-sync snapshot no longer describes the disk after an attempted
+      // mutation. Keep a failed recheck from restoring stale pending/synced UI.
+      invalidateSessionStatus();
       setError(String(sessionError));
       return null;
     } finally {

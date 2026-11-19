@@ -730,6 +730,7 @@ pub(super) struct SqliteDiscovery {
     pub(super) thread_paths: Vec<PathBuf>,
     pub(super) session_paths: Vec<PathBuf>,
     pub(super) related_paths: Vec<PathBuf>,
+    pub(super) catalog_paths: Vec<PathBuf>,
     pub(super) unreadable_paths: Vec<PathBuf>,
     pub(super) active_scan_failures: Vec<String>,
 }
@@ -746,6 +747,14 @@ impl SqliteDiscovery {
     pub(super) fn active_first_related_paths(&self) -> Vec<PathBuf> {
         primary_paths_first(&self.active_paths, &self.related_paths)
     }
+
+    pub(super) fn provider_update_paths(&self) -> Vec<PathBuf> {
+        self.related_paths
+            .iter()
+            .filter(|path| self.thread_paths.contains(path) || self.catalog_paths.contains(path))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -758,6 +767,7 @@ struct DiscoveredSqlite {
     has_threads: bool,
     has_session_tables: bool,
     has_related_tables: bool,
+    has_catalog: bool,
 }
 
 fn is_sqlite_file(path: &Path) -> bool {
@@ -980,6 +990,7 @@ fn discover_sqlite_databases_with_busy_timeout(
                 has_threads,
                 has_session_tables,
                 has_related_tables,
+                has_catalog: tables.contains("local_thread_catalog"),
             });
         }
     }
@@ -995,6 +1006,20 @@ fn discover_sqlite_databases_with_busy_timeout(
         })
         .map(|database| database.path.clone());
 
+    // Stable and development desktop catalogs can coexist after an upgrade.
+    // Only prefer the stable sibling when both schemas are positively known;
+    // keep standalone dev/custom catalogs and catalogs in other directories.
+    let shadowed_dev_catalogs = databases
+        .iter()
+        .filter(|database| {
+            database.has_catalog
+                && database
+                    .path
+                    .file_name()
+                    .is_some_and(|name| name == "codex.db")
+        })
+        .map(|database| database.path.with_file_name("codex-dev.db"))
+        .collect::<HashSet<_>>();
     SqliteDiscovery {
         active_paths: active_path.into_iter().collect(),
         thread_paths: ordered_database_paths(
@@ -1010,6 +1035,11 @@ fn discover_sqlite_databases_with_busy_timeout(
         related_paths: ordered_database_paths(
             &databases,
             |database| database.has_related_tables,
+            |database| database.active_priority,
+        ),
+        catalog_paths: ordered_database_paths(
+            &databases,
+            |database| database.has_catalog && !shadowed_dev_catalogs.contains(&database.path),
             |database| database.active_priority,
         ),
         unreadable_paths,
@@ -1758,8 +1788,12 @@ pub(crate) fn list_session_previews(
     limit: usize,
 ) -> Result<(Vec<SessionPreview>, Vec<String>)> {
     if super::wsl::is_wsl_path(codex_dir) {
-        return super::wsl::session_previews(codex_dir, target_provider, limit)
-            .map(|preview| (preview.sessions, Vec::new()));
+        return super::wsl::session_previews(codex_dir, target_provider, limit).map(
+            |mut preview| {
+                super::export::fill_first_user_messages(codex_dir, &mut preview.sessions);
+                (preview.sessions, preview.warnings)
+            },
+        );
     }
     let discovery = discover_sqlite_databases(codex_dir);
     let (mut sessions, warnings) = list_session_previews_with_paths(
@@ -1773,6 +1807,7 @@ pub(crate) fn list_session_previews(
         &discovery.active_first_related_paths(),
         &mut sessions,
     );
+    super::export::fill_first_user_messages(codex_dir, &mut sessions);
     Ok((sessions, warnings))
 }
 
@@ -2886,6 +2921,45 @@ mod tests {
         assert_eq!(discovery.thread_paths, vec![database]);
 
         let _ = fs::remove_dir_all(codex_dir);
+    }
+
+    #[test]
+    fn provider_catalog_selection_only_shadows_a_verified_stable_sibling() {
+        let codex_dir = temp_codex_dir("provider-catalog-selection");
+        fs::write(
+            codex_dir.join("config.toml"),
+            "sqlite_home = 'session-store'\n",
+        )
+        .unwrap();
+        let stable = codex_dir.join("sqlite/codex.db");
+        let shadowed = codex_dir.join("sqlite/codex-dev.db");
+        let standalone_dev = codex_dir.join("session-store/codex-dev.db");
+        let custom = codex_dir.join("session-store/custom.db");
+        for path in [&stable, &shadowed, &standalone_dev, &custom] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            Connection::open(path).unwrap().execute_batch("CREATE TABLE local_thread_catalog(thread_id TEXT, model_provider TEXT); CREATE TABLE inbox_items(id TEXT);").unwrap();
+        }
+        // A same-name sibling without the catalog schema cannot supersede dev.
+        let noncatalog_stable = codex_dir.join("session-store/codex.db");
+        create_thread_database(&noncatalog_stable, "only-thread", "custom");
+        let discovery = discover_sqlite_databases(&codex_dir);
+        assert!(discovery.catalog_paths.contains(&stable));
+        assert!(discovery.catalog_paths.contains(&standalone_dev));
+        assert!(discovery.catalog_paths.contains(&custom));
+        assert!(!discovery.catalog_paths.contains(&shadowed));
+        assert!(!discovery.catalog_paths.contains(&noncatalog_stable));
+        assert!(discovery.related_paths.contains(&shadowed));
+        assert!(!discovery.provider_update_paths().contains(&shadowed));
+        assert_eq!(
+            discovery.provider_update_paths(),
+            discovery
+                .related_paths
+                .iter()
+                .filter(|path| **path != shadowed)
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        fs::remove_dir_all(codex_dir).unwrap();
     }
 
     #[test]
