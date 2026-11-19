@@ -50,38 +50,81 @@
 
 ## 软件预览
 
-<details open>
-<summary><b>新版 UI：指令提示词管理中心</b></summary>
+以下截图来自 Codex-X v0.3.35，使用 Atlas Studio 演示工作区。点击图片可查看原图。
 
 <p align="center">
-  <img src="docs/screenshots/app/new-ui/prompts.png" alt="Codex-X 新版指令提示词管理界面" width="920" />
+  <a href="docs/screenshots/app/v0.3.35/zh/sessions.webp"><img src="docs/screenshots/app/v0.3.35/zh/sessions.webp" alt="会话管理 · 按项目文件夹浏览历史会话" width="1040" /></a><br />
+  <b>会话管理</b> · 按项目文件夹浏览历史会话
 </p>
 
-</details>
-
-<div align="center">
 <table>
   <tr>
-    <td align="center" width="50%">
-      <b>分类管理</b><br />
-      <sub>把提示词按软件开发、写作辅助等分类维护</sub><br />
-      <img src="docs/screenshots/app/new-ui/prompt-categories.png" alt="Codex-X 提示词分类管理" width="420" />
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/zh/overview.webp"><img src="docs/screenshots/app/v0.3.35/zh/overview.webp" alt="概览 · 查看当前模型、供应商和配置目录" width="480" /></a><br />
+      <b>概览</b><br />
+      <sub>查看当前模型、供应商和配置目录</sub>
     </td>
-    <td align="center" width="50%">
-      <b>自定义提示词</b><br />
-      <sub>直接添加、编辑或导入自己的 Markdown 提示词</sub><br />
-      <img src="docs/screenshots/app/new-ui/prompt-form.png" alt="Codex-X 添加自定义提示词" width="420" />
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/zh/providers.webp"><img src="docs/screenshots/app/v0.3.35/zh/providers.webp" alt="供应商 · 管理官方账号和第三方 API" width="480" /></a><br />
+      <b>供应商</b><br />
+      <sub>管理官方账号和第三方 API</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/zh/prompts.webp"><img src="docs/screenshots/app/v0.3.35/zh/prompts.webp" alt="指令提示词 · 按分类选择和启用提示词" width="480" /></a><br />
+      <b>指令提示词</b><br />
+      <sub>按分类选择和启用提示词</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/zh/usage.webp"><img src="docs/screenshots/app/v0.3.35/zh/usage.webp" alt="用量统计 · 查看近七天的 Token 用量和模型分布" width="480" /></a><br />
+      <b>用量统计</b><br />
+      <sub>查看近七天的 Token 用量和模型分布</sub>
     </td>
   </tr>
 </table>
-</div>
 
 <details>
-<summary><b>Skills / MCP 可视化管理</b></summary>
+<summary><b>展开查看 Skills、MCP、TOML、路由、设置和关于</b></summary>
 
-<p align="center">
-  <img src="docs/screenshots/app/new-ui/skills-mcp.png" alt="Codex-X Skills 与 MCP 管理界面" width="920" />
-</p>
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/zh/skills.webp"><img src="docs/screenshots/app/v0.3.35/zh/skills.webp" alt="Skills · 查看和启用工作区技能" width="480" /></a><br />
+      <b>Skills</b><br />
+      <sub>查看和启用工作区技能</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/zh/mcp.webp"><img src="docs/screenshots/app/v0.3.35/zh/mcp.webp" alt="MCP · 管理本地与远程 MCP 服务" width="480" /></a><br />
+      <b>MCP</b><br />
+      <sub>管理本地与远程 MCP 服务</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/zh/toml.webp"><img src="docs/screenshots/app/v0.3.35/zh/toml.webp" alt="TOML · 查看当前生效的配置" width="480" /></a><br />
+      <b>TOML</b><br />
+      <sub>查看当前生效的配置</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/zh/routing.webp"><img src="docs/screenshots/app/v0.3.35/zh/routing.webp" alt="路由与故障转移 · 查看主备供应商的优先级和状态" width="480" /></a><br />
+      <b>路由与故障转移</b><br />
+      <sub>查看主备供应商的优先级和状态</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/zh/settings.webp"><img src="docs/screenshots/app/v0.3.35/zh/settings.webp" alt="通用设置 · 切换语言并查看环境检查结果" width="480" /></a><br />
+      <b>通用设置</b><br />
+      <sub>切换语言并查看环境检查结果</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/zh/about.webp"><img src="docs/screenshots/app/v0.3.35/zh/about.webp" alt="关于 · 查看版本和更新状态" width="480" /></a><br />
+      <b>关于</b><br />
+      <sub>查看版本和更新状态</sub>
+    </td>
+  </tr>
+</table>
 
 </details>
 

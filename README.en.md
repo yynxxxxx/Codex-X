@@ -49,63 +49,81 @@ You can use it to:
 
 ## Preview
 
-<details open>
-<summary><b>App preview</b>: Home / Provider / TOML / Auth</summary>
+These screenshots show Codex-X v0.3.35 with the Atlas Studio demo workspace. Select an image to view it at full size.
 
 <p align="center">
-  <img src="docs/screenshots/app/preview.png" alt="Codex-X app preview: Home, Provider, TOML, Auth" width="920" />
+  <a href="docs/screenshots/app/v0.3.35/en/sessions.webp"><img src="docs/screenshots/app/v0.3.35/en/sessions.webp" alt="Sessions — Browse conversations by project folder" width="1040" /></a><br />
+  <b>Sessions</b> · Browse conversations by project folder
 </p>
 
-</details>
-
-<details>
-<summary><b>Prompt injection results: security testing scenarios</b></summary>
-
-<div align="center">
 <table>
   <tr>
-    <td align="center" width="50%">
-      <b>SQL Injection Testing</b><br />
-      <sub>Post-deployment test: how to perform SQL injection testing against a target?</sub><br />
-      <img src="docs/screenshots/prompt-effects/security/sql-injection.png" alt="SQL injection testing result" width="420" />
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/en/overview.webp"><img src="docs/screenshots/app/v0.3.35/en/overview.webp" alt="Overview — See the active model, provider, and configuration directory" width="480" /></a><br />
+      <b>Overview</b><br />
+      <sub>See the active model, provider, and configuration directory</sub>
     </td>
-    <td align="center" width="50%">
-      <b>NSFW Response Test</b><br />
-      <sub>Observe boundary response changes after prompt injection</sub><br />
-      <img src="docs/screenshots/prompt-effects/security/nsfw.png" alt="NSFW response test result" width="420" />
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/en/providers.webp"><img src="docs/screenshots/app/v0.3.35/en/providers.webp" alt="Providers — Manage official accounts and third-party APIs" width="480" /></a><br />
+      <b>Providers</b><br />
+      <sub>Manage official accounts and third-party APIs</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/en/prompts.webp"><img src="docs/screenshots/app/v0.3.35/en/prompts.webp" alt="Prompts — Organize templates and enable a prompt" width="480" /></a><br />
+      <b>Prompts</b><br />
+      <sub>Organize templates and enable a prompt</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/en/usage.webp"><img src="docs/screenshots/app/v0.3.35/en/usage.webp" alt="Usage statistics — Explore seven days of token usage by model" width="480" /></a><br />
+      <b>Usage statistics</b><br />
+      <sub>Explore seven days of token usage by model</sub>
     </td>
   </tr>
 </table>
-</div>
-
-</details>
 
 <details>
-<summary><b>Prompt injection results: reverse engineering scenarios</b></summary>
+<summary><b>Show Skills, MCP, TOML, routing, settings, and About</b></summary>
 
-<div align="center">
 <table>
   <tr>
-    <td align="center" width="50%">
-      <b>APK Reverse Engineering</b><br />
-      <sub>Static / dynamic analysis workflow for Android APKs</sub><br />
-      <img src="docs/screenshots/prompt-effects/reverse/apk-reverse-1.png" alt="APK reverse engineering result" width="420" />
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/en/skills.webp"><img src="docs/screenshots/app/v0.3.35/en/skills.webp" alt="Skills — Browse and enable workspace skills" width="480" /></a><br />
+      <b>Skills</b><br />
+      <sub>Browse and enable workspace skills</sub>
     </td>
-    <td align="center" width="50%">
-      <b>APK Reverse Engineering 2</b><br />
-      <sub>Additional APK reverse workflow and locating methods</sub><br />
-      <img src="docs/screenshots/prompt-effects/reverse/apk-reverse-2.png" alt="APK reverse engineering result 2" width="420" />
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/en/mcp.webp"><img src="docs/screenshots/app/v0.3.35/en/mcp.webp" alt="MCP — Manage local and remote MCP servers" width="480" /></a><br />
+      <b>MCP</b><br />
+      <sub>Manage local and remote MCP servers</sub>
     </td>
   </tr>
   <tr>
-    <td align="center" colspan="2">
-      <b>EXE Reverse Engineering</b><br />
-      <sub>Windows executable analysis and debugging directions</sub><br />
-      <img src="docs/screenshots/prompt-effects/reverse/exe-reverse.png" alt="EXE reverse engineering result" width="620" />
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/en/toml.webp"><img src="docs/screenshots/app/v0.3.35/en/toml.webp" alt="TOML — Inspect the active configuration" width="480" /></a><br />
+      <b>TOML</b><br />
+      <sub>Inspect the active configuration</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/en/routing.webp"><img src="docs/screenshots/app/v0.3.35/en/routing.webp" alt="Routing &amp; failover — See provider priority and failover status" width="480" /></a><br />
+      <b>Routing &amp; failover</b><br />
+      <sub>See provider priority and failover status</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/en/settings.webp"><img src="docs/screenshots/app/v0.3.35/en/settings.webp" alt="General settings — Choose the interface language and check the environment" width="480" /></a><br />
+      <b>General settings</b><br />
+      <sub>Choose the interface language and check the environment</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/screenshots/app/v0.3.35/en/about.webp"><img src="docs/screenshots/app/v0.3.35/en/about.webp" alt="About — Check the installed version and update status" width="480" /></a><br />
+      <b>About</b><br />
+      <sub>Check the installed version and update status</sub>
     </td>
   </tr>
 </table>
-</div>
 
 </details>
 
