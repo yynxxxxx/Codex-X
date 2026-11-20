@@ -16,7 +16,7 @@
     <a href="https://github.com/antonkomarev/github-trending-archive/blob/80b65ba24e649d0a2ce2c6bad776ce1284312a4a/archive/repository/2026/2026-09-22/%28null%29.json" title="GitHub Trending 全球日榜第 12 名（2026-09-22）"><img src="https://img.shields.io/badge/GitHub%20Trending-Global%20%2312-24292f?logo=github&amp;logoColor=white" alt="GitHub Trending 全球日榜第 12 名（2026-09-22）" width="210" align="middle" /></a>
     &nbsp;
     <a href="https://trendshift.io/repositories/104938"><img src="https://trendshift.io/api/badge/repositories/104938" alt="GitHub Trending Rust 日榜第 2 名" width="210" align="middle" /></a><br />
-    <sub><a href="https://github.com/antonkomarev/github-trending-archive/blob/aeea175a90b86aba1844727221cf2aaa8decd908/archive/repository/2026/2026-09-20/rust.json">Rust 日榜第 2 · 2026-09-20</a> · <a href="https://github.com/hanishrao/trending-collection/blob/5e670f30866729b5a3b2c8e550836cca5f69de98/api/weekly/rust.json#L19">Rust 周榜第 2 · 2026-09-27，当周新增 623 Stars</a></sub>
+    <sub><a href="https://github.com/antonkomarev/github-trending-archive/blob/aeea175a90b86aba1844727221cf2aaa8decd908/archive/repository/2026/2026-09-20/rust.json">Rust 日榜第 2 · 2026-09-20</a> · <a href="https://github.com/hanishrao/trending-collection/blob/5e670f30866729b5a3b2c8e550836cca5f69de98/api/weekly/rust.json#L19">Rust 周榜第 2 · 2026-09-27</a></sub>
   </p>
 
   <p>
