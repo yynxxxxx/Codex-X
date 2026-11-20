@@ -166,6 +166,19 @@ These screenshots show Codex-X v0.3.35 with the Atlas Studio demo workspace. Sel
 </table>
 </div>
 
+## Community
+
+Scan either code with QQ to join an AI technology discussion group.
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center"><b>QQ discussion group 1</b><br /><a href="docs/community/qq-group-1.png"><img src="docs/community/qq-group-1.png" alt="QQ discussion group 1 QR code" width="240" /></a></td>
+      <td align="center"><b>QQ discussion group 2</b><br /><a href="docs/community/qq-group-2.png"><img src="docs/community/qq-group-2.png" alt="QQ discussion group 2 QR code" width="240" /></a></td>
+    </tr>
+  </table>
+</div>
+
 ## Highlights
 
 ### 1. Prompt Template Center

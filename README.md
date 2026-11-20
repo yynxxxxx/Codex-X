@@ -171,6 +171,19 @@
 </table>
 </div>
 
+## 交流
+
+用 QQ 扫描任一二维码，加入 AI 技术交流群。
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center"><b>QQ AI 技术交流群 1</b><br /><a href="docs/community/qq-group-1.png"><img src="docs/community/qq-group-1.png" alt="QQ AI 技术交流群 1 二维码" width="240" /></a></td>
+      <td align="center"><b>QQ AI 技术交流群 2</b><br /><a href="docs/community/qq-group-2.png"><img src="docs/community/qq-group-2.png" alt="QQ AI 技术交流群 2 二维码" width="240" /></a></td>
+    </tr>
+  </table>
+</div>
+
 ## 核心亮点
 
 ### 1. 可视化提示词注入中心
